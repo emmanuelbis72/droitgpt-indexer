@@ -1,7 +1,6 @@
 {
   "name": "droitgpt-indexer",
   "version": "1.0.0",
-  "description": "Indexer des documents juridiques dans Supabase avec Langchain",
   "type": "module",
   "main": "src/indexer.js",
   "scripts": {
@@ -9,10 +8,7 @@
   },
   "dependencies": {
     "dotenv": "^16.3.1",
-    "fs": "^0.0.1-security",
     "@supabase/supabase-js": "^2.39.5",
-    "langchain": "0.1.40",
-    "@langchain/community": "^0.0.5",
-    "@langchain/openai": "^0.0.8"
+    "langchain": "0.0.189"
   }
 }
