@@ -1,14 +1,14 @@
 {
   "name": "droitgpt-indexer",
   "version": "1.0.0",
-  "type": "module",
-  "main": "src/indexer.js",
+  "main": "indexer.js",
   "scripts": {
     "start": "node indexer.js"
   },
   "dependencies": {
-    "dotenv": "^16.3.1",
-    "@supabase/supabase-js": "^2.39.5",
-    "langchain": "0.0.189"
+    "openai": "^4.21.0",
+    "langchain": "^0.1.14",
+    "dotenv": "^16.4.5",
+    "supabase": "^2.39.6"
   }
 }
