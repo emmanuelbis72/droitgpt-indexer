@@ -1,9 +1,9 @@
 {
   "name": "droitgpt-indexer",
   "version": "1.0.0",
-  "main": "indexer.js",
+  "main": "src/indexer.js",
   "scripts": {
-    "start": "node indexer.js"
+    "start": "node src/indexer.js"
   },
   "dependencies": {
     "openai": "^4.21.0",
