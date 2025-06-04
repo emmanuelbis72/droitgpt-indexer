@@ -9,6 +9,6 @@
     "openai": "^4.21.0",
     "langchain": "^0.1.14",
     "dotenv": "^16.4.5",
-    "supabase": "^2.39.6"
+    "@supabase/supabase-js": "^2.39.6"
   }
 }
