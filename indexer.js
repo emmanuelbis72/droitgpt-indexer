@@ -1,36 +1,37 @@
-import 'dotenv/config';
-import fs from 'fs';
-import path from 'path';
-import { fileURLToPath } from 'url';
-import { SupabaseVectorStore } from "langchain/community/vectorstores/supabase";
-import { OpenAIEmbeddings } from "langchain/community/embeddings/openai";
-import { createClient } from "@supabase/supabase-js";
-import { DirectoryLoader, TextLoader } from "langchain/document_loaders/fs/directory";
+import { SupabaseVectorStore } from "langchain/vectorstores/supabase";
+import { OpenAIEmbeddings } from "langchain/embeddings/openai";
+import { DirectoryLoader } from "langchain/document_loaders/fs/directory";
+import { TextLoader } from "langchain/document_loaders/fs/text";
+import dotenv from "dotenv";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+dotenv.config();
 
-const directoryPath = path.join(__dirname, 'docs');
-
-console.log("📁 Indexation de tous les fichiers dans './docs'...");
-
-const loader = new DirectoryLoader(directoryPath, {
+const loader = new DirectoryLoader("./docs", {
   ".txt": (path) => new TextLoader(path),
-  ".md": (path) => new TextLoader(path)
 });
 
-const docs = await loader.load();
-console.log(`✅ ${docs.length} documents chargés`);
+async function main() {
+  console.log("📂 Indexation de tous les fichiers dans './docs'...");
+  const docs = await loader.load();
 
-const client = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
-
-try {
-  await SupabaseVectorStore.fromDocuments(docs, new OpenAIEmbeddings(), {
-    client,
-    tableName: "documents"
+  const embeddings = new OpenAIEmbeddings({
+    openAIApiKey: process.env.OPENAI_API_KEY,
   });
+
+  const client = createClient(
+    process.env.SUPABASE_URL,
+    process.env.SUPABASE_ANON_KEY
+  );
+
+  const store = await SupabaseVectorStore.fromDocuments(docs, embeddings, {
+    client,
+    tableName: "documents",
+    queryName: "match_documents",
+  });
+
   console.log("✅ Indexation terminée avec succès !");
-} catch (error) {
-  console.error("❌ Erreur d'indexation :", error.message);
-  process.exit(1);
 }
+
+main().catch((err) => {
+  console.error("❌ Erreur d'indexation :", err);
+});
