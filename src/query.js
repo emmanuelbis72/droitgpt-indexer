@@ -3,9 +3,8 @@ import express from 'express';
 import cors from 'cors';
 import { createClient } from '@supabase/supabase-js';
 import * as dotenv from 'dotenv';
-import { OpenAIEmbeddings } from 'langchain/embeddings/openai';
-import { SupabaseVectorStore } from 'langchain/vectorstores/supabase';
-import { ChatOpenAI } from 'langchain/chat_models/openai';
+import { OpenAIEmbeddings, ChatOpenAI } from '@langchain/openai';
+import { SupabaseVectorStore } from '@langchain/community/vectorstores/supabase';
 
 dotenv.config();
 const app = express();
