@@ -1,0 +1,19 @@
+
+{
+  "name": "droitgpt-api",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "src/query.js",
+  "scripts": {
+    "start": "node src/query.js"
+  },
+  "dependencies": {
+    "@langchain/openai": "^0.0.6",
+    "@langchain/community": "^0.0.12",
+    "openai": "^4.21.0",
+    "dotenv": "^16.4.5",
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "@supabase/supabase-js": "^2.39.6"
+  }
+}
