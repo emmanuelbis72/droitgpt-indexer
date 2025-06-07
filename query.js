@@ -1,8 +1,3 @@
-// Route d'accueil pour test rapide
-app.get('/', (req, res) => {
-  res.send('✅ API DroitGPT est en ligne et fonctionne.');
-});
-// query.js
 import express from 'express';
 import cors from 'cors';
 import { config } from 'dotenv';
@@ -15,6 +10,11 @@ config(); // Charge les variables d'environnement
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+// ✅ Route GET / pour test rapide sur Render
+app.get('/', (req, res) => {
+  res.send('✅ API DroitGPT est en ligne et fonctionne.');
+});
 
 // Initialisation Supabase + Embeddings
 const client = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
@@ -42,7 +42,7 @@ app.post('/ask', async (req, res) => {
     ]);
     res.json({ answer: response.text });
   } catch (err) {
-    console.error("❌ Erreur complète :", err); // Affiche l'erreur exacte dans les logs Render
+    console.error("❌ Erreur complète :", err);
     res.status(500).json({ error: 'Erreur de traitement' });
   }
 });
