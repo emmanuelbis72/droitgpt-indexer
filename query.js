@@ -1,3 +1,7 @@
+// Route d'accueil pour test rapide
+app.get('/', (req, res) => {
+  res.send('✅ API DroitGPT est en ligne et fonctionne.');
+});
 // query.js
 import express from 'express';
 import cors from 'cors';
