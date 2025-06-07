@@ -5,20 +5,27 @@ import { createClient } from '@supabase/supabase-js';
 import { SupabaseVectorStore } from '@langchain/community/vectorstores/supabase';
 import { OpenAIEmbeddings, ChatOpenAI } from '@langchain/openai';
 
-config(); // Charge les variables d'environnement
+// 🔐 Chargement des variables d’environnement (.env)
+config();
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// ✅ Route GET / pour test rapide sur Render
+// ✅ Route de test pour Render : GET /
 app.get('/', (req, res) => {
   res.send('✅ API DroitGPT est en ligne et fonctionne.');
 });
 
-// Initialisation Supabase + Embeddings
-const client = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
-const embeddings = new OpenAIEmbeddings({ openAIApiKey: process.env.OPENAI_API_KEY });
+// ⚙️ Initialisation de Supabase + Embeddings
+const client = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_ANON_KEY
+);
+
+const embeddings = new OpenAIEmbeddings({
+  openAIApiKey: process.env.OPENAI_API_KEY,
+});
 
 const vectorStore = new SupabaseVectorStore(embeddings, {
   client,
@@ -26,20 +33,26 @@ const vectorStore = new SupabaseVectorStore(embeddings, {
   queryName: 'match_documents',
 });
 
-const model = new ChatOpenAI({ temperature: 0, openAIApiKey: process.env.OPENAI_API_KEY });
+const model = new ChatOpenAI({
+  temperature: 0,
+  openAIApiKey: process.env.OPENAI_API_KEY,
+});
 
+// 🔎 Endpoint POST /ask
 app.post('/ask', async (req, res) => {
   const { question } = req.body;
 
   try {
     const results = await vectorStore.similaritySearch(question, 3);
     const context = results.map(doc => doc.pageContent).join('\n');
+
     const response = await model.call([
       {
         role: 'user',
-        content: `Réponds à la question suivante en te basant sur les documents :\n${context}\n\nQuestion : ${question}`
+        content: `Réponds à la question suivante en te basant sur les documents suivants :\n${context}\n\nQuestion : ${question}`
       }
     ]);
+
     res.json({ answer: response.text });
   } catch (err) {
     console.error("❌ Erreur complète :", err);
@@ -47,5 +60,8 @@ app.post('/ask', async (req, res) => {
   }
 });
 
+// 🚀 Démarrage serveur
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`✅ Serveur lancé sur http://localhost:${PORT}`));
+app.listen(PORT, () => {
+  console.log(`✅ Serveur lancé sur http://localhost:${PORT}`);
+});
