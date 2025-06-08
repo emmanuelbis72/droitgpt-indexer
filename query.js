@@ -1,67 +1,61 @@
 import express from 'express';
 import cors from 'cors';
 import { config } from 'dotenv';
-import { createClient } from '@supabase/supabase-js';
-import { SupabaseVectorStore } from '@langchain/community/vectorstores/supabase';
+import { QdrantClient } from '@qdrant/js-client-rest';
 import { OpenAIEmbeddings, ChatOpenAI } from '@langchain/openai';
+import { QdrantVectorStore } from '@langchain/community/vectorstores/qdrant';
+import getPort from 'get-port';
 
-// 🔐 Chargement des variables d’environnement (.env)
 config();
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// ✅ Route de test pour Render : GET /
 app.get('/', (req, res) => {
-  res.send('✅ API DroitGPT est en ligne et fonctionne.');
+  res.send('✅ API DroitGPT + Qdrant est en ligne');
 });
 
-// ⚙️ Initialisation de Supabase + Embeddings
-const client = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_ANON_KEY
-);
-
-const embeddings = new OpenAIEmbeddings({
-  openAIApiKey: process.env.OPENAI_API_KEY,
+const client = new QdrantClient({
+  url: process.env.QDRANT_URL,
+  apiKey: process.env.QDRANT_API_KEY,
 });
 
-const vectorStore = new SupabaseVectorStore(embeddings, {
+const embeddings = new OpenAIEmbeddings({ openAIApiKey: process.env.OPENAI_API_KEY });
+
+const COLLECTION_NAME = 'documents';
+
+const vectorStore = await QdrantVectorStore.fromExistingCollection(embeddings, {
   client,
-  tableName: 'documents',
-  queryName: 'match_documents',
+  collectionName: COLLECTION_NAME,
 });
 
-const model = new ChatOpenAI({
-  temperature: 0,
-  openAIApiKey: process.env.OPENAI_API_KEY,
-});
+const model = new ChatOpenAI({ temperature: 0, openAIApiKey: process.env.OPENAI_API_KEY });
 
-// 🔎 Endpoint POST /ask
 app.post('/ask', async (req, res) => {
   const { question } = req.body;
+  console.log('❓ Question reçue :', question);
 
   try {
     const results = await vectorStore.similaritySearch(question, 3);
     const context = results.map(doc => doc.pageContent).join('\n');
 
-    const response = await model.call([
+    const response = await model.invoke([
       {
         role: 'user',
         content: `Réponds à la question suivante en te basant sur les documents suivants :\n${context}\n\nQuestion : ${question}`
       }
     ]);
 
-    res.json({ answer: response.text });
+    res.json({ answer: response });
   } catch (err) {
-    console.error("❌ Erreur complète :", err);
-    res.status(500).json({ error: 'Erreur de traitement' });
+    console.error('❌ Erreur serveur :', err);
+    res.status(500).json({ error: 'Erreur serveur', details: err.message });
   }
 });
 
-// 🚀 Démarrage serveur
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`✅ Serveur lancé sur http://localhost:${PORT}`);
+getPort().then((PORT) => {
+  app.listen(PORT, () => {
+    console.log(`🚀 Serveur lancé sur http://localhost:${PORT}`);
+  });
 });
