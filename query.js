@@ -2,7 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import { config } from 'dotenv';
 import { QdrantClient } from '@qdrant/js-client-rest';
-import { OpenAI } from 'openai';
+import OpenAI from 'openai'; // ✅ Import sans accolades
 import getPort from 'get-port';
 
 config();
@@ -14,18 +14,18 @@ app.get('/', (req, res) => {
   res.send('✅ API DroitGPT + Qdrant est en ligne');
 });
 
-// 🔗 Qdrant client
+// Qdrant client
 const client = new QdrantClient({
   url: process.env.QDRANT_URL,
   apiKey: process.env.QDRANT_API_KEY,
 });
 
-// 🔑 OpenAI client
+// ✅ OpenAI client (sans `apiKey:`, mais `apiKey` directement)
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-// 🔍 Endpoint POST /ask
+// Endpoint
 app.post('/ask', async (req, res) => {
   const { question } = req.body;
 
@@ -34,7 +34,6 @@ app.post('/ask', async (req, res) => {
   }
 
   try {
-    // 🧠 Embedding de la question
     const embeddingResponse = await openai.embeddings.create({
       input: question,
       model: 'text-embedding-ada-002',
@@ -42,26 +41,18 @@ app.post('/ask', async (req, res) => {
 
     const embedding = embeddingResponse.data[0].embedding;
 
-    // 🔍 Recherche vectorielle dans Qdrant
     const searchResult = await client.search('documents', {
       vector: embedding,
       limit: 3,
       with_payload: true,
     });
 
-    console.log('📦 Résultat Qdrant :');
-    searchResult.forEach(doc => {
-      console.log(`📄 Score: ${doc.score.toFixed(5)} | Extrait: ${doc.payload?.content?.slice(0, 100)}...\n`);
-    });
-
     if (!searchResult || searchResult.length === 0) {
       return res.status(200).json({ error: 'Aucun document pertinent trouvé.' });
     }
 
-    // 📚 Contexte à partir des documents trouvés
     const context = searchResult.map(doc => doc.payload?.content || '').join('\n');
 
-    // 💬 Réponse avec OpenAI Chat
     const completion = await openai.chat.completions.create({
       model: 'gpt-3.5-turbo',
       messages: [
@@ -79,14 +70,13 @@ app.post('/ask', async (req, res) => {
 
     const answer = completion.choices[0].message.content;
     res.status(200).json({ answer });
-
   } catch (err) {
     console.error('❌ Erreur serveur :', err);
     res.status(500).json({ error: 'Erreur serveur', details: err.message });
   }
 });
 
-// 🚀 Lancement dynamique
+// Port dynamique
 getPort().then((PORT) => {
   app.listen(PORT, () => {
     console.log(`🚀 Serveur lancé sur http://localhost:${PORT}`);
