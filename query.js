@@ -2,12 +2,10 @@ import express from 'express';
 import cors from 'cors';
 import { config } from 'dotenv';
 import { QdrantClient } from '@qdrant/js-client-rest';
-import { OpenAIEmbeddings, ChatOpenAI } from '@langchain/openai';
-import { QdrantVectorStore } from '@langchain/community/vectorstores/qdrant';
+import { OpenAI } from 'openai';
 import getPort from 'get-port';
 
 config();
-
 const app = express();
 app.use(cors());
 app.use(express.json());
@@ -16,44 +14,79 @@ app.get('/', (req, res) => {
   res.send('✅ API DroitGPT + Qdrant est en ligne');
 });
 
+// 🔗 Qdrant client
 const client = new QdrantClient({
   url: process.env.QDRANT_URL,
   apiKey: process.env.QDRANT_API_KEY,
 });
 
-const embeddings = new OpenAIEmbeddings({ openAIApiKey: process.env.OPENAI_API_KEY });
-
-const COLLECTION_NAME = 'documents';
-
-const vectorStore = await QdrantVectorStore.fromExistingCollection(embeddings, {
-  client,
-  collectionName: COLLECTION_NAME,
+// 🔑 OpenAI client
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
 });
 
-const model = new ChatOpenAI({ temperature: 0, openAIApiKey: process.env.OPENAI_API_KEY });
-
+// 🔍 Endpoint POST /ask
 app.post('/ask', async (req, res) => {
   const { question } = req.body;
-  console.log('❓ Question reçue :', question);
+
+  if (!question) {
+    return res.status(400).json({ error: 'Veuillez fournir une question.' });
+  }
 
   try {
-    const results = await vectorStore.similaritySearch(question, 3);
-    const context = results.map(doc => doc.pageContent).join('\n');
+    // 🧠 Embedding de la question
+    const embeddingResponse = await openai.embeddings.create({
+      input: question,
+      model: 'text-embedding-ada-002',
+    });
 
-    const response = await model.invoke([
-      {
-        role: 'user',
-        content: `Réponds à la question suivante en te basant sur les documents suivants :\n${context}\n\nQuestion : ${question}`
-      }
-    ]);
+    const embedding = embeddingResponse.data[0].embedding;
 
-    res.json({ answer: response });
+    // 🔍 Recherche vectorielle dans Qdrant
+    const searchResult = await client.search('documents', {
+      vector: embedding,
+      limit: 3,
+      with_payload: true,
+    });
+
+    console.log('📦 Résultat Qdrant :');
+    searchResult.forEach(doc => {
+      console.log(`📄 Score: ${doc.score.toFixed(5)} | Extrait: ${doc.payload?.content?.slice(0, 100)}...\n`);
+    });
+
+    if (!searchResult || searchResult.length === 0) {
+      return res.status(200).json({ error: 'Aucun document pertinent trouvé.' });
+    }
+
+    // 📚 Contexte à partir des documents trouvés
+    const context = searchResult.map(doc => doc.payload?.content || '').join('\n');
+
+    // 💬 Réponse avec OpenAI Chat
+    const completion = await openai.chat.completions.create({
+      model: 'gpt-3.5-turbo',
+      messages: [
+        {
+          role: 'system',
+          content: "Tu es un assistant juridique spécialisé dans le droit congolais. Réponds uniquement à partir des documents suivants.",
+        },
+        {
+          role: 'user',
+          content: `Voici les documents :\n${context}\n\nQuestion : ${question}`,
+        },
+      ],
+      temperature: 0.3,
+    });
+
+    const answer = completion.choices[0].message.content;
+    res.status(200).json({ answer });
+
   } catch (err) {
     console.error('❌ Erreur serveur :', err);
     res.status(500).json({ error: 'Erreur serveur', details: err.message });
   }
 });
 
+// 🚀 Lancement dynamique
 getPort().then((PORT) => {
   app.listen(PORT, () => {
     console.log(`🚀 Serveur lancé sur http://localhost:${PORT}`);

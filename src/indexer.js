@@ -1,25 +1,28 @@
-
 import fs from 'fs';
 import path from 'path';
+import { fileURLToPath } from 'url';
+import { dirname } from 'path';
 import { RecursiveCharacterTextSplitter } from 'langchain/text_splitter';
 import { OpenAIEmbeddings } from '@langchain/openai';
-import { SupabaseVectorStore } from '@langchain/community/vectorstores/supabase';
-import { createClient } from '@supabase/supabase-js';
-import * as dotenv from 'dotenv';
+import { QdrantVectorStore } from '@langchain/community/vectorstores/qdrant';
+import { QdrantClient } from '@qdrant/js-client-rest';
+import dotenv from 'dotenv';
 
 dotenv.config();
 
-const directoryPath = './docs';
+// Résolution correcte du chemin (ESM)
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+const directoryPath = path.join(__dirname, '../docs');
 
-const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseKey = process.env.SUPABASE_ANON_KEY;
+const client = new QdrantClient({
+  url: process.env.QDRANT_URL,
+  apiKey: process.env.QDRANT_API_KEY,
+});
 
-if (!supabaseUrl || !supabaseKey) {
-  console.error("❌ Les variables SUPABASE_URL ou SUPABASE_ANON_KEY sont manquantes dans le .env");
-  process.exit(1);
-}
-
-const client = createClient(supabaseUrl, supabaseKey);
+const embeddings = new OpenAIEmbeddings({
+  openAIApiKey: process.env.OPENAI_API_KEY,
+});
 
 async function main() {
   try {
@@ -56,15 +59,14 @@ async function main() {
 
     console.log(`🧩 ${texts.length} segments générés. Indexation en cours...`);
 
-    await SupabaseVectorStore.fromDocuments(texts, new OpenAIEmbeddings(), {
+    await QdrantVectorStore.fromDocuments(texts, embeddings, {
       client,
-      tableName: 'documents',
-      queryName: 'match_documents',
+      collectionName: 'documents',
     });
 
-    console.log("✅ Indexation terminée avec succès !");
+    console.log('✅ Indexation terminée avec succès dans Qdrant.');
   } catch (error) {
-    console.error("❌ Erreur pendant l'indexation :", error);
+    console.error('❌ Erreur pendant l\'indexation :', error);
   }
 }
 
