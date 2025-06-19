@@ -2,8 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import { config } from 'dotenv';
 import { QdrantClient } from '@qdrant/js-client-rest';
-import OpenAI from 'openai'; // ✅ bon import pour v5
-import getPort from 'get-port';
+import OpenAI from 'openai';
 
 config();
 const app = express();
@@ -41,7 +40,7 @@ app.post('/ask', async (req, res) => {
 
     const embedding = embeddingResponse.data[0].embedding;
 
-    // 2. Search in Qdrant
+    // 2. Recherche vectorielle Qdrant
     const searchResult = await client.search('documents', {
       vector: embedding,
       limit: 3,
@@ -54,7 +53,7 @@ app.post('/ask', async (req, res) => {
 
     const context = searchResult.map(doc => doc.payload?.content || '').join('\n');
 
-    // 3. Call OpenAI Chat
+    // 3. Appel OpenAI Chat
     const chatResponse = await openai.chat.completions.create({
       model: 'gpt-3.5-turbo',
       messages: [
@@ -72,8 +71,8 @@ app.post('/ask', async (req, res) => {
   }
 });
 
+// ✅ Démarrage fixe avec PORT Render-compatible
 const PORT = process.env.PORT || 3000;
-
 app.listen(PORT, () => {
   console.log(`🚀 Serveur lancé sur http://localhost:${PORT}`);
 });
