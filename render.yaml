@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: droitgpt-api
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node query.js
+    rootDir: .
+    autoDeploy: true
+    branch: main
+    envVars:
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: QDRANT_URL
+        sync: false
+      - key: QDRANT_API_KEY
+        sync: false
