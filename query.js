@@ -5,74 +5,86 @@ import { QdrantClient } from '@qdrant/js-client-rest';
 import OpenAI from 'openai';
 
 config();
+
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-app.get('/', (req, res) => {
-  res.send('✅ API DroitGPT + Qdrant est en ligne');
-});
-
-// 🧠 Qdrant
-const client = new QdrantClient({
+// Qdrant client
+const qdrant = new QdrantClient({
   url: process.env.QDRANT_URL,
   apiKey: process.env.QDRANT_API_KEY,
 });
 
-// 🔑 OpenAI
+// OpenAI client
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-app.post('/ask', async (req, res) => {
-  const { question } = req.body;
+// Vérification de l'API
+app.get('/', (req, res) => {
+  res.send('✅ API DroitGPT + Qdrant est en ligne');
+});
 
-  if (!question) {
-    return res.status(400).json({ error: 'Veuillez fournir une question.' });
+// Point d'accès principal
+app.post('/ask', async (req, res) => {
+  const { messages } = req.body;
+
+  if (!messages || !messages.length) {
+    return res.status(400).json({ error: 'Aucun message fourni.' });
+  }
+
+  const lastUserMessage = messages[messages.length - 1]?.text;
+  if (!lastUserMessage) {
+    return res.status(400).json({ error: 'Dernier message utilisateur manquant.' });
   }
 
   try {
-    // 1. Embedding
+    // Générer l'embedding
     const embeddingResponse = await openai.embeddings.create({
-      input: question,
+      input: lastUserMessage,
       model: 'text-embedding-ada-002',
     });
 
     const embedding = embeddingResponse.data[0].embedding;
 
-    // 2. Recherche vectorielle Qdrant
-    const searchResult = await client.search('documents', {
+    // Recherche dans Qdrant
+    const searchResult = await qdrant.search('documents', {
       vector: embedding,
-      limit: 3,
+      limit: 2, // ⚠️ réduction du contexte
       with_payload: true,
     });
 
-    if (!searchResult.length) {
-      return res.status(200).json({ error: 'Aucun document pertinent trouvé.' });
-    }
-
     const context = searchResult.map(doc => doc.payload?.content || '').join('\n');
 
-    // 3. Appel OpenAI Chat
-    const chatResponse = await openai.chat.completions.create({
+    // Historique du chat
+    const chatHistory = [
+      { role: 'system', content: 'Tu es un assistant juridique spécialisé dans le droit congolais.' },
+      { role: 'user', content: `Voici les documents pertinents :\n${context}` },
+      ...messages.map(msg => ({
+        role: msg.from === 'user' ? 'user' : 'assistant',
+        content: msg.text,
+      })),
+    ];
+
+    // Appel OpenAI
+    const completion = await openai.chat.completions.create({
       model: 'gpt-3.5-turbo',
-      messages: [
-        { role: 'system', content: "Tu es un assistant juridique spécialisé dans le droit congolais." },
-        { role: 'user', content: `Voici les documents :\n${context}\n\nQuestion : ${question}` }
-      ],
+      messages: chatHistory,
       temperature: 0.3,
+      max_tokens: 500, // ⚠️ limitation des tokens pour réduire les coûts
     });
 
-    const answer = chatResponse.choices[0].message.content;
-    res.json({ answer });
+    const reply = completion.choices[0].message.content;
+    res.status(200).json({ answer: reply });
+
   } catch (err) {
-    console.error('❌ Erreur serveur :', err);
     res.status(500).json({ error: 'Erreur serveur', details: err.message });
   }
 });
 
-// ✅ Démarrage fixe avec PORT Render-compatible
+// Lancement
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`🚀 Serveur lancé sur http://localhost:${PORT}`);
+  // Pas de console.log pour Render
 });
