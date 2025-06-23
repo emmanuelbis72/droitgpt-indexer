@@ -21,7 +21,7 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-// Vérification de l'API
+// Vérification
 app.get('/', (req, res) => {
   res.send('✅ API DroitGPT + Qdrant est en ligne');
 });
@@ -40,7 +40,7 @@ app.post('/ask', async (req, res) => {
   }
 
   try {
-    // Générer l'embedding
+    // Embedding
     const embeddingResponse = await openai.embeddings.create({
       input: lastUserMessage,
       model: 'text-embedding-ada-002',
@@ -48,10 +48,10 @@ app.post('/ask', async (req, res) => {
 
     const embedding = embeddingResponse.data[0].embedding;
 
-    // Recherche dans Qdrant
+    // Recherche
     const searchResult = await qdrant.search('documents', {
       vector: embedding,
-      limit: 2, // ⚠️ réduction du contexte
+      limit: 2,
       with_payload: true,
     });
 
@@ -59,7 +59,7 @@ app.post('/ask', async (req, res) => {
 
     // Historique du chat
     const chatHistory = [
-      { role: 'system', content: 'Tu es un assistant juridique spécialisé dans le droit congolais.' },
+      { role: 'system', content: 'Tu es un assistant juridique spécialisé dans le droit congolais. Rédige toujours ta réponse en incluant un <h3>Titre</h3> et du <strong>gras</strong> pour les points importants. Réponds toujours en HTML structuré.' },
       { role: 'user', content: `Voici les documents pertinents :\n${context}` },
       ...messages.map(msg => ({
         role: msg.from === 'user' ? 'user' : 'assistant',
@@ -67,24 +67,28 @@ app.post('/ask', async (req, res) => {
       })),
     ];
 
-    // Appel OpenAI
+    // Appel à OpenAI
     const completion = await openai.chat.completions.create({
       model: 'gpt-3.5-turbo',
       messages: chatHistory,
       temperature: 0.3,
-      max_tokens: 500, // ⚠️ limitation des tokens pour réduire les coûts
+      max_tokens: 800,
     });
 
     const reply = completion.choices[0].message.content;
-    res.status(200).json({ answer: reply });
+
+    res.status(200).json({
+      answer: reply,
+      formattedAnswer: reply // peut être utilisé tel quel dans une app front
+    });
 
   } catch (err) {
     res.status(500).json({ error: 'Erreur serveur', details: err.message });
   }
 });
 
-// Lancement
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  // Pas de console.log pour Render
+// Lancement du serveur
+const port = process.env.PORT || 3000;
+app.listen(port, () => {
+  console.log(`✅ Serveur backend DroitGPT lancé sur le port ${port}`);
 });

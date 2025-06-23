@@ -7,6 +7,9 @@
     "start": "node query.js"
   },
   "dependencies": {
+    "@langchain/community": "^0.3.47",
+    "@langchain/core": "^0.3.61",
+    "@langchain/openai": "^0.5.15",
     "@qdrant/js-client-rest": "^1.14.1",
     "cors": "^2.8.5",
     "dotenv": "^16.5.0",
