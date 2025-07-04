@@ -36,7 +36,6 @@ app.post('/ask', async (req, res) => {
     return res.status(400).json({ error: 'Message vide.' });
   }
 
-  // ✅ Nettoyage de la requête
   lastUserMessage = lastUserMessage.trim().toLowerCase();
 
   try {
@@ -69,7 +68,7 @@ app.post('/ask', async (req, res) => {
     const chatHistory = [
       {
         role: 'system',
-        content: `Tu es un assistant juridique congolais. Donne des réponses claires, structurées en HTML avec <h3>titres</h3> et <strong>gras</strong>.`,
+        content: `Tu es un assistant juridique congolais. Donne des réponses claires, précises et structurées en HTML avec <h3>titres</h3> et <strong>gras</strong>.`,
       },
       {
         role: 'user',
@@ -88,8 +87,11 @@ app.post('/ask', async (req, res) => {
       max_tokens: 800,
     });
 
-    const fullText = completion.choices[0]?.message?.content || 'Réponse vide.';
-    res.json({ answer: fullText });
+    const fullText = completion.choices[0]?.message?.content?.trim();
+
+    res.json({
+      answer: fullText || '❌ Réponse vide.',
+    });
   } catch (err) {
     console.error('❌ Erreur:', err.message);
     res.status(500).json({ error: 'Erreur serveur', details: err.message });
