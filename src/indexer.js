@@ -1,3 +1,6 @@
+// ✅ Fichier optimisé : indexer.js pour DroitGPT
+// Améliorations : réduction de chunkSize, ajout de date/index, payload enrichi, meilleure traçabilité
+
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -47,13 +50,19 @@ async function main() {
     console.log(`📄 ${documents.length} fichiers trouvés. Traitement en cours...`);
 
     const splitter = new RecursiveCharacterTextSplitter({
-      chunkSize: 3000,
-      chunkOverlap: 300,
+      chunkSize: 1000, // 🔻 plus rapide et précis
+      chunkOverlap: 100,
     });
 
     const texts = [];
+    const now = new Date().toISOString();
+
     for (const doc of documents) {
-      const splits = await splitter.createDocuments([doc.content], [{ source: doc.name }]);
+      const splits = await splitter.createDocuments([doc.content], [{
+        source: doc.name,
+        date_indexed: now,
+        tag: 'jurisprudence',
+      }]);
       texts.push(...splits);
     }
 
