@@ -1,4 +1,4 @@
-// ✅ query.js - Version stable et rapide sans streaming (DroitGPT)
+// ✅ query.js – API rapide sans streaming pour DroitGPT
 import express from 'express';
 import cors from 'cors';
 import { config } from 'dotenv';
@@ -32,16 +32,14 @@ app.post('/ask', async (req, res) => {
   }
 
   let lastUserMessage = messages[messages.length - 1]?.text || '';
-
   if (!lastUserMessage.trim()) {
     return res.status(400).json({ error: 'Message vide.' });
   }
 
-  // ✅ Nettoyage du message (ex: MAJUSCULES)
+  // ✅ Nettoyage de la requête
   lastUserMessage = lastUserMessage.trim().toLowerCase();
 
   try {
-    // Embedding du message nettoyé
     const embeddingResponse = await openai.embeddings.create({
       input: lastUserMessage,
       model: 'text-embedding-ada-002',
@@ -49,7 +47,6 @@ app.post('/ask', async (req, res) => {
 
     const embedding = embeddingResponse.data[0].embedding;
 
-    // Recherche des documents dans Qdrant
     const searchResult = await qdrant.search('documents', {
       vector: embedding,
       limit: 2,
@@ -58,7 +55,7 @@ app.post('/ask', async (req, res) => {
 
     if (!searchResult.length) {
       return res.status(200).json({
-        text: `<strong>❗ Aucun document pertinent trouvé.</strong><br/>Merci de reformuler votre question.`,
+        answer: `<strong>❗ Aucun document pertinent trouvé.</strong><br/>Merci de reformuler votre question.`,
       });
     }
 
@@ -72,7 +69,7 @@ app.post('/ask', async (req, res) => {
     const chatHistory = [
       {
         role: 'system',
-        content: `Tu es un assistant juridique spécialisé en droit congolais. Donne des réponses structurées en HTML avec <h3>titres</h3> et <strong>gras</strong>.`,
+        content: `Tu es un assistant juridique congolais. Donne des réponses claires, structurées en HTML avec <h3>titres</h3> et <strong>gras</strong>.`,
       },
       {
         role: 'user',
@@ -92,18 +89,14 @@ app.post('/ask', async (req, res) => {
     });
 
     const fullText = completion.choices[0]?.message?.content || 'Réponse vide.';
-
-    res.json({ text: fullText });
+    res.json({ answer: fullText });
   } catch (err) {
     console.error('❌ Erreur:', err.message);
-    res.status(500).json({
-      error: 'Erreur serveur',
-      details: err.message,
-    });
+    res.status(500).json({ error: 'Erreur serveur', details: err.message });
   }
 });
 
 const port = process.env.PORT || 3000;
 app.listen(port, () => {
-  console.log(`🚀 API DroitGPT sans streaming lancée sur http://localhost:${port}`);
+  console.log(`🚀 DroitGPT API lancée sur http://localhost:${port}`);
 });
