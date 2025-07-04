@@ -1,5 +1,4 @@
-// ✅ query.js — version rapide sans streaming (GPT-3.5 Turbo + Qdrant)
-
+// ✅ query.js - Version stable et rapide sans streaming (DroitGPT)
 import express from 'express';
 import cors from 'cors';
 import { config } from 'dotenv';
@@ -12,19 +11,17 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Qdrant client
 const qdrant = new QdrantClient({
   url: process.env.QDRANT_URL,
   apiKey: process.env.QDRANT_API_KEY,
 });
 
-// OpenAI client
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
 app.get('/', (req, res) => {
-  res.send('✅ API DroitGPT est en ligne (rapide sans streaming)');
+  res.send('✅ API DroitGPT sans streaming opérationnelle.');
 });
 
 app.post('/ask', async (req, res) => {
@@ -34,67 +31,79 @@ app.post('/ask', async (req, res) => {
     return res.status(400).json({ error: 'Aucun message fourni.' });
   }
 
-  const lastUserMessage = messages[messages.length - 1]?.text;
-  if (!lastUserMessage) {
-    return res.status(400).json({ error: 'Message utilisateur manquant.' });
+  let lastUserMessage = messages[messages.length - 1]?.text || '';
+
+  if (!lastUserMessage.trim()) {
+    return res.status(400).json({ error: 'Message vide.' });
   }
 
+  // ✅ Nettoyage du message (ex: MAJUSCULES)
+  lastUserMessage = lastUserMessage.trim().toLowerCase();
+
   try {
-    // 🔹 Étape 1 : Générer embedding
-    const { data } = await openai.embeddings.create({
+    // Embedding du message nettoyé
+    const embeddingResponse = await openai.embeddings.create({
       input: lastUserMessage,
       model: 'text-embedding-ada-002',
     });
 
-    const embedding = data[0].embedding;
+    const embedding = embeddingResponse.data[0].embedding;
 
-    // 🔹 Étape 2 : Requête à Qdrant avec payload minimal
+    // Recherche des documents dans Qdrant
     const searchResult = await qdrant.search('documents', {
       vector: embedding,
       limit: 2,
       with_payload: true,
     });
 
-    // 🔹 Étape 3 : Extraire les documents pertinents
+    if (!searchResult.length) {
+      return res.status(200).json({
+        text: `<strong>❗ Aucun document pertinent trouvé.</strong><br/>Merci de reformuler votre question.`,
+      });
+    }
+
     const context = searchResult
       .map(doc => doc.payload?.content || '')
       .filter(Boolean)
       .join('\n');
 
-    // 🔹 Étape 4 : Réduire l'historique à 3 derniers messages max
-    const recentMessages = messages.slice(-3);
+    const recentMessages = messages.slice(-4);
 
-    // 🔹 Étape 5 : Historique final
     const chatHistory = [
       {
         role: 'system',
-        content:
-          'Tu es un assistant juridique spécialisé en droit congolais. Réponds toujours en HTML structuré. Commence par un <h3>Titre</h3>, utilise le <strong>gras</strong> pour les parties importantes, et reste juridique.',
+        content: `Tu es un assistant juridique spécialisé en droit congolais. Donne des réponses structurées en HTML avec <h3>titres</h3> et <strong>gras</strong>.`,
       },
-      { role: 'user', content: `Voici les documents pertinents :\n${context}` },
+      {
+        role: 'user',
+        content: `Voici les documents pertinents :\n${context}`,
+      },
       ...recentMessages.map(msg => ({
         role: msg.from === 'user' ? 'user' : 'assistant',
         content: msg.text,
       })),
     ];
 
-    // 🔹 Étape 6 : Appel à ChatGPT (sans streaming)
     const completion = await openai.chat.completions.create({
       model: 'gpt-3.5-turbo',
       messages: chatHistory,
       temperature: 0.3,
-      max_tokens: 1000,
+      max_tokens: 800,
     });
 
-    const responseText = completion.choices[0].message.content;
-    res.status(200).json({ text: responseText });
+    const fullText = completion.choices[0]?.message?.content || 'Réponse vide.';
+
+    res.json({ text: fullText });
   } catch (err) {
-    console.error('❌ Erreur serveur :', err);
-    res.status(500).json({ error: 'Erreur serveur', details: err.message });
+    console.error('❌ Erreur:', err.message);
+    res.status(500).json({
+      error: 'Erreur serveur',
+      details: err.message,
+    });
   }
 });
 
 const port = process.env.PORT || 3000;
 app.listen(port, () => {
-  console.log(`✅ Serveur backend DroitGPT (rapide sans streaming) lancé sur le port ${port}`);
+  console.log(`🚀 API DroitGPT sans streaming lancée sur http://localhost:${port}`);
 });
