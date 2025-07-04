@@ -1,5 +1,4 @@
-// ✅ Fichier optimisé : query.js pour DroitGPT (performance améliorée avec streaming, filtre, historique réduit)
-
+// ✅ Fichier : query.js
 import express from 'express';
 import cors from 'cors';
 import { config } from 'dotenv';
@@ -7,7 +6,6 @@ import { QdrantClient } from '@qdrant/js-client-rest';
 import OpenAI from 'openai';
 
 config();
-
 const app = express();
 app.use(cors());
 app.use(express.json());
@@ -25,10 +23,10 @@ const openai = new OpenAI({
 
 // Vérification
 app.get('/', (req, res) => {
-  res.send('✅ API DroitGPT + Qdrant est en ligne (optimisée)');
+  res.send('✅ API DroitGPT avec streaming actif');
 });
 
-// Endpoint avec STREAMING activé
+// Point d’accès principal
 app.post('/ask', async (req, res) => {
   const { messages } = req.body;
 
@@ -42,36 +40,38 @@ app.post('/ask', async (req, res) => {
   }
 
   try {
-    // Embedding de la requête utilisateur
+    // Embedding
     const embeddingResponse = await openai.embeddings.create({
       input: lastUserMessage,
       model: 'text-embedding-ada-002',
     });
-
     const embedding = embeddingResponse.data[0].embedding;
 
-    // Recherche Qdrant avec payload minimal
+    // Recherche dans Qdrant
     const searchResult = await qdrant.search('documents', {
       vector: embedding,
       limit: 2,
-      with_payload: true, // garder si tu as besoin du contenu texte
+      with_payload: true,
     });
 
     const context = searchResult.map(doc => doc.payload?.content || '').join('\n');
 
-    // Historique limité à 4 derniers messages
-    const recentMessages = messages.slice(-4);
-
+    // Contexte + messages utilisateurs (historique réduit à 3 échanges max)
+    const recentMessages = messages.slice(-3);
     const chatHistory = [
-      { role: 'system', content: 'Tu es un assistant juridique spécialisé dans le droit congolais. Rédige toujours ta réponse en incluant un <h3>Titre</h3> et du <strong>gras</strong> pour les points importants. Réponds toujours en HTML structuré.' },
+      {
+        role: 'system',
+        content:
+          'Tu es un assistant juridique congolais. Réponds toujours en HTML structuré. Donne un <h3>Titre</h3> au début, puis des explications en <strong>gras</strong> quand nécessaire.',
+      },
       { role: 'user', content: `Voici les documents pertinents :\n${context}` },
-      ...recentMessages.map(msg => ({
-        role: msg.from === 'user' ? 'user' : 'assistant',
-        content: msg.text,
+      ...recentMessages.map((m) => ({
+        role: m.from === 'user' ? 'user' : 'assistant',
+        content: m.text,
       })),
     ];
 
-    // Streaming de la réponse OpenAI
+    // Réponse en streaming
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
@@ -85,15 +85,16 @@ app.post('/ask', async (req, res) => {
       stream: true,
     });
 
-    for await (const chunk of completion) {
-      const token = chunk.choices?.[0]?.delta?.content;
+    for await (const part of completion) {
+      const token = part.choices?.[0]?.delta?.content;
       if (token) res.write(token);
     }
 
     res.end();
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Erreur serveur', details: err.message });
+    console.error('❌ Erreur serveur :', err);
+    res.write('❌ Erreur côté serveur.');
+    res.end();
   }
 });
 
