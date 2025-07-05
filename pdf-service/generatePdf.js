@@ -1,6 +1,6 @@
 import express from 'express';
 import PDFDocument from 'pdfkit';
-import OpenAI from 'openai'; // ✅ Compatible avec openai@5.1.1
+import OpenAI from 'openai';
 
 const router = express.Router();
 
@@ -8,7 +8,7 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-router.post('/generate-pdf', async (req, res) => {
+router.post('/', async (req, res) => {
   const { type, data } = req.body;
 
   if (!type || !data) {
@@ -32,7 +32,8 @@ ${JSON.stringify(data, null, 2)}
       messages: [
         {
           role: 'system',
-          content: 'Tu es un avocat congolais expérimenté. Tu rédiges des documents juridiques bilingues (FR/EN) avec style, rigueur et exactitude.',
+          content:
+            'Tu es un avocat congolais expérimenté. Tu rédiges des documents juridiques bilingues (FR/EN) avec style, rigueur et exactitude.',
         },
         {
           role: 'user',
@@ -52,7 +53,10 @@ ${JSON.stringify(data, null, 2)}
 
     // === Génération PDF ===
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `attachment; filename=document-${type}.pdf`);
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename=document-${type}.pdf`
+    );
 
     const doc = new PDFDocument({
       size: 'A4',
@@ -74,7 +78,9 @@ ${JSON.stringify(data, null, 2)}
       .moveDown(0.5)
       .fontSize(12)
       .font('Helvetica')
-      .text('www.droitgpt.com – Assistance Juridique Intelligente', { align: 'center' })
+      .text('www.droitgpt.com – Assistance Juridique Intelligente', {
+        align: 'center',
+      })
       .moveDown(1);
 
     doc
@@ -85,7 +91,7 @@ ${JSON.stringify(data, null, 2)}
       .stroke()
       .moveDown(1);
 
-    // Titre du document
+    // Titre
     doc
       .font('Helvetica-Bold')
       .fontSize(14)
@@ -95,7 +101,7 @@ ${JSON.stringify(data, null, 2)}
       })
       .moveDown(1);
 
-    // Contenu généré
+    // Contenu
     doc
       .font('Times-Roman')
       .fontSize(12)
