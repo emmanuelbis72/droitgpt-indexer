@@ -11,7 +11,7 @@
     "cors": "^2.8.5",
     "dotenv": "^16.5.0",
     "pdfkit": "^0.17.1",
-    "openai": "^4.29.1"  // ✅ Compatible avec pdf simple
+    "openai": "^4.29.1"
   },
   "engines": {
     "node": "18.x"
