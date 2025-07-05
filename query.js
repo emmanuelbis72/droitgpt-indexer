@@ -1,4 +1,4 @@
-// ✅ query.js – API rapide sans streaming pour DroitGPT
+// ✅ query.js – API rapide avec détection de langue (DroitGPT)
 import express from 'express';
 import cors from 'cors';
 import { config } from 'dotenv';
@@ -21,11 +21,11 @@ const openai = new OpenAI({
 });
 
 app.get('/', (req, res) => {
-  res.send('✅ API DroitGPT sans streaming opérationnelle.');
+  res.send('✅ API DroitGPT avec détection de langue opérationnelle.');
 });
 
 app.post('/ask', async (req, res) => {
-  const { messages } = req.body;
+  const { messages, lang } = req.body;
 
   if (!messages || !messages.length) {
     return res.status(400).json({ error: 'Aucun message fourni.' });
@@ -39,6 +39,7 @@ app.post('/ask', async (req, res) => {
   lastUserMessage = lastUserMessage.trim().toLowerCase();
 
   try {
+    // 🔍 Embedding de la requête utilisateur
     const embeddingResponse = await openai.embeddings.create({
       input: lastUserMessage,
       model: 'text-embedding-ada-002',
@@ -46,6 +47,7 @@ app.post('/ask', async (req, res) => {
 
     const embedding = embeddingResponse.data[0].embedding;
 
+    // 🔎 Recherche dans Qdrant
     const searchResult = await qdrant.search('documents', {
       vector: embedding,
       limit: 2,
@@ -65,10 +67,19 @@ app.post('/ask', async (req, res) => {
 
     const recentMessages = messages.slice(-4);
 
+    const systemPrompt = {
+      fr: "Tu es un assistant juridique congolais. Donne des réponses claires, précises et structurées en HTML avec <h3>titres</h3> et <strong>gras</strong>.",
+      en: "You are a legal assistant specialized in Congolese law. Provide clear and structured answers in HTML.",
+      sw: "Wewe ni msaidizi wa sheria maalumu kwa sheria ya Kongo. Toa majibu wazi katika HTML.",
+      ln: "Ozali mosungi ya mibeko ya Kongo. Pesá biyano ya polele na HTML.",
+      kg: "Uvele wakangayi wa mabeka ya Kongo. Zabisa bizaba ya munene.",
+      tsh: "Uli musungi wa muoyo mu muoyo wa ntu. Pesá miyembo ya bungi na HTML.",
+    };
+
     const chatHistory = [
       {
         role: 'system',
-        content: `Tu es un assistant juridique congolais. Donne des réponses claires, précises et structurées en HTML avec <h3>titres</h3> et <strong>gras</strong>.`,
+        content: systemPrompt[lang] || systemPrompt['fr'],
       },
       {
         role: 'user',
@@ -88,7 +99,6 @@ app.post('/ask', async (req, res) => {
     });
 
     const fullText = completion.choices[0]?.message?.content?.trim();
-
     res.json({
       answer: fullText || '❌ Réponse vide.',
     });
@@ -100,5 +110,5 @@ app.post('/ask', async (req, res) => {
 
 const port = process.env.PORT || 3000;
 app.listen(port, () => {
-  console.log(`🚀 DroitGPT API lancée sur http://localhost:${port}`);
+  console.log(`🚀 API DroitGPT en ligne sur http://localhost:${port}`);
 });

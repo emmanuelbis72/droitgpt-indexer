@@ -1,6 +1,4 @@
-// ✅ Fichier optimisé : indexer.js pour DroitGPT
-// Améliorations : réduction de chunkSize, ajout de date/index, payload enrichi, meilleure traçabilité
-
+// ✅ Fichier amélioré : indexer.js – DroitGPT
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -13,7 +11,6 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
-// Résolution correcte du chemin (ESM)
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const directoryPath = path.join(__dirname, '../docs');
@@ -31,51 +28,56 @@ async function main() {
   try {
     const documents = [];
 
+    // 📁 Récupère tous les fichiers txt dans les sous-dossiers
     const walkSync = (dir) => {
       const files = fs.readdirSync(dir);
       files.forEach((file) => {
         const filepath = path.join(dir, file);
         const stat = fs.statSync(filepath);
+
         if (stat.isDirectory()) {
           walkSync(filepath);
         } else if (filepath.endsWith('.txt')) {
           const content = fs.readFileSync(filepath, 'utf-8');
-          documents.push({ content, name: file });
+          const relativePath = path.relative(directoryPath, filepath);
+          const tag = relativePath.split(path.sep)[0]; // 📁 nom du sous-dossier
+          documents.push({ content, name: file, tag });
         }
       });
     };
 
     walkSync(directoryPath);
 
-    console.log(`📄 ${documents.length} fichiers trouvés. Traitement en cours...`);
+    console.log(`📄 ${documents.length} fichiers trouvés. Début du traitement...`);
 
     const splitter = new RecursiveCharacterTextSplitter({
-      chunkSize: 1000, // 🔻 plus rapide et précis
+      chunkSize: 1000,
       chunkOverlap: 100,
     });
 
-    const texts = [];
     const now = new Date().toISOString();
+    const allChunks = [];
 
     for (const doc of documents) {
-      const splits = await splitter.createDocuments([doc.content], [{
+      const chunks = await splitter.createDocuments([doc.content], [{
         source: doc.name,
         date_indexed: now,
-        tag: 'jurisprudence',
+        tag: doc.tag || 'inconnu',
+        length: doc.content.length,
       }]);
-      texts.push(...splits);
+      allChunks.push(...chunks);
     }
 
-    console.log(`🧩 ${texts.length} segments générés. Indexation en cours...`);
+    console.log(`🧩 ${allChunks.length} segments générés. Indexation vers Qdrant...`);
 
-    await QdrantVectorStore.fromDocuments(texts, embeddings, {
+    await QdrantVectorStore.fromDocuments(allChunks, embeddings, {
       client,
       collectionName: 'documents',
     });
 
-    console.log('✅ Indexation terminée avec succès dans Qdrant.');
+    console.log('✅ Indexation terminée avec succès.');
   } catch (error) {
-    console.error('❌ Erreur pendant l\'indexation :', error);
+    console.error('❌ Erreur pendant l\'indexation :', error.message);
   }
 }
 
