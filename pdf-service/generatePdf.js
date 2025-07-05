@@ -1,3 +1,4 @@
+// 📄 pdf-service/generatePdf.js
 import express from 'express';
 import PDFDocument from 'pdfkit';
 import OpenAI from 'openai'; // Compatible avec openai@5.1.1
@@ -8,7 +9,7 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-router.post('/generate-pdf', async (req, res) => {
+router.post('/', async (req, res) => {
   const { type, data } = req.body;
 
   if (!type || !data) {
