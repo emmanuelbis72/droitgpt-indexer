@@ -1,8 +1,7 @@
 import express from 'express';
 import PDFDocument from 'pdfkit';
 import { Document, Packer, Paragraph, TextRun } from 'docx';
-import pkg from 'openai'; // ✅ Compatible avec openai@5.1.1
-const OpenAI = pkg.default;
+import { OpenAI } from 'openai'; // ✅ Correct avec openai@5.1.1
 
 const router = express.Router();
 
@@ -136,7 +135,7 @@ ${JSON.stringify(data, null, 2)}
       res.send(buffer);
     }
 
-    // === Format non reconnu ===
+    // === Format non supporté ===
     else {
       return res.status(400).json({ error: 'Format non supporté. Utilisez "pdf" ou "docx".' });
     }
