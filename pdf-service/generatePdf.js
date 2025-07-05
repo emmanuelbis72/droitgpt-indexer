@@ -1,6 +1,6 @@
 import express from 'express';
 import PDFDocument from 'pdfkit';
-import OpenAI from 'openai';
+import OpenAI from 'openai'; // Compatible avec openai@5.1.1
 
 const router = express.Router();
 
@@ -8,7 +8,7 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-router.post('/', async (req, res) => {
+router.post('/generate-pdf', async (req, res) => {
   const { type, data } = req.body;
 
   if (!type || !data) {
@@ -16,14 +16,18 @@ router.post('/', async (req, res) => {
   }
 
   try {
-    const prompt = `Rédige un document juridique de type "${type}" conforme aux normes professionnelles d’un avocat congolais.
-Inclure :
-- Un en-tête formel et juridiquement valable
-- Des sections claires, structurées et titrées
-- Une clause de signature avec date et lieu
-- Une version équivalente en anglais à la fin
+    const prompt = `
+Tu es un avocat congolais expert en rédaction juridique professionnelle.
 
-Voici les données à insérer :
+Rédige un document juridique complet et détaillé de type : "${type}".
+✅ Le document doit :
+- être structuré comme un vrai document d’avocat
+- contenir des clauses précises et bien formulées
+- inclure toutes les informations pertinentes données
+- être écrit avec un langage juridique clair et complet
+- inclure une version équivalente en anglais à la fin
+
+Voici les données à intégrer :
 ${JSON.stringify(data, null, 2)}
 `;
 
@@ -32,16 +36,15 @@ ${JSON.stringify(data, null, 2)}
       messages: [
         {
           role: 'system',
-          content:
-            'Tu es un avocat congolais expérimenté. Tu rédiges des documents juridiques bilingues (FR/EN) avec style, rigueur et exactitude.',
+          content: 'Tu es un avocat congolais spécialisé en rédaction juridique. Ton style est rigoureux, formel, sans fautes, et très détaillé.',
         },
         {
           role: 'user',
           content: prompt,
         },
       ],
-      temperature: 0.3,
-      max_tokens: 1800,
+      temperature: 0.2,
+      max_tokens: 2000,
     });
 
     const outputText = completion.choices[0]?.message?.content?.trim();
@@ -51,72 +54,26 @@ ${JSON.stringify(data, null, 2)}
 
     const today = new Date().toLocaleDateString('fr-FR');
 
-    // === Génération PDF ===
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader(
-      'Content-Disposition',
-      `attachment; filename=document-${type}.pdf`
-    );
+    res.setHeader('Content-Disposition', `attachment; filename=document-${type}.pdf`);
 
-    const doc = new PDFDocument({
-      size: 'A4',
-      margin: 50,
-      info: {
-        Title: `Document Juridique – ${type}`,
-        Author: 'DroitGPT – www.droitgpt.com',
-      },
-    });
-
+    const doc = new PDFDocument({ margin: 50 });
     doc.pipe(res);
 
-    // En-tête
-    doc
-      .fontSize(16)
-      .fillColor('#1a1a1a')
-      .font('Helvetica-Bold')
-      .text('CABINET JURIDIQUE – DROIT CONGOLAIS', { align: 'center' })
-      .moveDown(0.5)
-      .fontSize(12)
-      .font('Helvetica')
-      .text('www.droitgpt.com – Assistance Juridique Intelligente', {
-        align: 'center',
-      })
-      .moveDown(1);
+    // En-tête simple
+    doc.fontSize(14).text(`Document juridique – ${type}`, { align: 'center' });
+    doc.moveDown();
 
-    doc
-      .moveTo(50, doc.y)
-      .lineTo(545, doc.y)
-      .strokeColor('#444444')
-      .lineWidth(1)
-      .stroke()
-      .moveDown(1);
+    // Contenu principal
+    doc.fontSize(12).font('Times-Roman').text(outputText, {
+      align: 'justify',
+      lineGap: 4,
+    });
 
-    // Titre
-    doc
-      .font('Helvetica-Bold')
-      .fontSize(14)
-      .text(`📄 Document généré : ${type.toUpperCase()}`, {
-        align: 'left',
-        underline: true,
-      })
-      .moveDown(1);
-
-    // Contenu
-    doc
-      .font('Times-Roman')
-      .fontSize(12)
-      .fillColor('black')
-      .text(outputText, {
-        align: 'justify',
-        lineGap: 5,
-      });
-
-    // Signature
-    doc.moveDown(3);
-    doc
-      .fontSize(11)
-      .text(`Fait à Kinshasa, le ${today}`, { align: 'right' })
-      .text(`Signature : ____________________`, { align: 'right' });
+    // Clause de signature
+    doc.moveDown(4);
+    doc.fontSize(11).text(`Fait à Kinshasa, le ${today}`, { align: 'left' });
+    doc.text(`Signature : ____________________`, { align: 'left' });
 
     doc.end();
   } catch (err) {
