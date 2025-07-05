@@ -1,7 +1,8 @@
 import express from 'express';
 import PDFDocument from 'pdfkit';
-import OpenAI from 'openai';
 import { Document, Packer, Paragraph, TextRun } from 'docx';
+import pkg from 'openai'; // ✅ Compatible avec openai@5.1.1
+const OpenAI = pkg.default;
 
 const router = express.Router();
 
@@ -17,25 +18,23 @@ router.post('/generate-pdf', async (req, res) => {
   }
 
   try {
-    const prompt = `Rédige un document juridique de type "${type}" conforme aux standards professionnels d’un avocat congolais.
+    const prompt = `Rédige un document juridique de type "${type}" conforme aux normes professionnelles d’un avocat congolais.
+Inclure :
+- Un en-tête formel et juridiquement valable
+- Des sections claires, structurées et titrées
+- Une clause de signature avec date et lieu
+- Une version équivalente en anglais à la fin
 
-📝 Données à intégrer : 
+Voici les données à insérer :
 ${JSON.stringify(data, null, 2)}
-
-📌 Format attendu :
-1. En-tête formel
-2. Paragraphes bien structurés
-3. Titres et sous-titres en gras
-4. Signature et date en bas du document
-5. Une traduction anglaise équivalente à la fin`;
+`;
 
     const completion = await openai.chat.completions.create({
       model: 'gpt-4',
       messages: [
         {
           role: 'system',
-          content:
-            'Tu es un avocat congolais expert en rédaction juridique bilingue (FR/EN). Génère des documents professionnels, bien présentés, dans un style clair et structuré.',
+          content: 'Tu es un avocat congolais expérimenté. Tu rédiges des documents juridiques bilingues (FR/EN) avec style, rigueur et exactitude.',
         },
         {
           role: 'user',
@@ -47,16 +46,13 @@ ${JSON.stringify(data, null, 2)}
     });
 
     const outputText = completion.choices[0]?.message?.content?.trim();
-
-    if (!outputText || outputText.length < 100) {
-      return res.status(500).json({
-        error: 'Réponse insuffisante ou vide de l’IA.',
-      });
+    if (!outputText) {
+      return res.status(500).json({ error: 'Réponse vide de l’IA.' });
     }
 
-    const now = new Date().toLocaleDateString('fr-FR');
+    const today = new Date().toLocaleDateString('fr-FR');
 
-    // === Format PDF ===
+    // === PDF ===
     if (format === 'pdf') {
       res.setHeader('Content-Type', 'application/pdf');
       res.setHeader('Content-Disposition', `attachment; filename=document-${type}.pdf`);
@@ -70,65 +66,60 @@ ${JSON.stringify(data, null, 2)}
       });
 
       doc.moveDown();
-      doc.fontSize(14).text(`📄 Document généré : ${type}`, { align: 'center' });
+      doc.fontSize(14).text(`📄 Document : ${type}`, { align: 'center' });
       doc.moveDown(2);
 
       doc.font('Times-Roman').fontSize(12).text(outputText, {
         align: 'justify',
+        lineGap: 5,
       });
 
-      doc.moveDown(4);
-      doc.text(`Fait à Kinshasa, le ${now}`, { align: 'right' });
-      doc.text('Signature : ____________________', { align: 'right' });
+      doc.moveDown(3);
+      doc.fontSize(11).text(`Fait à Kinshasa, le ${today}`, {
+        align: 'right',
+      });
+      doc.text('Signature : ____________________', {
+        align: 'right',
+      });
 
       doc.end();
     }
 
-    // === Format DOCX ===
+    // === DOCX ===
     else if (format === 'docx') {
-      const formattedParagraphs = outputText
+      const paragraphs = outputText
         .split('\n')
         .filter(line => line.trim())
         .map(line =>
           new Paragraph({
-            children: [
-              new TextRun({
-                text: line.trim(),
-                break: 1,
-              }),
-            ],
-            spacing: { after: 200 },
+            children: [new TextRun({ text: line.trim(), break: 1 })],
+            spacing: { after: 100 },
           })
         );
 
-      const wordDoc = new Document({
+      const doc = new Document({
         sections: [
           {
-            properties: {},
             children: [
               new Paragraph({
-                alignment: 'center',
                 children: [
                   new TextRun({
                     text: 'CABINET JURIDIQUE – DROIT CONGOLAIS',
                     bold: true,
                     size: 28,
+                    underline: {},
                   }),
                 ],
+                alignment: 'center',
               }),
               new Paragraph({}),
-              ...formattedParagraphs,
+              ...paragraphs,
               new Paragraph({}),
               new Paragraph({
                 alignment: 'right',
                 children: [
-                  new TextRun(`Fait à Kinshasa, le ${now}`),
-                ],
-              }),
-              new Paragraph({
-                alignment: 'right',
-                children: [
-                  new TextRun('Signature : ____________________'),
+                  new TextRun(`Fait à Kinshasa, le ${today}`),
+                  new TextRun({ text: '\nSignature : ____________________' }),
                 ],
               }),
             ],
@@ -136,12 +127,8 @@ ${JSON.stringify(data, null, 2)}
         ],
       });
 
-      const buffer = await Packer.toBuffer(wordDoc);
-
-      res.setHeader(
-        'Content-Disposition',
-        `attachment; filename=document-${type}.docx`
-      );
+      const buffer = await Packer.toBuffer(doc);
+      res.setHeader('Content-Disposition', `attachment; filename=document-${type}.docx`);
       res.setHeader(
         'Content-Type',
         'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
@@ -149,7 +136,7 @@ ${JSON.stringify(data, null, 2)}
       res.send(buffer);
     }
 
-    // === Format Invalide ===
+    // === Format non reconnu ===
     else {
       return res.status(400).json({ error: 'Format non supporté. Utilisez "pdf" ou "docx".' });
     }
