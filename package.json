@@ -2,9 +2,9 @@
   "name": "droitgpt-indexer-query",
   "version": "1.0.0",
   "type": "module",
-  "main": "query.js",
+  "main": "server.js",
   "scripts": {
-    "start": "node query.js"
+    "start": "node server.js"
   },
   "dependencies": {
     "@langchain/community": "^0.3.47",

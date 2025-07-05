@@ -1,65 +1,70 @@
-// generatePdf.js
+// ✅ generatePdf.js – Génération de documents PDF pour DroitGPT
+
 import express from 'express';
 import PDFDocument from 'pdfkit';
 import OpenAI from 'openai';
+import dotenv from 'dotenv';
 
+dotenv.config();
 const router = express.Router();
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
 
 router.post('/', async (req, res) => {
   const { type, data } = req.body;
-  let prompt = '';
 
+  if (!type || !data) {
+    return res.status(400).json({ error: 'Type ou données manquantes.' });
+  }
+
+  // Prompt personnalisé selon le type de document
+  let prompt = '';
   switch (type) {
     case 'contratTravail':
-      prompt = `Rédige un contrat de travail simple en français entre ${data.employeur} et ${data.employe} pour le poste de ${data.poste}, avec un salaire mensuel de ${data.salaire}.`;
+      prompt = `Rédige un contrat de travail en français entre ${data.employeur} et ${data.employe}, pour le poste de ${data.poste} avec un salaire de ${data.salaire} par mois.`;
       break;
     case 'procuration':
-      prompt = `Rédige une procuration où ${data.mandant} donne pouvoir à ${data.mandataire} pour ${data.objet}.`;
+      prompt = `Rédige une procuration en français où ${data.mandant} donne plein pouvoir à ${data.mandataire} pour ${data.objet}.`;
       break;
     case 'statuts':
-      prompt = `Rédige les statuts simplifiés d'une société nommée ${data.nomSociete}, fondée par ${data.fondateur}, avec un capital de ${data.capital}.`;
+      prompt = `Rédige les statuts d'une société nommée ${data.nomSociete}, fondée par ${data.fondateur}, avec un capital de ${data.capital}.`;
       break;
     case 'bail':
-      prompt = `Rédige un contrat de bail locatif entre le bailleur ${data.bailleur} et le locataire ${data.locataire} pour la maison située à ${data.adresse}, avec un loyer mensuel de ${data.loyer}.`;
+      prompt = `Rédige un contrat de bail simple entre un bailleur et un locataire en français.`;
       break;
     case 'note':
-      prompt = `Rédige une note juridique sur : ${data.sujet}`;
+      prompt = `Rédige une note juridique en français sur le sujet suivant : ${data.sujet}.`;
       break;
     default:
-      return res.status(400).json({ error: 'Type de document non reconnu.' });
+      return res.status(400).json({ error: 'Type de document non pris en charge.' });
   }
 
   try {
+    // Génération du texte via OpenAI
     const completion = await openai.chat.completions.create({
       model: 'gpt-3.5-turbo',
       messages: [
-        { role: 'system', content: 'Tu es un assistant juridique congolais.' },
+        { role: 'system', content: 'Tu es un juriste congolais professionnel. Génère des documents juridiques clairs, formels et bien structurés.' },
         { role: 'user', content: prompt }
       ],
       temperature: 0.4,
-      max_tokens: 1000,
+      max_tokens: 1200,
     });
 
     const content = completion.choices[0].message.content;
 
+    // Création du PDF
     const doc = new PDFDocument();
-    const chunks = [];
-
-    doc.on('data', (chunk) => chunks.push(chunk));
-    doc.on('end', () => {
-      const pdfBuffer = Buffer.concat(chunks);
-      res.setHeader('Content-Type', 'application/pdf');
-      res.setHeader('Content-Disposition', 'attachment; filename=document.pdf');
-      res.send(pdfBuffer);
-    });
-
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename=document_${type}.pdf`);
+    doc.pipe(res);
     doc.fontSize(12).text(content, { align: 'left' });
     doc.end();
-
   } catch (err) {
-    console.error('Erreur génération PDF:', err);
-    res.status(500).json({ error: 'Erreur serveur PDF', details: err.message });
+    console.error('Erreur OpenAI ou PDF:', err.message);
+    res.status(500).json({ error: 'Erreur serveur', details: err.message });
   }
 });
 

@@ -1,4 +1,4 @@
-// ✅ query.js – API rapide avec détection de langue (DroitGPT)
+// ✅ query.js – API principale DroitGPT (ne rien modifier)
 import express from 'express';
 import cors from 'cors';
 import { config } from 'dotenv';
@@ -16,9 +16,7 @@ const qdrant = new QdrantClient({
   apiKey: process.env.QDRANT_API_KEY,
 });
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 app.get('/', (req, res) => {
   res.send('✅ API DroitGPT avec détection de langue opérationnelle.');
@@ -26,28 +24,22 @@ app.get('/', (req, res) => {
 
 app.post('/ask', async (req, res) => {
   const { messages, lang } = req.body;
-
   if (!messages || !messages.length) {
     return res.status(400).json({ error: 'Aucun message fourni.' });
   }
 
-  let lastUserMessage = messages[messages.length - 1]?.text || '';
-  if (!lastUserMessage.trim()) {
+  let lastUserMessage = messages[messages.length - 1]?.text?.trim().toLowerCase();
+  if (!lastUserMessage) {
     return res.status(400).json({ error: 'Message vide.' });
   }
 
-  lastUserMessage = lastUserMessage.trim().toLowerCase();
-
   try {
-    // 🔍 Embedding de la requête utilisateur
     const embeddingResponse = await openai.embeddings.create({
       input: lastUserMessage,
       model: 'text-embedding-ada-002',
     });
 
     const embedding = embeddingResponse.data[0].embedding;
-
-    // 🔎 Recherche dans Qdrant
     const searchResult = await qdrant.search('documents', {
       vector: embedding,
       limit: 2,
@@ -60,12 +52,7 @@ app.post('/ask', async (req, res) => {
       });
     }
 
-    const context = searchResult
-      .map(doc => doc.payload?.content || '')
-      .filter(Boolean)
-      .join('\n');
-
-    const recentMessages = messages.slice(-4);
+    const context = searchResult.map(doc => doc.payload?.content || '').join('\n');
 
     const systemPrompt = {
       fr: "Tu es un assistant juridique congolais. Donne des réponses claires, précises et structurées en HTML avec <h3>titres</h3> et <strong>gras</strong>.",
@@ -73,22 +60,16 @@ app.post('/ask', async (req, res) => {
       sw: "Wewe ni msaidizi wa sheria maalumu kwa sheria ya Kongo. Toa majibu wazi katika HTML.",
       ln: "Ozali mosungi ya mibeko ya Kongo. Pesá biyano ya polele na HTML.",
       kg: "Uvele wakangayi wa mabeka ya Kongo. Zabisa bizaba ya munene.",
-      tsh: "Uli musungi wa muoyo mu muoyo wa ntu. Pesá miyembo ya bungi na HTML.",
+      tsh: "Uli musungi wa muoyo mu muoyo wa ntu. Pesá miyembo ya bungi na HTML."
     };
 
     const chatHistory = [
-      {
-        role: 'system',
-        content: systemPrompt[lang] || systemPrompt['fr'],
-      },
-      {
-        role: 'user',
-        content: `Voici les documents pertinents :\n${context}`,
-      },
-      ...recentMessages.map(msg => ({
+      { role: 'system', content: systemPrompt[lang] || systemPrompt['fr'] },
+      { role: 'user', content: `Voici les documents pertinents :\n${context}` },
+      ...messages.slice(-4).map(msg => ({
         role: msg.from === 'user' ? 'user' : 'assistant',
-        content: msg.text,
-      })),
+        content: msg.text
+      }))
     ];
 
     const completion = await openai.chat.completions.create({
@@ -98,10 +79,7 @@ app.post('/ask', async (req, res) => {
       max_tokens: 800,
     });
 
-    const fullText = completion.choices[0]?.message?.content?.trim();
-    res.json({
-      answer: fullText || '❌ Réponse vide.',
-    });
+    res.json({ answer: completion.choices[0]?.message?.content?.trim() || '❌ Réponse vide.' });
   } catch (err) {
     console.error('❌ Erreur:', err.message);
     res.status(500).json({ error: 'Erreur serveur', details: err.message });
