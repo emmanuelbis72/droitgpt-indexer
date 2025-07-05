@@ -1,4 +1,3 @@
-// 📄 pdf-service/generatePdf.js
 import express from 'express';
 import PDFDocument from 'pdfkit';
 import OpenAI from 'openai'; // Compatible avec openai@5.1.1
@@ -62,18 +61,18 @@ ${JSON.stringify(data, null, 2)}
     doc.pipe(res);
 
     // En-tête simple
-    doc.fontSize(14).text(`Document juridique – ${type}`, { align: 'center' });
+    doc.font('Helvetica-Bold').fontSize(14).text(`Document juridique – ${type}`, { align: 'center' });
     doc.moveDown();
 
     // Contenu principal
-    doc.fontSize(12).font('Times-Roman').text(outputText, {
+    doc.font('Helvetica').fontSize(12).text(outputText, {
       align: 'justify',
       lineGap: 4,
     });
 
     // Clause de signature
     doc.moveDown(4);
-    doc.fontSize(11).text(`Fait à Kinshasa, le ${today}`, { align: 'left' });
+    doc.font('Helvetica').fontSize(11).text(`Fait à Kinshasa, le ${today}`, { align: 'left' });
     doc.text(`Signature : ____________________`, { align: 'left' });
 
     doc.end();
