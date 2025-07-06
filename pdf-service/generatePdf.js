@@ -24,8 +24,7 @@ Rédige un document juridique complet et détaillé de type : "${type}".
 - être structuré comme un vrai document d’avocat
 - contenir des clauses précises et bien formulées
 - inclure toutes les informations pertinentes données
-- être écrit avec un langage juridique clair et complet
-- inclure une version équivalente en anglais à la fin
+- être rédigé uniquement en français avec un langage juridique clair, rigoureux et complet
 
 Voici les données à intégrer :
 ${JSON.stringify(data, null, 2)}
@@ -36,7 +35,7 @@ ${JSON.stringify(data, null, 2)}
       messages: [
         {
           role: 'system',
-          content: 'Tu es un avocat congolais spécialisé en rédaction juridique. Ton style est rigoureux, formel, sans fautes, et très détaillé.',
+          content: 'Tu es un avocat congolais spécialisé en rédaction juridique en français. Ton style est rigoureux, formel, sans fautes, et très détaillé.',
         },
         {
           role: 'user',
