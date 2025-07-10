@@ -3,7 +3,7 @@ services:
     name: droitgpt-indexer
     env: node
     plan: starter
-    buildCommand: npm install
+    buildCommand: npm install --legacy-peer-deps
     startCommand: node indexer.js
     rootDir: indexer
     autoDeploy: true
