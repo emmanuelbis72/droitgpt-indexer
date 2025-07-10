@@ -1,11 +1,11 @@
 services:
   - type: web
-    name: droitgpt-api
+    name: droitgpt-indexer
     env: node
-    plan: free
+    plan: starter
     buildCommand: npm install
-    startCommand: node query.js
-    rootDir: .
+    startCommand: node indexer.js
+    rootDir: indexer
     autoDeploy: true
     branch: main
     envVars:
@@ -16,4 +16,15 @@ services:
       - key: QDRANT_API_KEY
         sync: false
 
-        
+  - type: web
+    name: droitgpt-pdf-api
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node server.js
+    rootDir: pdf-service
+    autoDeploy: true
+    branch: main
+    envVars:
+      - key: OPENAI_API_KEY
+        sync: false

@@ -1,9 +1,19 @@
+// 📄 generatePdf.js – Route de génération PDF (corrigée)
 import express from 'express';
 import PDFDocument from 'pdfkit';
-import OpenAI from 'openai'; // Compatible avec openai@5.1.1
+import OpenAI from 'openai';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import dotenv from 'dotenv';
+
+// ✅ Chargement des variables d’environnement depuis le fichier .env local
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+dotenv.config({ path: path.join(__dirname, '.env') });
 
 const router = express.Router();
 
+// ✅ Initialisation de l’API OpenAI
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
@@ -16,6 +26,7 @@ router.post('/', async (req, res) => {
   }
 
   try {
+    // ✅ Prompt pour GPT-4
     const prompt = `
 Tu es un avocat congolais expert en rédaction juridique professionnelle.
 
@@ -53,23 +64,21 @@ ${JSON.stringify(data, null, 2)}
 
     const today = new Date().toLocaleDateString('fr-FR');
 
+    // ✅ Génération du fichier PDF
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename=document-${type}.pdf`);
 
     const doc = new PDFDocument({ margin: 50 });
     doc.pipe(res);
 
-    // En-tête simple
     doc.font('Helvetica-Bold').fontSize(14).text(`Document juridique – ${type}`, { align: 'center' });
     doc.moveDown();
 
-    // Contenu principal
     doc.font('Helvetica').fontSize(12).text(outputText, {
       align: 'justify',
       lineGap: 4,
     });
 
-    // Clause de signature
     doc.moveDown(4);
     doc.font('Helvetica').fontSize(11).text(`Fait à Kinshasa, le ${today}`, { align: 'left' });
     doc.text(`Signature : ____________________`, { align: 'left' });

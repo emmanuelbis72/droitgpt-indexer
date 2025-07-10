@@ -1,11 +1,16 @@
-// ✅ query.js – API principale DroitGPT (ne rien modifier)
+// ✅ query.js – API principale DroitGPT (version sécurisée)
 import express from 'express';
 import cors from 'cors';
 import { config } from 'dotenv';
 import { QdrantClient } from '@qdrant/js-client-rest';
 import OpenAI from 'openai';
+import path from 'path';
+import { fileURLToPath } from 'url';
 
-config();
+// Charger les variables d'environnement depuis le bon .env
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+config({ path: path.join(__dirname, '.env') });
 
 const app = express();
 app.use(cors());
