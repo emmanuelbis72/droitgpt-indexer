@@ -4,7 +4,7 @@ services:
     env: node
     plan: starter
     buildCommand: npm install --legacy-peer-deps
-    startCommand: node indexer.js
+    startCommand: node query.js
     rootDir: indexer
     autoDeploy: true
     branch: main
