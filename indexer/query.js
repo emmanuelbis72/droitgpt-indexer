@@ -7,7 +7,7 @@ import OpenAI from 'openai';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
-// Charger les variables d'environnement depuis le bon .env
+// Charger les variables d'environnement
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 config({ path: path.join(__dirname, '.env') });
@@ -33,18 +33,21 @@ app.post('/ask', async (req, res) => {
     return res.status(400).json({ error: 'Aucun message fourni.' });
   }
 
-  let lastUserMessage = messages[messages.length - 1]?.text?.trim().toLowerCase();
+  const lastUserMessage = messages[messages.length - 1]?.text?.trim();
   if (!lastUserMessage) {
     return res.status(400).json({ error: 'Message vide.' });
   }
 
   try {
+    // Générer l'embedding du dernier message
     const embeddingResponse = await openai.embeddings.create({
       input: lastUserMessage,
       model: 'text-embedding-ada-002',
     });
 
     const embedding = embeddingResponse.data[0].embedding;
+
+    // Rechercher les documents les plus pertinents
     const searchResult = await qdrant.search('documents', {
       vector: embedding,
       limit: 2,
@@ -61,31 +64,31 @@ app.post('/ask', async (req, res) => {
 
     const systemPrompt = {
       fr: `
-    Tu es DroitGPT, un assistant juridique spécialisé en droit congolais. 
-    Ta mission est d'aider les citoyens, avocats, étudiants et entrepreneurs à comprendre et appliquer le droit en République démocratique du Congo (RDC).
+Tu es DroitGPT, un assistant juridique spécialisé en droit congolais. 
+Ta mission est d'aider les citoyens, avocats, étudiants et entrepreneurs à comprendre et appliquer le droit en République démocratique du Congo (RDC).
 
-    Réponds toujours en HTML bien formaté, avec :
+Réponds toujours en HTML bien formaté, avec :
 
-    - <h3> pour les titres de sections importantes (ex. : Base légale, Explication, Jurisprudence),
-    - <strong> pour les termes clés ou articles de loi,
-    - <ul> ou <ol> si tu veux structurer une liste.
+- <h3> pour les titres de sections importantes (ex. : Base légale, Explication, Jurisprudence),
+- <strong> pour les termes clés ou articles de loi,
+- <ul> ou <ol> si tu veux structurer une liste.
 
-    Sois clair, concis et précis. Si la réponse est complexe, donne d'abord un résumé, puis les détails.
+Sois clair, concis et précis. Si la réponse est complexe, donne d'abord un résumé, puis les détails.
 
-    Inclue toujours que possible :
-    - les **articles de loi** concernés (Code du travail, Code civil, OHADA, etc.),
-    - des **exemples concrets** ou des **cas pratiques** si pertinent,
-    - des recommandations ou étapes à suivre si la question est liée à une démarche juridique.
+Inclue toujours que possible :
+- les <strong>articles de loi</strong> concernés (Code du travail, Code civil, OHADA, etc.),
+- des <strong>exemples concrets</strong> ou des <strong>cas pratiques</strong> si pertinent,
+- des recommandations ou étapes à suivre si la question est liée à une démarche juridique.
 
-    Si tu n'as pas suffisamment d'information dans les documents, propose poliment à l'utilisateur de reformuler ou de préciser sa question.
-  `,
-  ...
+Si tu n'as pas suffisamment d'information dans les documents, propose poliment à l'utilisateur de reformuler ou de préciser sa question.
+`
     };
 
+    // 🧠 Historique complet de la conversation
     const chatHistory = [
       { role: 'system', content: systemPrompt[lang] || systemPrompt['fr'] },
       { role: 'user', content: `Voici les documents pertinents :\n${context}` },
-      ...messages.slice(-4).map(msg => ({
+      ...messages.slice(-6).map(msg => ({
         role: msg.from === 'user' ? 'user' : 'assistant',
         content: msg.text
       }))
