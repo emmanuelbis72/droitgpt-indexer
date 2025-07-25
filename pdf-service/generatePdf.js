@@ -1,4 +1,3 @@
-// 📄 generatePdf.js – Route de génération PDF (corrigée)
 import express from 'express';
 import PDFDocument from 'pdfkit';
 import OpenAI from 'openai';
@@ -6,39 +5,38 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 
-// ✅ Chargement des variables d’environnement depuis le fichier .env local
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 dotenv.config({ path: path.join(__dirname, '.env') });
 
 const router = express.Router();
 
-// ✅ Initialisation de l’API OpenAI
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
 router.post('/', async (req, res) => {
-  const { type, data } = req.body;
+  const { title, content } = req.body;
 
-  if (!type || !data) {
-    return res.status(400).json({ error: 'Type et données requises.' });
+  if (!title || !content) {
+    return res.status(400).json({ error: 'Le titre et le contenu sont requis.' });
   }
 
   try {
-    // ✅ Prompt pour GPT-4
+    // 🧠 Prompt pour OpenAI avec le contenu obligatoire
     const prompt = `
-Tu es un avocat congolais expert en rédaction juridique professionnelle.
+Tu es un avocat congolais expert en rédaction juridique.
 
-Rédige un document juridique complet et détaillé de type : "${type}".
-✅ Le document doit :
-- être structuré comme un vrai document d’avocat
-- contenir des clauses précises et bien formulées
-- inclure toutes les informations pertinentes données
-- être rédigé uniquement en français avec un langage juridique clair, rigoureux et complet
+Rédige un document juridique professionnel et complet ayant pour **titre** :
+"${title}"
 
-Voici les données à intégrer :
-${JSON.stringify(data, null, 2)}
+Le document doit :
+- respecter les normes juridiques congolaises
+- être structuré et formel
+- contenir obligatoirement les informations suivantes : "${content}"
+- inclure toutes les clauses et formulations nécessaires au type de document
+
+Le style doit être : rigoureux, clair, sans fautes, professionnel et uniquement en français.
 `;
 
     const completion = await openai.chat.completions.create({
@@ -46,14 +44,14 @@ ${JSON.stringify(data, null, 2)}
       messages: [
         {
           role: 'system',
-          content: 'Tu es un avocat congolais spécialisé en rédaction juridique en français. Ton style est rigoureux, formel, sans fautes, et très détaillé.',
+          content: 'Tu es un avocat congolais spécialisé en rédaction juridique. Tu rédiges des documents très structurés, précis, et conformes à la loi congolaise.',
         },
         {
           role: 'user',
           content: prompt,
         },
       ],
-      temperature: 0.2,
+      temperature: 0.3,
       max_tokens: 2000,
     });
 
@@ -64,14 +62,14 @@ ${JSON.stringify(data, null, 2)}
 
     const today = new Date().toLocaleDateString('fr-FR');
 
-    // ✅ Génération du fichier PDF
+    // 📄 Génération PDF
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `attachment; filename=document-${type}.pdf`);
+    res.setHeader('Content-Disposition', `attachment; filename=${title.replace(/\s+/g, '_')}.pdf`);
 
     const doc = new PDFDocument({ margin: 50 });
     doc.pipe(res);
 
-    doc.font('Helvetica-Bold').fontSize(14).text(`Document juridique – ${type}`, { align: 'center' });
+    doc.font('Helvetica-Bold').fontSize(16).text(title, { align: 'center' });
     doc.moveDown();
 
     doc.font('Helvetica').fontSize(12).text(outputText, {
@@ -85,7 +83,7 @@ ${JSON.stringify(data, null, 2)}
 
     doc.end();
   } catch (err) {
-    console.error('❌ Erreur génération de document :', err.message);
+    console.error('❌ Erreur génération :', err.message);
     res.status(500).json({ error: 'Erreur serveur', details: err.message });
   }
 });
