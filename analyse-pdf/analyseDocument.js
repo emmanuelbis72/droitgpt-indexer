@@ -6,19 +6,26 @@ import mammoth from 'mammoth';
 import pkg from 'pdf2json';
 
 const PDFParser = pkg;
-
 const upload = multer({ dest: 'uploads/' });
 
 function extractTextFromPdf(filePath) {
   return new Promise((resolve, reject) => {
     const pdfParser = new PDFParser();
 
-    pdfParser.on("pdfParser_dataError", err => reject(err.parserError));
+    pdfParser.on("pdfParser_dataError", err => {
+      console.error('❌ Erreur PDF :', err.parserError);
+      reject(err.parserError);
+    });
+
     pdfParser.on("pdfParser_dataReady", pdfData => {
-      const text = pdfData.formImage.Pages.flatMap(page =>
-        page.Texts.map(t => decodeURIComponent(t.R[0].T))
-      ).join(" ");
-      resolve(text);
+      try {
+        const text = pdfData.formImage.Pages.flatMap(page =>
+          page.Texts.map(t => decodeURIComponent(t.R[0].T))
+        ).join(" ");
+        resolve(text);
+      } catch (e) {
+        reject("Erreur lors de l'extraction du texte PDF");
+      }
     });
 
     pdfParser.loadPDF(filePath);
@@ -29,6 +36,7 @@ export default function (openai) {
   const router = express.Router();
 
   router.post('/', upload.single('file'), async (req, res) => {
+    res.setHeader('Access-Control-Allow-Origin', process.env.CORS_ORIGIN || '*');
     if (!req.file) return res.status(400).json({ error: 'Aucun fichier envoyé.' });
 
     const filePath = req.file.path;
@@ -44,6 +52,10 @@ export default function (openai) {
         text = result.value || '';
       } else {
         return res.status(400).json({ error: 'Format non supporté. PDF ou DOCX requis.' });
+      }
+
+      if (!text || text.length < 30) {
+        return res.status(400).json({ error: 'Contenu vide ou non lisible.' });
       }
 
       const prompt = `
