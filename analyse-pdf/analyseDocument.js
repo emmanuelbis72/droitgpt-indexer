@@ -1,9 +1,9 @@
-import express from 'express';
-import multer from 'multer';
-import fs from 'fs';
-import path from 'path';
-import mammoth from 'mammoth';
-import pdfParse from 'pdf-parse'; // ✅ pdf-parse correctement importé
+const express = require('express');
+const multer = require('multer');
+const fs = require('fs');
+const path = require('path');
+const mammoth = require('mammoth');
+const pdfParse = require('pdf-parse'); // ✅ en CommonJS
 
 const upload = multer({ dest: 'uploads/' });
 
@@ -13,7 +13,7 @@ async function extractTextFromPdf(filePath) {
   return data.text;
 }
 
-export default function (openai) {
+module.exports = function (openai) {
   const router = express.Router();
 
   router.post('/', upload.single('file'), async (req, res) => {
@@ -34,7 +34,6 @@ export default function (openai) {
         const result = await mammoth.extractRawText({ path: filePath });
         text = result.value || '';
       } else {
-        console.error('❌ Format de fichier non pris en charge');
         return res.status(400).json({ error: 'Format non supporté. PDF ou DOCX requis.' });
       }
 
@@ -72,4 +71,4 @@ Document :
   });
 
   return router;
-}
+};
