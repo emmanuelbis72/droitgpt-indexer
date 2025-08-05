@@ -6,27 +6,32 @@ import mammoth from 'mammoth';
 import pkg from 'pdf2json';
 
 const PDFParser = pkg;
-
 const upload = multer({ dest: 'uploads/' });
 
 function extractTextFromPdf(filePath) {
   return new Promise((resolve, reject) => {
     const pdfParser = new PDFParser();
 
-    pdfParser.on("pdfParser_dataError", err => {
-      console.error('❌ Erreur PDFParser :', err.parserError);
-      reject(err.parserError);
-    });
+    pdfParser.on("pdfParser_dataError", err => reject(err.parserError || new Error("Erreur lecture PDF")));
 
     pdfParser.on("pdfParser_dataReady", pdfData => {
       try {
-        const text = pdfData.formImage.Pages.flatMap(page =>
+        const pages = pdfData?.formImage?.Pages;
+        if (!pages || !Array.isArray(pages)) {
+          return reject(new Error("Ce fichier PDF ne contient aucun texte détectable. Il s'agit peut-être d'un scan ou d'une image."));
+        }
+
+        const text = pages.flatMap(page =>
           page.Texts.map(t => decodeURIComponent(t.R[0].T))
         ).join(" ");
+
+        if (!text.trim()) {
+          return reject(new Error("Ce fichier PDF est vide ou ne contient pas de texte lisible."));
+        }
+
         resolve(text);
-      } catch (e) {
-        console.error('❌ Erreur lors de l’extraction du texte PDF :', e.message);
-        reject(e);
+      } catch (err) {
+        reject(new Error("Erreur lors du traitement du fichier PDF"));
       }
     });
 
@@ -39,7 +44,6 @@ export default function (openai) {
 
   router.post('/', upload.single('file'), async (req, res) => {
     if (!req.file) {
-      console.error('❌ Aucun fichier reçu');
       return res.status(400).json({ error: 'Aucun fichier envoyé.' });
     }
 
@@ -55,13 +59,7 @@ export default function (openai) {
         const result = await mammoth.extractRawText({ path: filePath });
         text = result.value || '';
       } else {
-        console.error('❌ Format de fichier non pris en charge');
-        return res.status(400).json({ error: 'Format non supporté. PDF ou DOCX requis.' });
-      }
-
-      console.log('📝 Texte extrait (début) :', text.slice(0, 500));
-      if (!text || text.length < 50) {
-        throw new Error('Texte trop court ou vide après extraction.');
+        return res.status(400).json({ error: 'Format non supporté. Utilisez un fichier PDF ou DOCX.' });
       }
 
       const prompt = `
@@ -74,7 +72,7 @@ Analyse le document suivant et fournis :
 
 Document :
 """${text.slice(0, 4000)}"""
-      `;
+`;
 
       const completion = await openai.chat.completions.create({
         model: 'gpt-4',
@@ -83,12 +81,9 @@ Document :
         max_tokens: 1200,
       });
 
-      const finalAnswer = completion.choices[0].message.content;
-      console.log('✅ Réponse OpenAI :', finalAnswer);
-
-      res.json({ analysis: finalAnswer });
+      res.json({ analysis: completion.choices[0].message.content });
     } catch (err) {
-      console.error('❌❌ Erreur complète analyse OpenAI :', JSON.stringify(err, null, 2));
+      console.error('❌ Erreur analyse :', err.message);
       res.status(500).json({ error: 'Erreur analyse', details: err.message });
     } finally {
       if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
