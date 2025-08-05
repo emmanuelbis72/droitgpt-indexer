@@ -6,25 +6,29 @@ import mammoth from 'mammoth';
 import pkg from 'pdf2json';
 
 const PDFParser = pkg;
+
 const upload = multer({ dest: 'uploads/' });
 
+// ✅ Fonction robuste d’extraction de texte depuis PDF
 function extractTextFromPdf(filePath) {
   return new Promise((resolve, reject) => {
     const pdfParser = new PDFParser();
 
-    pdfParser.on("pdfParser_dataError", err => {
-      console.error('❌ Erreur PDF :', err.parserError);
-      reject(err.parserError);
-    });
-
+    pdfParser.on("pdfParser_dataError", err => reject(err.parserError));
     pdfParser.on("pdfParser_dataReady", pdfData => {
       try {
         const text = pdfData.formImage.Pages.flatMap(page =>
-          page.Texts.map(t => decodeURIComponent(t.R[0].T))
+          page.Texts.map(t => {
+            try {
+              return decodeURIComponent(t.R?.[0]?.T || '');
+            } catch {
+              return '';
+            }
+          })
         ).join(" ");
         resolve(text);
-      } catch (e) {
-        reject("Erreur lors de l'extraction du texte PDF");
+      } catch (err) {
+        reject(err);
       }
     });
 
@@ -36,7 +40,6 @@ export default function (openai) {
   const router = express.Router();
 
   router.post('/', upload.single('file'), async (req, res) => {
-    res.setHeader('Access-Control-Allow-Origin', process.env.CORS_ORIGIN || '*');
     if (!req.file) return res.status(400).json({ error: 'Aucun fichier envoyé.' });
 
     const filePath = req.file.path;
@@ -52,10 +55,6 @@ export default function (openai) {
         text = result.value || '';
       } else {
         return res.status(400).json({ error: 'Format non supporté. PDF ou DOCX requis.' });
-      }
-
-      if (!text || text.length < 30) {
-        return res.status(400).json({ error: 'Contenu vide ou non lisible.' });
       }
 
       const prompt = `
@@ -79,7 +78,7 @@ Document :
 
       res.json({ analysis: completion.choices[0].message.content });
     } catch (err) {
-      console.error('❌ Erreur analyse :', err.message);
+      console.error('❌ Erreur analyse complète :', err);
       res.status(500).json({ error: 'Erreur analyse', details: err.message });
     } finally {
       if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
