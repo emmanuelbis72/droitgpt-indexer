@@ -3,20 +3,14 @@ import multer from 'multer';
 import fs from 'fs';
 import path from 'path';
 import mammoth from 'mammoth';
-import pdfParse from 'pdf-parse'; // ✅ Remplace pdf2json
+import pdfParse from 'pdf-parse'; // ✅ pdf-parse correctement importé
 
 const upload = multer({ dest: 'uploads/' });
 
-// ✅ Nouvelle fonction plus fiable pour PDF
 async function extractTextFromPdf(filePath) {
-  try {
-    const dataBuffer = fs.readFileSync(filePath);
-    const data = await pdfParse(dataBuffer);
-    return data.text;
-  } catch (err) {
-    console.error('❌ Erreur pdf-parse :', err.message);
-    throw err;
-  }
+  const dataBuffer = fs.readFileSync(filePath);
+  const data = await pdfParse(dataBuffer);
+  return data.text;
 }
 
 export default function (openai) {
@@ -44,11 +38,9 @@ export default function (openai) {
         return res.status(400).json({ error: 'Format non supporté. PDF ou DOCX requis.' });
       }
 
-      if (!text || text.length < 30) {
-        throw new Error('Le document ne contient pas suffisamment de texte pour être analysé.');
+      if (!text || text.length < 50) {
+        throw new Error('Texte trop court ou vide après extraction.');
       }
-
-      console.log('📝 Texte extrait (début) :', text.slice(0, 300));
 
       const prompt = `
 Tu es un juriste congolais spécialisé dans l'analyse de documents juridiques.
@@ -60,7 +52,7 @@ Analyse le document suivant et fournis :
 
 Document :
 """${text.slice(0, 4000)}"""
-      `;
+`;
 
       const completion = await openai.chat.completions.create({
         model: 'gpt-4',
@@ -70,11 +62,9 @@ Document :
       });
 
       const finalAnswer = completion.choices[0].message.content;
-      console.log('✅ Réponse OpenAI :', finalAnswer);
-
       res.json({ analysis: finalAnswer });
     } catch (err) {
-      console.error('❌❌ Erreur complète analyse OpenAI :', JSON.stringify(err, null, 2));
+      console.error('❌ Erreur analyse :', err.message);
       res.status(500).json({ error: 'Erreur analyse', details: err.message });
     } finally {
       if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
