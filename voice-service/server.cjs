@@ -194,7 +194,7 @@ app.post("/voice-chat", upload.single("audio"), async (req, res) => {
     // 8) Génération audio TTS
     const speech = await openai.audio.speech.create({
       model: "gpt-4o-mini-tts",
-      voice: "amber", // voix masculine plus naturelle
+      voice: "alloy", // voix masculine plus naturelle
       input: spokenText,
     });
 
