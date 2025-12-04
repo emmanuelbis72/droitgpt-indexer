@@ -52,51 +52,67 @@ module.exports = function (openai) {
       // On limite la taille pour éviter d'exploser le contexte du modèle
       const shortText = text.slice(0, 8000);
 
-      const prompt = `
-Tu es un juriste congolais spécialisé dans l'analyse de documents juridiques (droit de la RDC).
-
-Analyse le document suivant et fournis une réponse structurée et pédagogique, en faisant référence aux lois congolaises lorsqu'elles sont pertinentes (Code de la famille, Code pénal, Code du travail, OHADA, etc.).
-
-Ta réponse doit obligatoirement être en HTML clair, selon le format suivant :
-
-<h2>Résumé des points juridiques clés</h2>
-<p>Paragraphe(s) expliquant les éléments essentiels du document.</p>
-
-<h3>Analyse des clauses et effets juridiques</h3>
-<ul>
-  <li><strong>Clause X :</strong> explication simple et impact pour le client.</li>
-  <li><strong>Clause Y :</strong> explication, risques, obligations.</li>
-</ul>
-
-<h3>Risques et zones d'attention</h3>
-<ul>
-  <li>Risque 1 avec référence aux textes juridiques congolais applicables.</li>
-  <li>Risque 2, etc.</li>
-</ul>
-
-<h3>Recommandations pratiques</h3>
-<ul>
-  <li>Conseils concrets pour la personne qui consulte.</li>
-</ul>
-
-<h3>Conclusion</h3>
-<p>Résumé final court, clair, qui rappelle les points essentiels.</p>
-
-Règles importantes :
-- Utilise des balises <p>, <h2>, <h3>, <ul>, <li>, <strong>.
-- Évite les phrases trop longues, reste compréhensible à l'oral.
-- N'ajoute pas d'autres balises HTML complexes (pas de tableaux, pas de CSS).
-- Ne mets pas de disclaimer technique, reste focalisé sur l'analyse juridique.
+      // 🧠 Prompt + system améliorés
+      const userPrompt = `
+Le texte ci-dessous est un document juridique (contrat, lettre, décision, acte, etc.).
+Tu dois l’analyser et produire un avis structuré, pédagogique et applicable au contexte congolais.
 
 Document à analyser :
 """${shortText}"""
 `;
 
       const completion = await openai.chat.completions.create({
-        model: "gpt-4",
-        messages: [{ role: "user", content: prompt }],
+        model: "gpt-4o-mini",
+        messages: [
+          {
+            role: "system",
+            content:
+              "Tu es un juriste congolais expérimenté, spécialisé dans l'analyse de contrats, décisions et actes juridiques. " +
+              "Tu raisonnes selon le droit applicable en République Démocratique du Congo et, lorsque pertinent, le droit OHADA. " +
+              "Tu expliques de façon claire, structurée et moderne, sans langage trop technique, mais en restant professionnel. " +
+              "Lorsque c'est utile, tu fais des références générales aux textes (Code de la famille, Code du travail, Code pénal, Actes uniformes OHADA, etc.) " +
+              "sans inventer de numéros d’articles que tu ne connais pas avec certitude. " +
+              "Ta réponse doit obligatoirement être en HTML simple, adaptée à l’affichage dans une interface web et à la conversion en PDF.",
+          },
+          {
+            role: "user",
+            content: `
+Analyse le document transmis et réponds en suivant STRICTEMENT le gabarit HTML ci-dessous :
+
+<h2>Résumé des points juridiques clés</h2>
+<p>Paragraphe(s) expliquant de manière synthétique l'objet du document, les parties concernées et les éléments principaux.</p>
+
+<h3>Analyse des clauses et effets juridiques</h3>
+<ul>
+  <li><strong>Clause ou point important 1 :</strong> explication simple et impact pour la personne qui consulte.</li>
+  <li><strong>Clause ou point important 2 :</strong> explication, conséquences juridiques possibles.</li>
+</ul>
+
+<h3>Risques et zones d'attention</h3>
+<ul>
+  <li>Risque 1 avec, si possible, référence générale au cadre légal congolais ou OHADA concerné.</li>
+  <li>Risque 2, autres points de vigilance pratiques.</li>
+</ul>
+
+<h3>Recommandations pratiques</h3>
+<ul>
+  <li>Conseils concrets sur ce qu'il est conseillé de faire (négocier, modifier une clause, demander un écrit, consulter un avocat, etc.).</li>
+</ul>
+
+<h3>Conclusion</h3>
+<p>Conclusion courte rappelant l'essentiel et la prudence à avoir.</p>
+
+Règles importantes :
+- Utilise uniquement les balises HTML suivantes : <p>, <h2>, <h3>, <ul>, <li>, <strong>.
+- Rédige en français clair, avec des phrases plutôt courtes, compréhensibles même à l’oral.
+- Ne génère AUCUN autre type de balise HTML (pas de tableaux, pas de styles inline, pas de <br> en série).
+- Ne mets pas de disclaimer technique sur l’IA ; concentre-toi sur l’analyse juridique et les conseils pratiques.
+- N’écris rien en dehors de cette structure HTML.
+`,
+          },
+        ],
         temperature: 0.3,
-        max_tokens: 1200,
+        max_tokens: 1400,
       });
 
       const finalAnswer = completion.choices[0].message.content;
