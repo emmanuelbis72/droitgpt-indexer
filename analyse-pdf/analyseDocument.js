@@ -55,13 +55,40 @@ module.exports = function (openai) {
       const prompt = `
 Tu es un juriste congolais spécialisé dans l'analyse de documents juridiques (droit de la RDC).
 
-Analyse le document suivant et fournis :
-- Un résumé des points juridiques clés
-- Une évaluation des clauses principales
-- Les principaux risques ou zones d'attention
-- Des recommandations éventuelles pour la personne qui te consulte
+Analyse le document suivant et fournis une réponse structurée et pédagogique, en faisant référence aux lois congolaises lorsqu'elles sont pertinentes (Code de la famille, Code pénal, Code du travail, OHADA, etc.).
 
-Document :
+Ta réponse doit obligatoirement être en HTML clair, selon le format suivant :
+
+<h2>Résumé des points juridiques clés</h2>
+<p>Paragraphe(s) expliquant les éléments essentiels du document.</p>
+
+<h3>Analyse des clauses et effets juridiques</h3>
+<ul>
+  <li><strong>Clause X :</strong> explication simple et impact pour le client.</li>
+  <li><strong>Clause Y :</strong> explication, risques, obligations.</li>
+</ul>
+
+<h3>Risques et zones d'attention</h3>
+<ul>
+  <li>Risque 1 avec référence aux textes juridiques congolais applicables.</li>
+  <li>Risque 2, etc.</li>
+</ul>
+
+<h3>Recommandations pratiques</h3>
+<ul>
+  <li>Conseils concrets pour la personne qui consulte.</li>
+</ul>
+
+<h3>Conclusion</h3>
+<p>Résumé final court, clair, qui rappelle les points essentiels.</p>
+
+Règles importantes :
+- Utilise des balises <p>, <h2>, <h3>, <ul>, <li>, <strong>.
+- Évite les phrases trop longues, reste compréhensible à l'oral.
+- N'ajoute pas d'autres balises HTML complexes (pas de tableaux, pas de CSS).
+- Ne mets pas de disclaimer technique, reste focalisé sur l'analyse juridique.
+
+Document à analyser :
 """${shortText}"""
 `;
 
