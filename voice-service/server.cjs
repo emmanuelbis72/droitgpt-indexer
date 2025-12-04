@@ -1,4 +1,4 @@
-// server.cjs - service vocal DroitGPT (CommonJS)
+// server.cjs - service vocal DroitGPT (optimisé, sans double appel chat)
 
 const express = require("express");
 const cors = require("cors");
@@ -23,7 +23,7 @@ const openai = new OpenAI({
 });
 
 // ⚙️ URL vers ton /ask EXISTANT (local ou Render)
-const ASK_URL = process.env.ASK_URL || "http://localhost:3000/ask";
+const ASK_URL = process.env.ASK_URL || "https://droitgpt-indexer.onrender.com/ask";
 
 // 🧹 Enlever les balises HTML pour un texte lisible à l’oral
 function stripHtmlToText(html) {
@@ -31,13 +31,9 @@ function stripHtmlToText(html) {
 
   return (
     html
-      // puces
       .replace(/<li>/gi, "• ")
-      // retours à la ligne après certains blocs
       .replace(/<\/(p|div|h[1-6]|li|ul|ol|br)>/gi, "\n")
-      // supprimer le reste des balises
       .replace(/<[^>]+>/g, "")
-      // nettoyer les espaces
       .replace(/\n{2,}/g, "\n")
       .replace(/[ \t]{2,}/g, " ")
       .trim()
@@ -54,7 +50,7 @@ async function detectLanguage(text) {
           role: "system",
           content:
             "Tu es un détecteur de langue. " +
-            "Réponds UNIQUEMENT par un code très court de langue (par exemple: fr, en, sw, ln, es, ar, pt...). " +
+            "Réponds UNIQUEMENT par un code très court de langue (par exemple: fr, en, sw, ln, es, pt...). " +
             "Pas d'autre texte, pas de phrases.",
         },
         {
@@ -76,7 +72,10 @@ async function detectLanguage(text) {
 
     return code;
   } catch (e) {
-    console.warn("Impossible de détecter la langue, on met fr par défaut :", e.message);
+    console.warn(
+      "Impossible de détecter la langue, on met fr par défaut :",
+      e.message
+    );
     return "fr";
   }
 }
@@ -100,6 +99,7 @@ app.post("/voice-chat", upload.single("audio"), async (req, res) => {
     const transcription = await openai.audio.transcriptions.create({
       file: fs.createReadStream(tmpPath),
       model: "gpt-4o-mini-transcribe",
+      // language: "fr", // on peut laisser auto
     });
 
     fs.unlink(tmpPath, () => {});
@@ -147,64 +147,25 @@ app.post("/voice-chat", upload.single("audio"), async (req, res) => {
 
     console.log("⚖️ Réponse DroitGPT (brute) :", rawAnswer);
 
-    // 6) Nettoyage HTML
-    const cleanedText = stripHtmlToText(rawAnswer);
+    // 6) Nettoyage HTML -> texte simple
+    const cleanedText = stripHtmlToText(rawAnswer) || rawAnswer;
 
-    // 7) Réécriture ORALE AVEC TON MESSAGE SYSTÈME AMÉLIORÉ
-    let spokenText = cleanedText || rawAnswer;
+    console.log("🗣️ Texte final pour l'oral :", cleanedText);
 
-    try {
-      const completion = await openai.chat.completions.create({
-        model: "gpt-4o-mini",
-        messages: [
-          {
-            role: "system",
-            content:
-              "Tu es un avocat congolais professionnel. " +
-              "Tu t’exprimes avec calme, clarté, respect, et pédagogie. " +
-              "Tu parles avec une tonalité chaleureuse et posée, mais sans accent particulier. " +
-              "Quand c’est utile, fais référence aux lois congolaises, aux codes, aux articles, " +
-              "et explique ce qu’ils impliquent pour la personne, en termes simples. " +
-              "Réécris le texte pour qu'il soit parfaitement adapté à l’oral : phrases courtes, " +
-              "explications simples, ton bienveillant. " +
-              "IMPORTANT : réponds dans la MÊME langue que la question ('" +
-              userLang +
-              "'). " +
-              "Si le texte d’origine n’est pas dans cette langue, traduis-le d’abord, puis reformule-le. " +
-              "Ne génère aucun HTML.",
-          },
-          {
-            role: "user",
-            content: cleanedText || rawAnswer,
-          },
-        ],
-        temperature: 0.4,
-      });
-
-      const choice = completion.choices?.[0]?.message?.content;
-      if (choice && choice.trim().length > 0) {
-        spokenText = choice.trim();
-      }
-    } catch (e) {
-      console.warn("Impossible de réécrire pour l'oral, on garde le texte nettoyé :", e.message);
-    }
-
-    console.log("🗣️ Texte final pour l'oral :", spokenText);
-
-    // 8) Génération audio TTS
+    // 7) Génération audio TTS (voix masculine → onyx)
     const speech = await openai.audio.speech.create({
       model: "gpt-4o-mini-tts",
-      voice: "onyx", // voix masculine plus naturelle
-      input: spokenText,
+      voice: "onyx", // ✅ masculine, pro
+      input: cleanedText,
     });
 
     const audioBuffer = Buffer.from(await speech.arrayBuffer());
     const audioBase64 = audioBuffer.toString("base64");
 
-    // 9) Réponse au frontend
+    // 8) Réponse au frontend
     res.json({
       userText,
-      answerText: spokenText,
+      answerText: cleanedText,
       audioBase64,
       mimeType: "audio/mpeg",
     });
