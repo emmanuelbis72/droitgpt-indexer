@@ -2,18 +2,21 @@
   "name": "droitgpt-indexer-query",
   "version": "1.0.0",
   "type": "module",
-  "main": "server.js",
+  "main": "query.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node query.js"
   },
   "dependencies": {
     "@langchain/community": "^0.3.47",
     "@langchain/core": "^0.3.61",
     "@langchain/openai": "^0.5.15",
     "@qdrant/js-client-rest": "^1.14.1",
+    "bcrypt": "^5.1.1",
     "cors": "^2.8.5",
     "dotenv": "^16.5.0",
     "express": "^4.21.2",
+    "jsonwebtoken": "^9.0.2",
+    "mongoose": "^8.10.1",
     "openai": "^5.1.1",
     "pdfkit": "^0.17.1"
   },
