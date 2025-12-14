@@ -23,20 +23,34 @@ config({ path: path.join(__dirname, ".env") });
 const app = express();
 
 /* =======================
-   CORS
+   CORS (FIX preflight + origins)
 ======================= */
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "")
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean);
 
-app.use(
-  cors({
-    origin: ALLOWED_ORIGINS.length ? ALLOWED_ORIGINS : true,
-    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
-  })
-);
+const corsOptions = {
+  origin: function (origin, callback) {
+    // Permet les appels sans origin (server-to-server / curl / healthchecks)
+    if (!origin) return callback(null, true);
+
+    // Si la liste est vide => autoriser tout (fallback)
+    if (!ALLOWED_ORIGINS.length) return callback(null, true);
+
+    // Autoriser uniquement les origines listées
+    if (ALLOWED_ORIGINS.includes(origin)) return callback(null, true);
+
+    return callback(new Error(`CORS blocked for origin: ${origin}`), false);
+  },
+  credentials: true,
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+};
+
+app.use(cors(corsOptions));
+// ✅ Important pour le preflight
+app.options("*", cors(corsOptions));
 
 app.use(express.json({ limit: "2mb" }));
 
