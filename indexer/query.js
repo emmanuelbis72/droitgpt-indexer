@@ -10,7 +10,10 @@ import mongoose from "mongoose";
 
 // 🔐 Auth
 import authRoutes from "./auth/auth.routes.js";
-import requireAuth from "./auth/requireAuth.js";
+
+// ✅ Import robuste: accepte export default OU export nommé "requireAuth"
+import * as requireAuthModule from "./auth/requireAuth.js";
+const requireAuth = requireAuthModule.default || requireAuthModule.requireAuth;
 
 // Charger les variables d'environnement
 const __filename = fileURLToPath(import.meta.url);
