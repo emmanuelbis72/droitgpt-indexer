@@ -20,7 +20,8 @@ export function signAccessToken(user) {
   return jwt.sign(
     {
       sub: user._id?.toString?.() || user.id, // Mongo ou SQL
-      email: user.email,
+      phone: user.phone,
+      fullName: user.fullName,
       role: user.role || "user",
     },
     secret,
@@ -49,6 +50,7 @@ export function verifyAccessToken(token) {
  * @param {string} authHeader
  */
 export function extractBearerToken(authHeader = "") {
+  if (!authHeader) return null;
   if (!authHeader.startsWith("Bearer ")) return null;
-  return authHeader.slice(7);
+  return authHeader.slice(7).trim();
 }

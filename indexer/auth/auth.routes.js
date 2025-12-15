@@ -2,7 +2,7 @@
 import express from "express";
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
-import User from "./User.model.js"; // ✅ à créer (mongoose model)
+import User from "./User.model.js";
 
 const router = express.Router();
 
@@ -12,14 +12,28 @@ const router = express.Router();
  * ACCESS_TOKEN_TTL=7d (ou 15m, 1d, etc.)
  */
 
+const BCRYPT_ROUNDS = Number(process.env.BCRYPT_ROUNDS || 12);
+
+/* =======================
+   Utils
+======================= */
+
+function normalizePhone(input) {
+  const raw = String(input || "").trim();
+  if (!raw) return "";
+  const cleaned = raw.replace(/[()\s-]/g, "");
+  return /^\+\d{8,15}$/.test(cleaned) ? cleaned : "";
+}
+
 function signAccessToken(user) {
   const secret = process.env.JWT_ACCESS_SECRET;
-  if (!secret) throw new Error("JWT_ACCESS_SECRET manquant dans .env");
+  if (!secret) throw new Error("JWT_ACCESS_SECRET manquant");
 
   return jwt.sign(
     {
       sub: user._id.toString(),
-      email: user.email,
+      phone: user.phone,
+      fullName: user.fullName,
       role: user.role || "user",
     },
     secret,
@@ -30,40 +44,53 @@ function signAccessToken(user) {
 function sanitizeUser(user) {
   return {
     id: user._id.toString(),
-    email: user.email,
+    fullName: user.fullName,
+    phone: user.phone,
     role: user.role || "user",
     createdAt: user.createdAt,
   };
 }
 
-// ✅ POST /auth/register
+/* =======================
+   REGISTER
+   POST /auth/register
+   { fullName, phone, password }
+======================= */
 router.post("/register", async (req, res) => {
   try {
-    const { email, password } = req.body || {};
-    const cleanEmail = (email || "").trim().toLowerCase();
+    const { fullName, phone, password } = req.body || {};
 
-    if (!cleanEmail || !password) {
-      return res.status(400).json({ error: "Email et mot de passe requis." });
+    const cleanName = String(fullName || "").trim();
+    const cleanPhone = normalizePhone(phone);
+
+    if (!cleanName || !cleanPhone || !password) {
+      return res.status(400).json({
+        error: "Champs requis : fullName, phone, password.",
+      });
     }
+
     if (password.length < 6) {
-      return res
-        .status(400)
-        .json({ error: "Le mot de passe doit avoir au moins 6 caractères." });
+      return res.status(400).json({
+        error: "Le mot de passe doit avoir au moins 6 caractères.",
+      });
     }
 
-    const exists = await User.findOne({ email: cleanEmail });
+    const exists = await User.findOne({ phone: cleanPhone });
     if (exists) {
-      return res.status(409).json({ error: "Cet email est déjà utilisé." });
+      return res.status(409).json({
+        error: "Ce numéro WhatsApp est déjà utilisé.",
+      });
     }
 
-    const passwordHash = await bcrypt.hash(password, 12);
+    const passwordHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
+
     const user = await User.create({
-      email: cleanEmail,
+      fullName: cleanName,
+      phone: cleanPhone,
       passwordHash,
       role: "user",
     });
 
-    // Option: auto-login après inscription
     const accessToken = signAccessToken(user);
 
     return res.status(201).json({
@@ -76,17 +103,23 @@ router.post("/register", async (req, res) => {
   }
 });
 
-// ✅ POST /auth/login
+/* =======================
+   LOGIN
+   POST /auth/login
+   { phone, password }
+======================= */
 router.post("/login", async (req, res) => {
   try {
-    const { email, password } = req.body || {};
-    const cleanEmail = (email || "").trim().toLowerCase();
+    const { phone, password } = req.body || {};
+    const cleanPhone = normalizePhone(phone);
 
-    if (!cleanEmail || !password) {
-      return res.status(400).json({ error: "Email et mot de passe requis." });
+    if (!cleanPhone || !password) {
+      return res.status(400).json({
+        error: "Numéro WhatsApp et mot de passe requis.",
+      });
     }
 
-    const user = await User.findOne({ email: cleanEmail });
+    const user = await User.findOne({ phone: cleanPhone });
     if (!user) {
       return res.status(401).json({ error: "Identifiants invalides." });
     }
@@ -108,16 +141,19 @@ router.post("/login", async (req, res) => {
   }
 });
 
-// ✅ GET /auth/me  (Bearer token)
+/* =======================
+   ME
+   GET /auth/me (Bearer)
+======================= */
 router.get("/me", async (req, res) => {
   try {
     const auth = req.headers.authorization || "";
-    const token = auth.startsWith("Bearer ") ? auth.slice(7) : null;
+    const token = auth.startsWith("Bearer ") ? auth.slice(7).trim() : null;
 
     if (!token) return res.status(401).json({ error: "Unauthorized" });
 
     const secret = process.env.JWT_ACCESS_SECRET;
-    if (!secret) throw new Error("JWT_ACCESS_SECRET manquant dans .env");
+    if (!secret) throw new Error("JWT_ACCESS_SECRET manquant");
 
     let payload;
     try {
@@ -136,11 +172,60 @@ router.get("/me", async (req, res) => {
   }
 });
 
-// ✅ POST /auth/logout (facultatif avec accessToken only)
-// Ici, rien à invalider côté serveur sans refresh token / blacklist.
-// On répond juste OK. Le frontend supprime son token.
+/* =======================
+   LOGOUT
+======================= */
 router.post("/logout", async (_req, res) => {
   return res.json({ ok: true });
+});
+
+/* =======================
+   ADMIN – STATS
+   GET /auth/admin/stats
+======================= */
+router.get("/admin/stats", async (req, res) => {
+  try {
+    const auth = req.headers.authorization || "";
+    const token = auth.startsWith("Bearer ") ? auth.slice(7).trim() : null;
+    if (!token) return res.status(401).json({ error: "Unauthorized" });
+
+    const payload = jwt.verify(token, process.env.JWT_ACCESS_SECRET);
+    if (payload.role !== "admin") {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+
+    const totalUsers = await User.countDocuments({});
+    return res.json({ totalUsers });
+  } catch (err) {
+    console.error("❌ /auth/admin/stats error:", err);
+    return res.status(500).json({ error: "Erreur serveur (admin stats)." });
+  }
+});
+
+/* =======================
+   ADMIN – LIST USERS
+   GET /auth/admin/users
+======================= */
+router.get("/admin/users", async (req, res) => {
+  try {
+    const auth = req.headers.authorization || "";
+    const token = auth.startsWith("Bearer ") ? auth.slice(7).trim() : null;
+    if (!token) return res.status(401).json({ error: "Unauthorized" });
+
+    const payload = jwt.verify(token, process.env.JWT_ACCESS_SECRET);
+    if (payload.role !== "admin") {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+
+    const users = await User.find({})
+      .sort({ createdAt: -1 })
+      .select("fullName phone role createdAt");
+
+    return res.json({ users });
+  } catch (err) {
+    console.error("❌ /auth/admin/users error:", err);
+    return res.status(500).json({ error: "Erreur serveur (admin users)." });
+  }
 });
 
 export default router;

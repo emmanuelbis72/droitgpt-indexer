@@ -4,15 +4,23 @@ import mongoose from "mongoose";
 /**
  * Modèle utilisateur DroitGPT
  * Utilisé pour l’authentification (register / login)
+ * Identifiant = phone (numéro WhatsApp, format E.164 recommandé: +243816307451)
  */
 
 const UserSchema = new mongoose.Schema(
   {
-    email: {
+    fullName: {
+      type: String,
+      required: true,
+      trim: true,
+      minlength: 2,
+      maxlength: 120,
+    },
+
+    phone: {
       type: String,
       required: true,
       unique: true,
-      lowercase: true,
       trim: true,
       index: true,
     },
