@@ -1,4 +1,4 @@
-// ✅ query.js – API principale DroitGPT + AUTH + /ask protégé + filtre Qdrant SAFE
+// ✅ query.js – API principale DroitGPT + AUTH + /ask protégé + filtre Qdrant SAFE (logs robustes)
 import express from "express";
 import cors from "cors";
 import { config } from "dotenv";
@@ -32,15 +32,9 @@ const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "")
 
 const corsOptions = {
   origin: function (origin, callback) {
-    // Permet les appels sans origin (server-to-server / curl / healthchecks)
     if (!origin) return callback(null, true);
-
-    // Si la liste est vide => autoriser tout (fallback)
     if (!ALLOWED_ORIGINS.length) return callback(null, true);
-
-    // Autoriser uniquement les origines listées
     if (ALLOWED_ORIGINS.includes(origin)) return callback(null, true);
-
     return callback(new Error(`CORS blocked for origin: ${origin}`), false);
   },
   credentials: true,
@@ -49,7 +43,6 @@ const corsOptions = {
 };
 
 app.use(cors(corsOptions));
-// ✅ Important pour le preflight
 app.options("*", cors(corsOptions));
 
 app.use(express.json({ limit: "2mb" }));
@@ -82,6 +75,48 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
+function safeString(x) {
+  if (typeof x === "string") return x;
+  if (x == null) return "";
+  return String(x);
+}
+
+function isValidMessage(m) {
+  return (
+    m &&
+    typeof m === "object" &&
+    typeof m.from === "string" &&
+    typeof m.text === "string" &&
+    m.text.trim().length > 0
+  );
+}
+
+/**
+ * Log OpenAI errors with details (instead of only "Bad Request")
+ */
+function logOpenAIError(prefix, err) {
+  const status = err?.status;
+  const name = err?.name;
+  const message = err?.message;
+
+  // SDK OpenAI v4: err.error peut contenir { message, type, param, code }
+  const apiError = err?.error;
+  const apiMsg = apiError?.message;
+  const apiType = apiError?.type;
+  const apiParam = apiError?.param;
+  const apiCode = apiError?.code;
+
+  console.error(`❌ ${prefix}`, {
+    status,
+    name,
+    message,
+    apiMsg,
+    apiType,
+    apiParam,
+    apiCode,
+  });
+}
+
 /* =======================
    AUTH ROUTES
 ======================= */
@@ -98,25 +133,55 @@ app.get("/", (_req, res) => {
    /ASK (protégé)
 ======================= */
 app.post("/ask", requireAuth, async (req, res) => {
-  const { messages, lang } = req.body;
+  const { messages, lang } = req.body || {};
 
-  if (!messages || !messages.length) {
-    return res.status(400).json({ error: "Aucun message fourni." });
+  // ✅ Validation solide (évite 400 flou)
+  if (!Array.isArray(messages) || messages.length === 0) {
+    return res.status(400).json({
+      error: "Bad Request: 'messages' doit être un tableau non vide.",
+    });
   }
 
-  const lastUserMessage = messages[messages.length - 1]?.text?.trim();
+  const bad = messages.find((m) => !isValidMessage(m));
+  if (bad) {
+    return res.status(400).json({
+      error: "Bad Request: chaque message doit avoir { from, text } valides.",
+    });
+  }
+
+  const lastUserMessage = safeString(messages[messages.length - 1]?.text).trim();
   if (!lastUserMessage) {
-    return res.status(400).json({ error: "Message vide." });
+    return res.status(400).json({ error: "Bad Request: dernier message vide." });
   }
+
+  // Lang fallback
+  const safeLang = (safeString(lang).trim() || "fr").toLowerCase();
 
   try {
     /* 1️⃣ Embedding */
-    const embeddingResponse = await openai.embeddings.create({
-      input: lastUserMessage,
-      model: process.env.EMBEDDING_MODEL || "text-embedding-ada-002",
-    });
+    const embeddingModel =
+      process.env.EMBEDDING_MODEL || "text-embedding-3-small"; // recommandé :contentReference[oaicite:2]{index=2}
 
-    const embedding = embeddingResponse.data[0].embedding;
+    let embeddingResponse;
+    try {
+      embeddingResponse = await openai.embeddings.create({
+        input: lastUserMessage,
+        model: embeddingModel,
+      });
+    } catch (err) {
+      logOpenAIError("Erreur embeddings.create()", err);
+      return res.status(500).json({
+        error: "Erreur serveur (embeddings).",
+        details: err?.error?.message || err?.message || "OpenAI embeddings error",
+      });
+    }
+
+    const embedding = embeddingResponse?.data?.[0]?.embedding;
+    if (!embedding) {
+      return res.status(500).json({
+        error: "Erreur serveur: embedding manquant.",
+      });
+    }
 
     /* 2️⃣ Recherche Qdrant (FILTRÉE) */
     const collection = process.env.QDRANT_COLLECTION || "documents";
@@ -137,7 +202,7 @@ app.post("/ask", requireAuth, async (req, res) => {
       },
     });
 
-    if (!searchResult.length) {
+    if (!searchResult?.length) {
       return res.json({
         answer:
           `<p><strong>❗ Aucun document juridique pertinent trouvé.</strong></p>` +
@@ -146,7 +211,7 @@ app.post("/ask", requireAuth, async (req, res) => {
     }
 
     const context = searchResult
-      .map((doc) => doc.payload?.content || "")
+      .map((doc) => doc?.payload?.content || "")
       .filter(Boolean)
       .join("\n");
 
@@ -175,7 +240,7 @@ Structure :
     const chatHistory = [
       {
         role: "system",
-        content: systemPrompt[lang] || systemPrompt.fr,
+        content: systemPrompt[safeLang] || systemPrompt.fr,
       },
       {
         role: "user",
@@ -188,23 +253,34 @@ Structure :
     ];
 
     /* 5️⃣ Réponse OpenAI */
-    const completion = await openai.chat.completions.create({
-      model: process.env.CHAT_MODEL || "gpt-4o-mini",
-      messages: chatHistory,
-      temperature: 0.3,
-      max_tokens: 800,
-    });
+    const chatModel = process.env.CHAT_MODEL || "gpt-4o-mini";
+
+    let completion;
+    try {
+      completion = await openai.chat.completions.create({
+        model: chatModel,
+        messages: chatHistory,
+        temperature: 0.3,
+        max_tokens: 800,
+      });
+    } catch (err) {
+      logOpenAIError("Erreur chat.completions.create()", err);
+      return res.status(500).json({
+        error: "Erreur serveur (chat).",
+        details: err?.error?.message || err?.message || "OpenAI chat error",
+      });
+    }
 
     const answer =
-      completion.choices[0]?.message?.content?.trim() ||
-      "<p>❌ Réponse vide.</p>";
+      completion?.choices?.[0]?.message?.content?.trim() || "<p>❌ Réponse vide.</p>";
 
     return res.json({ answer });
   } catch (err) {
-    console.error("❌ Erreur /ask:", err.message);
+    // Catch-all (Qdrant / autres)
+    console.error("❌ Erreur /ask (catch-all):", err);
     return res.status(500).json({
       error: "Erreur serveur",
-      details: err.message,
+      details: err?.message || "Unknown error",
     });
   }
 });
