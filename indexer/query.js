@@ -1,4 +1,4 @@
-// ✅ query.js – API principale DroitGPT + AUTH + /ask protégé + filtre Qdrant SAFE (logs robustes)
+// ✅ query.js – API principale DroitGPT + AUTH + /ask protégé (logs robustes)
 import express from "express";
 import cors from "cors";
 import { config } from "dotenv";
@@ -126,7 +126,7 @@ app.use("/auth", authRoutes);
    HEALTH
 ======================= */
 app.get("/", (_req, res) => {
-  res.send("✅ API DroitGPT opérationnelle (AUTH + Qdrant filter).");
+  res.send("✅ API DroitGPT opérationnelle (AUTH).");
 });
 
 /* =======================
@@ -159,8 +159,7 @@ app.post("/ask", requireAuth, async (req, res) => {
 
   try {
     /* 1️⃣ Embedding */
-    const embeddingModel =
-      process.env.EMBEDDING_MODEL || "text-embedding-3-small"; // recommandé :contentReference[oaicite:2]{index=2}
+    const embeddingModel = process.env.EMBEDDING_MODEL || "text-embedding-3-small";
 
     let embeddingResponse;
     try {
@@ -183,23 +182,13 @@ app.post("/ask", requireAuth, async (req, res) => {
       });
     }
 
-    /* 2️⃣ Recherche Qdrant (FILTRÉE) */
+    /* 2️⃣ Recherche Qdrant (SANS filtre needs_reindex) */
     const collection = process.env.QDRANT_COLLECTION || "documents";
 
     const searchResult = await qdrant.search(collection, {
       vector: embedding,
       limit: 3,
       with_payload: true,
-
-      // ✅ FILTRE SAFE : ignorer les points cassés
-      filter: {
-        must_not: [
-          {
-            key: "needs_reindex",
-            match: { value: true },
-          },
-        ],
-      },
     });
 
     if (!searchResult?.length) {
