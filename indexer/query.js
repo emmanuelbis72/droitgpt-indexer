@@ -1,4 +1,4 @@
-// ✅ query.js – API principale DroitGPT + AUTH + /ask protégé + /ask-stream (streaming SSE)
+// ✅ query.js – API principale DroitGPT + AUTH + /ask protégé (logs robustes)
 import express from "express";
 import cors from "cors";
 import { config } from "dotenv";
@@ -39,8 +39,7 @@ const corsOptions = {
   },
   credentials: true,
   methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-  // ✅ Ajout Accept pour SSE / streaming
-  allowedHeaders: ["Content-Type", "Authorization", "Accept"],
+  allowedHeaders: ["Content-Type", "Authorization"],
 };
 
 app.use(cors(corsOptions));
@@ -119,44 +118,6 @@ function logOpenAIError(prefix, err) {
 }
 
 /* =======================
-   Helper: Construire prompt + historique
-======================= */
-function buildSystemPrompt(safeLang) {
-  const systemPrompt = {
-    fr: `
-Tu es DroitGPT, un avocat congolais professionnel et moderne, spécialisé en droit de la République Démocratique du Congo (RDC) et, lorsque c’est pertinent, en droit OHADA.
-
-🎯 TA MISSION
-Aider les citoyens, entrepreneurs et justiciables à comprendre leurs droits et obligations selon le droit congolais.
-
-🧱 FORMAT DE RÉPONSE
-HTML simple uniquement : <p>, <h3>, <ul>, <li>, <strong>, <br/>
-
-Structure :
-<p><strong>Résumé</strong></p>
-<h3>Base légale</h3>
-<h3>Explications juridiques</h3>
-<h3>Application au cas concret</h3>
-<h3>Recours et démarches possibles</h3>
-<h3>Points de vigilance</h3>
-    `,
-  };
-
-  return systemPrompt[safeLang] || systemPrompt.fr;
-}
-
-function buildChatHistory({ safeLang, context, messages }) {
-  return [
-    { role: "system", content: buildSystemPrompt(safeLang) },
-    { role: "user", content: `Extraits juridiques pertinents :\n${context}` },
-    ...messages.slice(-6).map((msg) => ({
-      role: msg.from === "user" ? "user" : "assistant",
-      content: msg.text,
-    })),
-  ];
-}
-
-/* =======================
    AUTH ROUTES
 ======================= */
 app.use("/auth", authRoutes);
@@ -165,15 +126,16 @@ app.use("/auth", authRoutes);
    HEALTH
 ======================= */
 app.get("/", (_req, res) => {
-  res.send("✅ API DroitGPT opérationnelle (AUTH + STREAM).");
+  res.send("✅ API DroitGPT opérationnelle (AUTH).");
 });
 
 /* =======================
-   /ASK (protégé) - JSON classique
+   /ASK (protégé)
 ======================= */
 app.post("/ask", requireAuth, async (req, res) => {
   const { messages, lang } = req.body || {};
 
+  // ✅ Validation solide (évite 400 flou)
   if (!Array.isArray(messages) || messages.length === 0) {
     return res.status(400).json({
       error: "Bad Request: 'messages' doit être un tableau non vide.",
@@ -192,12 +154,12 @@ app.post("/ask", requireAuth, async (req, res) => {
     return res.status(400).json({ error: "Bad Request: dernier message vide." });
   }
 
+  // Lang fallback
   const safeLang = (safeString(lang).trim() || "fr").toLowerCase();
 
   try {
     /* 1️⃣ Embedding */
-    const embeddingModel =
-      process.env.EMBEDDING_MODEL || "text-embedding-3-small";
+    const embeddingModel = process.env.EMBEDDING_MODEL || "text-embedding-3-small";
 
     let embeddingResponse;
     try {
@@ -220,7 +182,7 @@ app.post("/ask", requireAuth, async (req, res) => {
       });
     }
 
-    /* 2️⃣ Recherche Qdrant */
+    /* 2️⃣ Recherche Qdrant (SANS filtre needs_reindex) */
     const collection = process.env.QDRANT_COLLECTION || "documents";
 
     const searchResult = await qdrant.search(collection, {
@@ -242,10 +204,44 @@ app.post("/ask", requireAuth, async (req, res) => {
       .filter(Boolean)
       .join("\n");
 
-    /* 3️⃣ Historique + prompt */
-    const chatHistory = buildChatHistory({ safeLang, context, messages });
+    /* 3️⃣ SYSTEM PROMPT */
+    const systemPrompt = {
+      fr: `
+Tu es DroitGPT, un avocat congolais professionnel et moderne, spécialisé en droit de la République Démocratique du Congo (RDC) et, lorsque c’est pertinent, en droit OHADA.
 
-    /* 4️⃣ Réponse OpenAI */
+🎯 TA MISSION
+Aider les citoyens, entrepreneurs et justiciables à comprendre leurs droits et obligations selon le droit congolais.
+
+🧱 FORMAT DE RÉPONSE
+HTML simple uniquement : <p>, <h3>, <ul>, <li>, <strong>, <br/>
+
+Structure :
+<p><strong>Résumé</strong></p>
+<h3>Base légale</h3>
+<h3>Explications juridiques</h3>
+<h3>Application au cas concret</h3>
+<h3>Recours et démarches possibles</h3>
+<h3>Points de vigilance</h3>
+      `,
+    };
+
+    /* 4️⃣ Historique */
+    const chatHistory = [
+      {
+        role: "system",
+        content: systemPrompt[safeLang] || systemPrompt.fr,
+      },
+      {
+        role: "user",
+        content: `Extraits juridiques pertinents :\n${context}`,
+      },
+      ...messages.slice(-6).map((msg) => ({
+        role: msg.from === "user" ? "user" : "assistant",
+        content: msg.text,
+      })),
+    ];
+
+    /* 5️⃣ Réponse OpenAI */
     const chatModel = process.env.CHAT_MODEL || "gpt-4o-mini";
 
     let completion;
@@ -265,178 +261,16 @@ app.post("/ask", requireAuth, async (req, res) => {
     }
 
     const answer =
-      completion?.choices?.[0]?.message?.content?.trim() ||
-      "<p>❌ Réponse vide.</p>";
+      completion?.choices?.[0]?.message?.content?.trim() || "<p>❌ Réponse vide.</p>";
 
     return res.json({ answer });
   } catch (err) {
+    // Catch-all (Qdrant / autres)
     console.error("❌ Erreur /ask (catch-all):", err);
     return res.status(500).json({
       error: "Erreur serveur",
       details: err?.message || "Unknown error",
     });
-  }
-});
-
-/* =======================
-   /ASK-STREAM (protégé) - Streaming SSE (comme ChatGPT)
-   → renvoie des "delta" au fur et à mesure
-======================= */
-app.post("/ask-stream", requireAuth, async (req, res) => {
-  const { messages, lang } = req.body || {};
-
-  // ✅ Validation
-  if (!Array.isArray(messages) || messages.length === 0) {
-    return res.status(400).json({
-      error: "Bad Request: 'messages' doit être un tableau non vide.",
-    });
-  }
-  const bad = messages.find((m) => !isValidMessage(m));
-  if (bad) {
-    return res.status(400).json({
-      error: "Bad Request: chaque message doit avoir { from, text } valides.",
-    });
-  }
-
-  const lastUserMessage = safeString(messages[messages.length - 1]?.text).trim();
-  if (!lastUserMessage) {
-    return res.status(400).json({ error: "Bad Request: dernier message vide." });
-  }
-
-  const safeLang = (safeString(lang).trim() || "fr").toLowerCase();
-
-  // ✅ SSE headers
-  res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
-  res.setHeader("Cache-Control", "no-cache, no-transform");
-  res.setHeader("Connection", "keep-alive");
-
-  // si derrière proxy
-  res.flushHeaders?.();
-
-  const sseSend = (event, data) => {
-    res.write(`event: ${event}\n`);
-    res.write(`data: ${JSON.stringify(data)}\n\n`);
-  };
-
-  // ✅ Heartbeat: évite que Render/proxy coupe une connexion silencieuse
-  const heartbeat = setInterval(() => {
-    try {
-      res.write(`event: ping\ndata: {}\n\n`);
-    } catch {
-      // ignore
-    }
-  }, 15000);
-
-  // ✅ Déconnexion client
-  let clientClosed = false;
-  req.on("close", () => {
-    clientClosed = true;
-    clearInterval(heartbeat);
-  });
-
-  try {
-    /* 1️⃣ Embedding */
-    const embeddingModel =
-      process.env.EMBEDDING_MODEL || "text-embedding-3-small";
-
-    let embeddingResponse;
-    try {
-      embeddingResponse = await openai.embeddings.create({
-        input: lastUserMessage,
-        model: embeddingModel,
-      });
-    } catch (err) {
-      logOpenAIError("Erreur embeddings.create()", err);
-      clearInterval(heartbeat);
-      sseSend("error", {
-        error: "Erreur serveur (embeddings).",
-        details: err?.error?.message || err?.message || "OpenAI embeddings error",
-      });
-      return res.end();
-    }
-
-    const embedding = embeddingResponse?.data?.[0]?.embedding;
-    if (!embedding) {
-      clearInterval(heartbeat);
-      sseSend("error", { error: "Erreur serveur: embedding manquant." });
-      return res.end();
-    }
-
-    /* 2️⃣ Qdrant */
-    const collection = process.env.QDRANT_COLLECTION || "documents";
-    const searchResult = await qdrant.search(collection, {
-      vector: embedding,
-      limit: 3,
-      with_payload: true,
-    });
-
-    if (!searchResult?.length) {
-      sseSend("delta", {
-        content:
-          `<p><strong>❗ Aucun document juridique pertinent trouvé.</strong></p>` +
-          `<p>Merci de reformuler ou de préciser votre question.</p>`,
-      });
-      clearInterval(heartbeat);
-      sseSend("done", { answer: "" });
-      return res.end();
-    }
-
-    const context = searchResult
-      .map((doc) => doc?.payload?.content || "")
-      .filter(Boolean)
-      .join("\n");
-
-    /* 3️⃣ Historique + prompt */
-    const chatHistory = buildChatHistory({ safeLang, context, messages });
-
-    /* 4️⃣ OpenAI streaming */
-    const chatModel = process.env.CHAT_MODEL || "gpt-4o-mini";
-
-    let full = "";
-
-    let stream;
-    try {
-      stream = await openai.chat.completions.create({
-        model: chatModel,
-        messages: chatHistory,
-        temperature: 0.3,
-        max_tokens: 800,
-        stream: true,
-      });
-    } catch (err) {
-      logOpenAIError("Erreur chat.completions.create(stream)", err);
-      clearInterval(heartbeat);
-      sseSend("error", {
-        error: "Erreur serveur (chat).",
-        details: err?.error?.message || err?.message || "OpenAI chat error",
-      });
-      return res.end();
-    }
-
-    for await (const chunk of stream) {
-      if (clientClosed) break;
-
-      const delta = chunk?.choices?.[0]?.delta?.content || "";
-      if (!delta) continue;
-
-      full += delta;
-      sseSend("delta", { content: delta });
-    }
-
-    clearInterval(heartbeat);
-
-    if (!clientClosed) {
-      sseSend("done", { answer: full });
-      res.end();
-    }
-  } catch (err) {
-    console.error("❌ Erreur /ask-stream (catch-all):", err);
-    clearInterval(heartbeat);
-    try {
-      sseSend("error", { error: "Erreur serveur", details: err?.message || "" });
-    } finally {
-      res.end();
-    }
   }
 });
 
