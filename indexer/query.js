@@ -1,4 +1,4 @@
-// ✅ query.js – API principale DroitGPT + AUTH + /ask protégé (logs robustes)
+// ✅ query.js – API principale DroitGPT + AUTH + /ask + /ask-stream (SSE streaming stable)
 import express from "express";
 import cors from "cors";
 import { config } from "dotenv";
@@ -39,7 +39,8 @@ const corsOptions = {
   },
   credentials: true,
   methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"],
+  // ✅ IMPORTANT : Accept pour SSE
+  allowedHeaders: ["Content-Type", "Authorization", "Accept"],
 };
 
 app.use(cors(corsOptions));
@@ -126,87 +127,15 @@ app.use("/auth", authRoutes);
    HEALTH
 ======================= */
 app.get("/", (_req, res) => {
-  res.send("✅ API DroitGPT opérationnelle (AUTH).");
+  res.send("✅ API DroitGPT opérationnelle (AUTH + STREAM).");
 });
 
 /* =======================
-   /ASK (protégé)
+   Helpers : construire le prompt + historique
 ======================= */
-app.post("/ask", requireAuth, async (req, res) => {
-  const { messages, lang } = req.body || {};
-
-  // ✅ Validation solide (évite 400 flou)
-  if (!Array.isArray(messages) || messages.length === 0) {
-    return res.status(400).json({
-      error: "Bad Request: 'messages' doit être un tableau non vide.",
-    });
-  }
-
-  const bad = messages.find((m) => !isValidMessage(m));
-  if (bad) {
-    return res.status(400).json({
-      error: "Bad Request: chaque message doit avoir { from, text } valides.",
-    });
-  }
-
-  const lastUserMessage = safeString(messages[messages.length - 1]?.text).trim();
-  if (!lastUserMessage) {
-    return res.status(400).json({ error: "Bad Request: dernier message vide." });
-  }
-
-  // Lang fallback
-  const safeLang = (safeString(lang).trim() || "fr").toLowerCase();
-
-  try {
-    /* 1️⃣ Embedding */
-    const embeddingModel = process.env.EMBEDDING_MODEL || "text-embedding-3-small";
-
-    let embeddingResponse;
-    try {
-      embeddingResponse = await openai.embeddings.create({
-        input: lastUserMessage,
-        model: embeddingModel,
-      });
-    } catch (err) {
-      logOpenAIError("Erreur embeddings.create()", err);
-      return res.status(500).json({
-        error: "Erreur serveur (embeddings).",
-        details: err?.error?.message || err?.message || "OpenAI embeddings error",
-      });
-    }
-
-    const embedding = embeddingResponse?.data?.[0]?.embedding;
-    if (!embedding) {
-      return res.status(500).json({
-        error: "Erreur serveur: embedding manquant.",
-      });
-    }
-
-    /* 2️⃣ Recherche Qdrant (SANS filtre needs_reindex) */
-    const collection = process.env.QDRANT_COLLECTION || "documents";
-
-    const searchResult = await qdrant.search(collection, {
-      vector: embedding,
-      limit: 3,
-      with_payload: true,
-    });
-
-    if (!searchResult?.length) {
-      return res.json({
-        answer:
-          `<p><strong>❗ Aucun document juridique pertinent trouvé.</strong></p>` +
-          `<p>Merci de reformuler ou de préciser votre question.</p>`,
-      });
-    }
-
-    const context = searchResult
-      .map((doc) => doc?.payload?.content || "")
-      .filter(Boolean)
-      .join("\n");
-
-    /* 3️⃣ SYSTEM PROMPT */
-    const systemPrompt = {
-      fr: `
+function buildSystemPrompt(safeLang) {
+  const systemPrompt = {
+    fr: `
 Tu es DroitGPT, un avocat congolais professionnel et moderne, spécialisé en droit de la République Démocratique du Congo (RDC) et, lorsque c’est pertinent, en droit OHADA.
 
 🎯 TA MISSION
@@ -222,26 +151,109 @@ Structure :
 <h3>Application au cas concret</h3>
 <h3>Recours et démarches possibles</h3>
 <h3>Points de vigilance</h3>
-      `,
-    };
+    `,
+    en: `
+You are DroitGPT, a professional Congolese legal assistant. Answer using simple HTML tags: <p>, <h3>, <ul>, <li>, <strong>, <br/>.
+Structure: Summary, Legal basis, Explanation, Practical application, Remedies/steps, Caution points.
+    `,
+  };
 
-    /* 4️⃣ Historique */
-    const chatHistory = [
-      {
-        role: "system",
-        content: systemPrompt[safeLang] || systemPrompt.fr,
-      },
-      {
-        role: "user",
-        content: `Extraits juridiques pertinents :\n${context}`,
-      },
-      ...messages.slice(-6).map((msg) => ({
-        role: msg.from === "user" ? "user" : "assistant",
-        content: msg.text,
-      })),
-    ];
+  return systemPrompt[safeLang] || systemPrompt.fr;
+}
 
-    /* 5️⃣ Réponse OpenAI */
+async function buildRagHistory({ messages, lang }) {
+  // ✅ validations
+  if (!Array.isArray(messages) || messages.length === 0) {
+    const e = new Error("Bad Request: 'messages' doit être un tableau non vide.");
+    e.status = 400;
+    throw e;
+  }
+
+  const bad = messages.find((m) => !isValidMessage(m));
+  if (bad) {
+    const e = new Error("Bad Request: chaque message doit avoir { from, text } valides.");
+    e.status = 400;
+    throw e;
+  }
+
+  const lastUserMessage = safeString(messages[messages.length - 1]?.text).trim();
+  if (!lastUserMessage) {
+    const e = new Error("Bad Request: dernier message vide.");
+    e.status = 400;
+    throw e;
+  }
+
+  const safeLang = (safeString(lang).trim() || "fr").toLowerCase();
+
+  // 1) embedding
+  const embeddingModel = process.env.EMBEDDING_MODEL || "text-embedding-3-small";
+
+  let embeddingResponse;
+  try {
+    embeddingResponse = await openai.embeddings.create({
+      input: lastUserMessage,
+      model: embeddingModel,
+    });
+  } catch (err) {
+    logOpenAIError("Erreur embeddings.create()", err);
+    const e = new Error(err?.error?.message || err?.message || "OpenAI embeddings error");
+    e.status = 500;
+    throw e;
+  }
+
+  const embedding = embeddingResponse?.data?.[0]?.embedding;
+  if (!embedding) {
+    const e = new Error("Erreur serveur: embedding manquant.");
+    e.status = 500;
+    throw e;
+  }
+
+  // 2) Qdrant search
+  const collection = process.env.QDRANT_COLLECTION || "documents";
+  const searchResult = await qdrant.search(collection, {
+    vector: embedding,
+    limit: 3,
+    with_payload: true,
+  });
+
+  const context = (searchResult || [])
+    .map((doc) => doc?.payload?.content || "")
+    .filter(Boolean)
+    .join("\n");
+
+  // 3) chatHistory
+  const chatHistory = [
+    { role: "system", content: buildSystemPrompt(safeLang) },
+    ...(context
+      ? [{ role: "user", content: `Extraits juridiques pertinents :\n${context}` }]
+      : []),
+    ...messages.slice(-6).map((msg) => ({
+      role: msg.from === "user" ? "user" : "assistant",
+      content: msg.text,
+    })),
+  ];
+
+  return { chatHistory, safeLang, context, hasContext: Boolean(context) };
+}
+
+/* =======================
+   /ASK (protégé) - JSON classique (inchangé)
+======================= */
+app.post("/ask", requireAuth, async (req, res) => {
+  const { messages, lang } = req.body || {};
+
+  try {
+    const { chatHistory, hasContext } = await buildRagHistory({ messages, lang });
+
+    // Si aucun doc pertinent, répondre vite
+    if (!hasContext) {
+      return res.json({
+        answer:
+          `<p><strong>❗ Aucun document juridique pertinent trouvé.</strong></p>` +
+          `<p>Merci de reformuler ou de préciser votre question.</p>`,
+      });
+    }
+
     const chatModel = process.env.CHAT_MODEL || "gpt-4o-mini";
 
     let completion;
@@ -265,12 +277,106 @@ Structure :
 
     return res.json({ answer });
   } catch (err) {
-    // Catch-all (Qdrant / autres)
+    const status = err?.status || 500;
+    if (status === 400) {
+      return res.status(400).json({ error: err.message });
+    }
     console.error("❌ Erreur /ask (catch-all):", err);
     return res.status(500).json({
       error: "Erreur serveur",
       details: err?.message || "Unknown error",
     });
+  }
+});
+
+/* =======================
+   /ASK-STREAM (protégé) - Streaming SSE (comme ChatGPT)
+   Envoie des deltas au fur et à mesure
+======================= */
+app.post("/ask-stream", requireAuth, async (req, res) => {
+  // ✅ SSE headers
+  res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  // ✅ anti-buffering (utile selon proxy)
+  res.setHeader("X-Accel-Buffering", "no");
+
+  res.flushHeaders?.();
+
+  // ✅ premier paquet pour démarrer immédiatement (évite "ça répond pas")
+  res.write(`event: ready\ndata: {}\n\n`);
+
+  const sendEvent = (event, data) => {
+    res.write(`event: ${event}\n`);
+    res.write(`data: ${JSON.stringify(data)}\n\n`);
+  };
+
+  // ✅ heartbeat pour éviter coupure proxy
+  const heartbeat = setInterval(() => {
+    try {
+      res.write(`event: ping\ndata: {}\n\n`);
+    } catch {
+      // ignore
+    }
+  }, 15000);
+
+  let closed = false;
+  req.on("close", () => {
+    closed = true;
+    clearInterval(heartbeat);
+  });
+
+  try {
+    const { messages, lang } = req.body || {};
+    const { chatHistory, hasContext } = await buildRagHistory({ messages, lang });
+
+    if (!hasContext) {
+      sendEvent("delta", {
+        content:
+          `<p><strong>❗ Aucun document juridique pertinent trouvé.</strong></p>` +
+          `<p>Merci de reformuler ou de préciser votre question.</p>`,
+      });
+      sendEvent("done", {});
+      clearInterval(heartbeat);
+      return res.end();
+    }
+
+    const chatModel = process.env.CHAT_MODEL || "gpt-4o-mini";
+
+    let stream;
+    try {
+      stream = await openai.chat.completions.create({
+        model: chatModel,
+        messages: chatHistory,
+        temperature: 0.3,
+        max_tokens: 800,
+        stream: true,
+      });
+    } catch (err) {
+      logOpenAIError("Erreur chat.completions.create(stream)", err);
+      sendEvent("error", {
+        error: err?.error?.message || err?.message || "OpenAI chat error",
+      });
+      sendEvent("done", {});
+      clearInterval(heartbeat);
+      return res.end();
+    }
+
+    for await (const chunk of stream) {
+      if (closed) break;
+      const delta = chunk?.choices?.[0]?.delta?.content || "";
+      if (delta) sendEvent("delta", { content: delta });
+    }
+
+    if (!closed) sendEvent("done", {});
+    clearInterval(heartbeat);
+    res.end();
+  } catch (err) {
+    console.error("❌ Erreur /ask-stream (catch-all):", err);
+    sendEvent("error", { error: err?.message || "Erreur serveur" });
+    sendEvent("done", {});
+    clearInterval(heartbeat);
+    res.end();
   }
 });
 
