@@ -72,7 +72,7 @@ const qdrant = new QdrantClient({
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
   // OpenAI SDK utilise fetch, mais garder agents aide si ton runtime les exploite;
-  // sinon c’est inoffensif. (La vraie optimisation ici est surtout le cache/limites.)
+  // sinon c’est inoffensif.
 });
 
 /* =======================
@@ -150,6 +150,28 @@ Structure obligatoire :
 <h3>Application au cas concret</h3>
 <h3>Recours et démarches possibles</h3>
 <h3>Points de vigilance</h3>
+`;
+}
+
+/**
+ * Prompt système pour le scoring Justice Lab
+ * - Retour JSON strict (pas HTML)
+ * - Évaluation type magistrature / pratique congolaise
+ */
+function buildJusticeLabSystemPrompt() {
+  return `
+Tu es un évaluateur judiciaire expert (RDC). Tu notes une simulation "Justice Lab".
+Ta mission : évaluer la qualité du raisonnement et de la décision, pas un cours théorique.
+
+Contraintes :
+- Tu dois retourner UNIQUEMENT un JSON valide (aucun texte autour).
+- Scores entre 0 et 100.
+- appealRisk doit être exactement : "Faible" ou "Moyen" ou "Élevé".
+- criticalErrors = erreurs graves (compétence, contradiction, droits de la défense, motivation inexistante, dispositif incohérent, etc.).
+- warnings = problèmes non critiques.
+- strengths = 2 à 5 points.
+- feedback = 3 à 7 recommandations actionnables (pratiques).
+- recommendedNext = 3 suggestions d’exercices/cas courts.
 `;
 }
 
@@ -266,7 +288,10 @@ app.post("/ask", requireAuth, async (req, res) => {
 
     const totalMs = Date.now() - t0;
     res.setHeader("X-Ask-Time-Ms", String(totalMs));
-    res.setHeader("X-Ask-Breakdown", JSON.stringify({ embMs, qdrantMs, openaiMs, totalMs }));
+    res.setHeader(
+      "X-Ask-Breakdown",
+      JSON.stringify({ embMs, qdrantMs, openaiMs, totalMs })
+    );
     console.log("⏱️ /ask timings:", { embMs, qdrantMs, openaiMs, totalMs });
 
     return res.json({ answer });
@@ -275,6 +300,127 @@ app.post("/ask", requireAuth, async (req, res) => {
     console.error("❌ Erreur /ask :", error);
     console.log("⏱️ /ask timings (failed):", { embMs, qdrantMs, openaiMs, totalMs });
     return res.status(500).json({ error: "Erreur serveur interne." });
+  }
+});
+
+/* =========================================================
+   ✅ JUSTICE LAB — SCORING IA (JSON strict)
+   POST /justice-lab/score
+   Body: { caseData: {...}, runData: {...} }
+========================================================= */
+app.post("/justice-lab/score", requireAuth, async (req, res) => {
+  const t0 = Date.now();
+  try {
+    const { caseData, runData } = req.body || {};
+
+    if (!caseData || !runData) {
+      return res
+        .status(400)
+        .json({ error: "caseData et runData sont requis." });
+    }
+
+    // Payload compact (évite les gros volumes)
+    const payload = {
+      caseId: caseData.caseId,
+      domaine: caseData.domaine,
+      niveau: caseData.niveau,
+      titre: caseData.titre || caseData.title,
+      resume: caseData.resume || caseData.brief,
+      parties: caseData.parties,
+      pieces: Array.isArray(caseData.pieces)
+        ? caseData.pieces.slice(0, 12) // garde-fou
+        : [],
+      eventCard: runData.eventCard || null,
+      answers: runData.answers || {},
+    };
+
+    const userPrompt = `
+Évalue le dossier simulé et la production de l'utilisateur.
+
+INPUT:
+${JSON.stringify(payload, null, 2)}
+
+Retourne STRICTEMENT un JSON au format suivant :
+{
+  "scoreGlobal": number,
+  "scores": {
+    "qualification": number,
+    "procedure": number,
+    "droits": number,
+    "motivation": number
+  },
+  "appealRisk": "Faible" | "Moyen" | "Élevé",
+  "criticalErrors": [{ "label": string, "detail": string }],
+  "warnings": [{ "label": string, "detail": string }],
+  "strengths": [string],
+  "feedback": [string],
+  "recommendedNext": [string]
+}
+
+Rappels :
+- scores 0..100
+- criticalErrors uniquement les erreurs graves
+- feedback = recommandations actionnables
+- recommendedNext = 3 exercices/cas
+`.trim();
+
+    const tA0 = Date.now();
+
+    // NOTE: response_format json_object garantit une sortie JSON si le modèle le supporte
+    const completion = await openai.chat.completions.create({
+      model: process.env.JUSTICE_LAB_MODEL || "gpt-4o-mini",
+      messages: [
+        { role: "system", content: buildJusticeLabSystemPrompt().trim() },
+        { role: "user", content: userPrompt },
+      ],
+      temperature: Number(process.env.JUSTICE_LAB_TEMPERATURE || 0.2),
+      max_tokens: Number(process.env.JUSTICE_LAB_MAX_TOKENS || 900),
+      response_format: { type: "json_object" },
+    });
+
+    const openaiMs = Date.now() - tA0;
+
+    const raw = completion.choices?.[0]?.message?.content || "{}";
+
+    let result;
+    try {
+      result = JSON.parse(raw);
+    } catch (_e) {
+      // fallback: renvoyer brut pour debug
+      return res.status(500).json({
+        error: "Réponse IA non-JSON (invalide).",
+        raw: raw.slice(0, 1200),
+      });
+    }
+
+    // garde-fous minimum
+    if (
+      typeof result?.scoreGlobal !== "number" ||
+      !result?.scores ||
+      typeof result?.scores?.qualification !== "number"
+    ) {
+      return res.status(500).json({
+        error: "Réponse IA invalide (structure).",
+        raw: result,
+      });
+    }
+
+    const totalMs = Date.now() - t0;
+    res.setHeader("X-JusticeLab-Time-Ms", String(totalMs));
+    res.setHeader(
+      "X-JusticeLab-Breakdown",
+      JSON.stringify({ openaiMs, totalMs })
+    );
+
+    return res.json(result);
+  } catch (error) {
+    const totalMs = Date.now() - t0;
+    console.error("❌ Erreur /justice-lab/score :", error);
+    return res.status(500).json({
+      error: "Erreur serveur Justice Lab.",
+      detail: error?.message,
+      totalMs,
+    });
   }
 });
 
