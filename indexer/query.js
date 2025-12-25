@@ -211,24 +211,96 @@ function normalizeRole(role) {
   return "Juge";
 }
 
+/** Helpers — pièces */
+function normalizePieceId(p, idx = 0) {
+  const id = p?.id ?? p?.pieceId ?? p?.pid ?? p?.code ?? null;
+  return String(id || `P${idx + 1}`);
+}
+function normalizePieceTitle(p, idx = 0) {
+  return String(p?.title || p?.titre || p?.label || `Pièce ${idx + 1}`);
+}
+function buildPiecesCatalog(caseData, max = 12) {
+  const pieces = Array.isArray(caseData?.pieces) ? caseData.pieces : [];
+  return pieces.slice(0, max).map((p, idx) => ({
+    id: normalizePieceId(p, idx),
+    title: normalizePieceTitle(p, idx),
+    type: String(p?.type || p?.kind || p?.categorie || ""),
+    // Ces champs sont "pédago" et n'engagent pas le moteur.
+    reliability: typeof p?.reliability === "number" ? p.reliability : undefined,
+    isLate: Boolean(p?.isLate || p?.late),
+  }));
+}
+
 function fallbackAudienceFromTemplates(caseData, role = "Juge") {
   const templates = Array.isArray(caseData?.objectionTemplates)
     ? caseData.objectionTemplates
     : [];
+
   const obs = templates.slice(0, 3).map((t, i) => ({
     id: t.id || `OBJ${i + 1}`,
     by: t.by || "Avocat",
     title: t.title || "Objection",
     statement: t.statement || "",
     options: ["Accueillir", "Rejeter", "Demander précision"],
+    bestChoiceByRole: {
+      Juge: "Demander précision",
+      Procureur: "Rejeter",
+      Avocat: "Accueillir",
+    },
+    effects: {
+      onAccueillir: {
+        excludePieceIds: [],
+        admitLatePieceIds: [],
+        why: "Mesure conservatoire (fallback).",
+        risk: { dueProcessBonus: 1, appealRiskPenalty: 0 },
+      },
+      onRejeter: {
+        excludePieceIds: [],
+        admitLatePieceIds: [],
+        why: "Objection écartée (fallback).",
+        risk: { dueProcessBonus: 0, appealRiskPenalty: 1 },
+      },
+      onDemander: {
+        clarification: {
+          label: "Clarification demandée",
+          detail: "La Cour demande des précisions avant de statuer.",
+        },
+        why: "Clarification (fallback).",
+        risk: { dueProcessBonus: 2, appealRiskPenalty: 0 },
+      },
+    },
   }));
 
+  const piecesCatalog = buildPiecesCatalog(caseData, 10);
+
   return {
+    scene: {
+      court: "Juridiction (simulation)",
+      chamber: "Audience (simulation)",
+      city: "RDC",
+      date: new Date().toISOString().slice(0, 10),
+      formation: "Siège",
+      roles: {
+        juge: "Le Tribunal",
+        procureur: "Ministère public",
+        avocat: "Défense",
+        greffier: "Greffe",
+      },
+      vibe: "Pédagogique, dynamique.",
+    },
+    phases: [
+      { id: "OPENING", title: "Ouverture", objective: "Installer le contradictoire." },
+      { id: "DEBATE", title: "Débat", objective: "Clarifier les faits et la procédure." },
+      { id: "OBJECTIONS", title: "Incidents", objective: "Trancher les objections." },
+      { id: "CLOSING", title: "Clôture", objective: "Annoncer renvoi / mise en délibéré." },
+    ],
+    piecesCatalog,
     turns: [
-      { speaker: "Greffier", text: "Affaire appelée. Les parties sont présentes." },
-      { speaker: "Juge", text: `L'audience est ouverte. Rôle du joueur: ${role}.` },
-      { speaker: "Procureur", text: "Le ministère public présente ses réquisitions et soulève un point de procédure." },
-      { speaker: "Avocat", text: "La défense répond et soulève une objection." },
+      { speaker: "Greffier", text: "Affaire appelée. Les parties sont présentes. La Cour prend place." },
+      { speaker: "Juge", text: `L'audience est ouverte. Rôle du joueur: ${role}. Les parties confirment leurs identités.` },
+      { speaker: "Procureur", text: "Le ministère public précise l'objet de l'audience et annonce un point de procédure." },
+      { speaker: "Avocat", text: "La défense répond, conteste un élément et soulève une objection." },
+      { speaker: "Juge", text: "La Cour rappelle le contradictoire et invite à produire/clarifier les pièces pertinentes." },
     ],
     objections: obs.length
       ? obs
@@ -239,6 +311,15 @@ function fallbackAudienceFromTemplates(caseData, role = "Juge") {
             title: "Demande de précision",
             statement: "La défense sollicite des précisions sur la recevabilité et le contradictoire.",
             options: ["Accueillir", "Rejeter", "Demander précision"],
+            bestChoiceByRole: { Juge: "Demander précision", Procureur: "Rejeter", Avocat: "Accueillir" },
+            effects: {
+              onAccueillir: { risk: { dueProcessBonus: 1, appealRiskPenalty: 0 } },
+              onRejeter: { risk: { dueProcessBonus: 0, appealRiskPenalty: 1 } },
+              onDemander: {
+                clarification: { label: "Clarification demandée", detail: "Préciser les arguments et pièces." },
+                risk: { dueProcessBonus: 2, appealRiskPenalty: 0 },
+              },
+            },
           },
         ],
   };
@@ -405,14 +486,14 @@ app.post("/ask", requireAuth, async (req, res) => {
 });
 
 /* =========================================================
-   ✅ JUSTICE LAB — AUDIENCE IA (V4)
+   ✅ JUSTICE LAB — AUDIENCE IA (ULTRA PRO)
    POST /justice-lab/audience
    Body accepté: { caseData, run } OU { caseData, runData }
 ========================================================= */
 app.post("/justice-lab/audience", requireAuth, async (req, res) => {
   try {
     const { caseData } = req.body || {};
-    const run = req.body?.run || req.body?.runData; // compat V4
+    const run = req.body?.run || req.body?.runData; // compat
 
     if (!caseData || !run) {
       return res.status(400).json({ error: "caseData et run (ou runData) sont requis." });
@@ -420,42 +501,85 @@ app.post("/justice-lab/audience", requireAuth, async (req, res) => {
 
     const role = normalizeRole(run?.answers?.role || "Juge");
 
+    const piecesCatalog = buildPiecesCatalog(caseData, 12);
+
+    // Petites aides pour ancrer l'IA dans des pièces réelles
+    const pieceIds = piecesCatalog.map((p) => p.id);
+    const latePieceIds = piecesCatalog.filter((p) => p.isLate).map((p) => p.id);
+
     const payload = {
-      caseId: caseData.caseId,
-      domaine: caseData.domaine,
-      niveau: caseData.niveau,
-      titre: caseData.titre || caseData.title,
-      resume: caseData.resume || caseData.brief,
+      meta: {
+        caseId: caseData.caseId,
+        domaine: caseData.domaine,
+        niveau: caseData.niveau,
+        titre: caseData.titre || caseData.title,
+        resume: safeStr(caseData.resume || caseData.brief, 1500),
+        roleJoueur: role,
+        ville: run?.answers?.city || run?.answers?.ville || "RDC",
+        juridiction:
+          run?.answers?.court ||
+          run?.answers?.juridiction ||
+          "Tribunal (simulation)",
+      },
       parties: caseData.parties,
-      pieces: Array.isArray(caseData.pieces) ? caseData.pieces.slice(0, 10) : [],
-      audienceSeed: Array.isArray(caseData.audienceSeed) ? caseData.audienceSeed.slice(0, 10) : [],
+      piecesCatalog, // IMPORTANT : l'IA doit référencer ces IDs
+      pieceIds,
+      latePieceIds,
+      audienceSeed: Array.isArray(caseData.audienceSeed) ? caseData.audienceSeed.slice(0, 12) : [],
       eventCard: run?.eventCard || null,
-      role,
-      qualification: run?.answers?.qualification || "",
-      procedureChoice: run?.answers?.procedureChoice || null,
-      procedureJustification: run?.answers?.procedureJustification || "",
+      answers: {
+        qualification: safeStr(run?.answers?.qualification || "", 900),
+        procedureChoice: run?.answers?.procedureChoice || null,
+        procedureJustification: safeStr(run?.answers?.procedureJustification || "", 1200),
+      },
     };
 
     const system = `
-Tu es un moteur d'audience virtuelle (RDC).
-Tu simules une audience réaliste : Procureur + Avocat interviennent, soulèvent des objections.
-Le joueur (rôle fourni) doit trancher.
+Tu es un "Moteur d'audience judiciaire" (RDC) pour un jeu pédagogique de magistrature.
+Objectif : produire une audience TRÈS réaliste, professionnelle, détaillée, mais rythmée et agréable.
 
-Retourne UNIQUEMENT un JSON valide.
-- turns: 4 à 6 interventions alternées, concises et réalistes.
-- objections: 2 à 4 objections/points de procédure (compétence, nullité, contradictoire, recevabilité, preuve tardive, expertise, délais...).
-Chaque objection = { id, by, title, statement, options[] }
-options = ["Accueillir","Rejeter","Demander précision"] (exact).
+Règles strictes :
+- Tu retournes UNIQUEMENT un JSON valide (aucun texte autour).
+- Le style doit ressembler à une vraie audience: appel de la cause, police d'audience, contradictoire, relances, demandes de précision, rythme.
+- Pas d'articles inventés (pas de numéros d'articles). Tu peux dire "selon les règles de procédure" ou "au regard du contradictoire".
+- IMPORTANT : tu dois référencer les pièces UNIQUEMENT via les IDs fournis dans piecesCatalog (ex: "P3"), jamais inventer d'autres IDs.
+- "options" doit être EXACTEMENT ["Accueillir","Rejeter","Demander précision"].
+- Les objections doivent être exploitables par un moteur de jeu :
+    objection.bestChoiceByRole = { "Juge": "...", "Procureur":"...", "Avocat":"..." }
+    objection.effects = { onAccueillir, onRejeter, onDemander }
+    Chaque effect peut contenir:
+      - excludePieceIds: [IDs existants]
+      - admitLatePieceIds: [IDs existants]
+      - addTask: { type:"instruction"|"production"|"delai"|"renvoi", label, detail }
+      - clarification: { label, detail }
+      - why: string
+      - risk: { dueProcessBonus:number, appealRiskPenalty:number }
+
+Qualité / Fun :
+- Ajoute 1 "moment d'audience" léger (ex: tension contrôlée, une contradiction qui ressort, une relance vive du juge), sans caricature.
+- Le juge doit "piloter" : rappeler l'ordre, cadrer, reformuler, imposer le contradictoire.
 `.trim();
 
     const user = `
 INPUT:
 ${JSON.stringify(payload, null, 2)}
 
-FORMAT JSON STRICT :
+FORMAT JSON EXACT attendu :
 {
+  "scene": {
+    "court": string,
+    "chamber": string,
+    "city": string,
+    "date": "YYYY-MM-DD",
+    "formation": string,
+    "roles": { "juge": string, "procureur": string, "avocat": string, "greffier": string },
+    "vibe": string
+  },
+  "phases": [
+    { "id": "OPENING"|"DEBATE"|"OBJECTIONS"|"CLOSING", "title": string, "objective": string }
+  ],
   "turns": [
-    { "speaker": "Greffier"|"Juge"|"Procureur"|"Avocat", "text": string }
+    { "speaker": "Greffier"|"Juge"|"Procureur"|"Avocat", "text": string, "phase": "OPENING"|"DEBATE"|"OBJECTIONS"|"CLOSING" }
   ],
   "objections": [
     {
@@ -463,10 +587,21 @@ FORMAT JSON STRICT :
       "by": "Procureur"|"Avocat",
       "title": string,
       "statement": string,
-      "options": ["Accueillir", "Rejeter", "Demander précision"]
+      "options": ["Accueillir","Rejeter","Demander précision"],
+      "bestChoiceByRole": { "Juge": "Accueillir"|"Rejeter"|"Demander précision", "Procureur": "...", "Avocat": "..." },
+      "effects": {
+        "onAccueillir": { "excludePieceIds": [string], "admitLatePieceIds": [string], "addTask": { "type": string, "label": string, "detail": string }, "clarification": { "label": string, "detail": string }, "why": string, "risk": { "dueProcessBonus": number, "appealRiskPenalty": number } },
+        "onRejeter":    { "excludePieceIds": [string], "admitLatePieceIds": [string], "addTask": { "type": string, "label": string, "detail": string }, "clarification": { "label": string, "detail": string }, "why": string, "risk": { "dueProcessBonus": number, "appealRiskPenalty": number } },
+        "onDemander":   { "excludePieceIds": [string], "admitLatePieceIds": [string], "addTask": { "type": string, "label": string, "detail": string }, "clarification": { "label": string, "detail": string }, "why": string, "risk": { "dueProcessBonus": number, "appealRiskPenalty": number } }
+      }
     }
   ]
 }
+
+Contraintes de volume:
+- turns : 10 à 16 (court mais vivant, 1 à 3 phrases par turn).
+- objections : 3 à 5 (variées: recevabilité, contradictoire, tardiveté, authenticité, renvoi, compétence selon le cas).
+- Au moins 1 objection doit viser une pièce: soit tardive, soit contestée, en utilisant les IDs réels.
 `.trim();
 
     const completion = await openai.chat.completions.create({
@@ -475,8 +610,8 @@ FORMAT JSON STRICT :
         { role: "system", content: system },
         { role: "user", content: user },
       ],
-      temperature: Number(process.env.JUSTICE_LAB_AUDIENCE_TEMPERATURE || 0.4),
-      max_tokens: Number(process.env.JUSTICE_LAB_AUDIENCE_MAX_TOKENS || 900),
+      temperature: Number(process.env.JUSTICE_LAB_AUDIENCE_TEMPERATURE || 0.5),
+      max_tokens: Number(process.env.JUSTICE_LAB_AUDIENCE_MAX_TOKENS || 1400),
       response_format: { type: "json_object" },
     });
 
@@ -493,20 +628,135 @@ FORMAT JSON STRICT :
       return res.json(fallbackAudienceFromTemplates(caseData, role));
     }
 
-    const turns = data.turns.slice(0, 8).map((t) => ({
+    // Sanitization + compat moteur
+    const safeScene = {
+      court: safeStr(data?.scene?.court || payload.meta.juridiction, 180),
+      chamber: safeStr(data?.scene?.chamber || "Chambre (simulation)", 180),
+      city: safeStr(data?.scene?.city || payload.meta.ville, 80),
+      date: safeStr(data?.scene?.date || new Date().toISOString().slice(0, 10), 10),
+      formation: safeStr(data?.scene?.formation || "Siège", 80),
+      roles: {
+        juge: safeStr(data?.scene?.roles?.juge || "Le Tribunal", 80),
+        procureur: safeStr(data?.scene?.roles?.procureur || "Ministère public", 80),
+        avocat: safeStr(data?.scene?.roles?.avocat || "Défense", 80),
+        greffier: safeStr(data?.scene?.roles?.greffier || "Greffe", 80),
+      },
+      vibe: safeStr(data?.scene?.vibe || "Audience rythmée et professionnelle.", 160),
+    };
+
+    const safePhases = Array.isArray(data?.phases) && data.phases.length
+      ? data.phases.slice(0, 6).map((p) => ({
+          id: String(p?.id || "DEBATE"),
+          title: safeStr(p?.title || "Phase", 80),
+          objective: safeStr(p?.objective || "", 200),
+        }))
+      : [
+          { id: "OPENING", title: "Ouverture", objective: "Installer le contradictoire et cadrer l'audience." },
+          { id: "DEBATE", title: "Débat", objective: "Clarifier les faits/procédure." },
+          { id: "OBJECTIONS", title: "Incidents", objective: "Trancher les objections et statuer sur les pièces." },
+          { id: "CLOSING", title: "Clôture", objective: "Mise en état: renvoi, calendrier ou délibéré." },
+        ];
+
+    const turns = data.turns.slice(0, 18).map((t) => ({
       speaker: String(t?.speaker || "Juge"),
-      text: String(t?.text || ""),
+      text: safeStr(t?.text || "", 650),
+      phase: String(t?.phase || "DEBATE"),
     }));
 
-    const objections = data.objections.slice(0, 6).map((o, idx) => ({
-      id: String(o?.id || `OBJ${idx + 1}`),
-      by: String(o?.by || "Avocat"),
-      title: String(o?.title || "Objection"),
-      statement: String(o?.statement || ""),
-      options: ["Accueillir", "Rejeter", "Demander précision"],
-    }));
+    // Filtre de sécurité: ne garder que des IDs de pièces connues
+    const allowedPieceIds = new Set(pieceIds);
 
-    return res.json({ turns, objections });
+    function cleanEffect(eff) {
+      if (!eff || typeof eff !== "object") return null;
+      const excludePieceIds = Array.isArray(eff.excludePieceIds)
+        ? eff.excludePieceIds.map(String).filter((id) => allowedPieceIds.has(id)).slice(0, 6)
+        : [];
+      const admitLatePieceIds = Array.isArray(eff.admitLatePieceIds)
+        ? eff.admitLatePieceIds.map(String).filter((id) => allowedPieceIds.has(id)).slice(0, 6)
+        : [];
+
+      const addTask =
+        eff.addTask && typeof eff.addTask === "object"
+          ? {
+              type: String(eff.addTask.type || "instruction"),
+              label: safeStr(eff.addTask.label || "Mesure", 120),
+              detail: safeStr(eff.addTask.detail || "", 260),
+            }
+          : null;
+
+      const clarification =
+        eff.clarification && typeof eff.clarification === "object"
+          ? {
+              label: safeStr(eff.clarification.label || "Clarification", 120),
+              detail: safeStr(eff.clarification.detail || "", 260),
+            }
+          : null;
+
+      const risk =
+        eff.risk && typeof eff.risk === "object"
+          ? {
+              dueProcessBonus: Number.isFinite(Number(eff.risk.dueProcessBonus)) ? Number(eff.risk.dueProcessBonus) : 0,
+              appealRiskPenalty: Number.isFinite(Number(eff.risk.appealRiskPenalty)) ? Number(eff.risk.appealRiskPenalty) : 0,
+            }
+          : { dueProcessBonus: 0, appealRiskPenalty: 0 };
+
+      return {
+        excludePieceIds,
+        admitLatePieceIds,
+        ...(addTask ? { addTask } : {}),
+        ...(clarification ? { clarification } : {}),
+        why: safeStr(eff.why || "", 220),
+        risk,
+      };
+    }
+
+    const objections = data.objections.slice(0, 6).map((o, idx) => {
+      const id = String(o?.id || `OBJ${idx + 1}`);
+      const by = String(o?.by || "Avocat");
+      const title = safeStr(o?.title || "Objection", 160);
+      const statement = safeStr(o?.statement || "", 900);
+
+      const bestChoiceByRole = {
+        Juge: ["Accueillir", "Rejeter", "Demander précision"].includes(o?.bestChoiceByRole?.Juge)
+          ? o.bestChoiceByRole.Juge
+          : "Demander précision",
+        Procureur: ["Accueillir", "Rejeter", "Demander précision"].includes(o?.bestChoiceByRole?.Procureur)
+          ? o.bestChoiceByRole.Procureur
+          : "Rejeter",
+        Avocat: ["Accueillir", "Rejeter", "Demander précision"].includes(o?.bestChoiceByRole?.Avocat)
+          ? o.bestChoiceByRole.Avocat
+          : "Accueillir",
+      };
+
+      const effects = o?.effects || {};
+      const onAccueillir = cleanEffect(effects.onAccueillir) || { risk: { dueProcessBonus: 1, appealRiskPenalty: 0 } };
+      const onRejeter = cleanEffect(effects.onRejeter) || { risk: { dueProcessBonus: 0, appealRiskPenalty: 1 } };
+      const onDemander =
+        cleanEffect(effects.onDemander) || {
+          clarification: { label: "Clarification", detail: "La Cour exige des précisions avant de statuer." },
+          risk: { dueProcessBonus: 2, appealRiskPenalty: 0 },
+        };
+
+      return {
+        id,
+        by,
+        title,
+        statement,
+        options: ["Accueillir", "Rejeter", "Demander précision"],
+        bestChoiceByRole,
+        effects: { onAccueillir, onRejeter, onDemander },
+      };
+    });
+
+    // ✅ Retour : on conserve {turns, objections} pour compat UI,
+    // et on ajoute les champs pro (scene/phases/piecesCatalog).
+    return res.json({
+      scene: safeScene,
+      phases: safePhases,
+      piecesCatalog,
+      turns,
+      objections,
+    });
   } catch (e) {
     console.error("❌ /justice-lab/audience error:", e);
     try {
