@@ -3,7 +3,7 @@
  * DroitGPT – Backend principal (query.js)
  * Mode : REST JSON (sans streaming SSE)
  * Optimisé pour réduire la latence réelle
- * + Justice Lab: audience + score + appeal + instant-feedback (hybride)
+ * + Justice Lab: generate-case + audience + score + appeal + instant-feedback (hybride)
  * ============================================
  */
 
@@ -192,6 +192,21 @@ Règles:
 `;
 }
 
+/** ✅ NOUVEAU : Prompt système pour génération de dossier (caseData) */
+function buildJusticeLabGenerateCaseSystemPrompt() {
+  return `
+Tu es un générateur de DOSSIERS JUDICIAIRES pédagogiques pour la RDC, destinés à la formation (magistrats, juges, parquet, avocats).
+Tu dois produire des dossiers réalistes, professionnels, plausibles (contexte congolais), avec suffisamment de matière pour une audience simulée.
+
+Règles STRICTES :
+- Tu retournes UNIQUEMENT un JSON valide (aucun texte autour).
+- Ne cite pas d'articles numérotés (pas de numéros d’articles). Tu peux dire "au regard des règles de procédure", "contradictoire", "droits de la défense", etc.
+- Le dossier doit contenir des tensions procédurales: tardiveté, contradiction, compétence, authenticité, renvoi, mesure d'instruction, etc.
+- Les pièces doivent avoir des IDs uniques P1..P8 (max 10).
+- Style RDC (tribunaux, villes, vocabulaire, acteurs).
+`;
+}
+
 function withTimeout(promise, ms, label = "timeout") {
   let t;
   const timeoutPromise = new Promise((_, reject) => {
@@ -225,12 +240,48 @@ function buildPiecesCatalog(caseData, max = 12) {
     id: normalizePieceId(p, idx),
     title: normalizePieceTitle(p, idx),
     type: String(p?.type || p?.kind || p?.categorie || ""),
-    // Ces champs sont "pédago" et n'engagent pas le moteur.
+    // champs “pédago”
     reliability: typeof p?.reliability === "number" ? p.reliability : undefined,
     isLate: Boolean(p?.isLate || p?.late),
   }));
 }
 
+/** ✅ Sanitize caseData (sécurité minimale) */
+function sanitizeCaseData(input, fallback = {}) {
+  const cd = input && typeof input === "object" ? input : {};
+  const out = {
+    caseId: safeStr(cd.caseId || cd.id || fallback.caseId || `JL-${Date.now()}`, 60),
+    domaine: safeStr(cd.domaine || fallback.domaine || "Pénal", 40),
+    niveau: safeStr(cd.niveau || fallback.niveau || "Intermédiaire", 24),
+    titre: safeStr(cd.titre || cd.title || fallback.titre || "Dossier simulé (RDC)", 140),
+    resume: safeStr(cd.resume || cd.summary || fallback.resume || "", 1800),
+    parties: cd.parties && typeof cd.parties === "object" ? cd.parties : (fallback.parties || {}),
+    qualificationInitiale: safeStr(cd.qualificationInitiale || cd.qualification || fallback.qualificationInitiale || "", 500),
+    pieces: Array.isArray(cd.pieces) ? cd.pieces.slice(0, 10).map((p, idx) => ({
+      id: normalizePieceId(p, idx),
+      title: safeStr(p?.title || p?.titre || `Pièce ${idx + 1}`, 140),
+      type: safeStr(p?.type || p?.kind || "", 40),
+      isLate: Boolean(p?.isLate || p?.late),
+      // optionnel, pas obligatoire
+      reliability: typeof p?.reliability === "number" ? p.reliability : undefined,
+    })) : (Array.isArray(fallback.pieces) ? fallback.pieces : []),
+    audienceSeed: Array.isArray(cd.audienceSeed) ? cd.audienceSeed.slice(0, 14).map((s) => safeStr(s, 220)) : (Array.isArray(fallback.audienceSeed) ? fallback.audienceSeed : []),
+    risquesProceduraux: Array.isArray(cd.risquesProceduraux) ? cd.risquesProceduraux.slice(0, 10).map((s) => safeStr(s, 220)) : (Array.isArray(fallback.risquesProceduraux) ? fallback.risquesProceduraux : []),
+    // meta optionnel
+    meta: cd.meta && typeof cd.meta === "object" ? cd.meta : (fallback.meta || {}),
+  };
+
+  // Normaliser parties (minimum)
+  if (!out.parties || typeof out.parties !== "object") out.parties = {};
+  if (!out.parties.demandeur && cd.parties?.demandeur) out.parties.demandeur = cd.parties.demandeur;
+  if (!out.parties.defendeur && cd.parties?.defendeur) out.parties.defendeur = cd.parties.defendeur;
+
+  return out;
+}
+
+/* =======================
+   Fallbacks Justice Lab (déjà présents)
+======================= */
 function fallbackAudienceFromTemplates(caseData, role = "Juge") {
   const templates = Array.isArray(caseData?.objectionTemplates)
     ? caseData.objectionTemplates
@@ -482,6 +533,176 @@ app.post("/ask", requireAuth, async (req, res) => {
     console.error("❌ Erreur /ask :", error);
     console.log("⏱️ /ask timings (failed):", { embMs, qdrantMs, openaiMs, totalMs });
     return res.status(500).json({ error: "Erreur serveur interne." });
+  }
+});
+
+/* =========================================================
+   ✅ JUSTICE LAB — GÉNÉRATEUR IA DE DOSSIERS (caseData)
+   POST /justice-lab/generate-case
+   Body:
+   - mode="full"  : génère le dossier complet
+   - mode="enrich": enrichit un draft existant
+   Exemples:
+   { mode:"full", domaine:"Foncier", level:"Intermédiaire", seed:"123", lang:"fr" }
+   { mode:"enrich", domaine:"Pénal", level:"Avancé", draft:{...}, lang:"fr" }
+========================================================= */
+app.post("/justice-lab/generate-case", requireAuth, async (req, res) => {
+  try {
+    const {
+      mode = "full",
+      domaine = "Pénal",
+      level = "Intermédiaire",
+      seed = String(Date.now()),
+      lang = "fr",
+      draft = null,
+      templateId = null,
+      caseSeed = null,
+      city = null,
+      tribunal = null,
+      chambre = null,
+    } = req.body || {};
+
+    const safeMode = String(mode || "full").toLowerCase() === "enrich" ? "enrich" : "full";
+
+    const metaHints = {
+      templateId: templateId ? safeStr(templateId, 80) : undefined,
+      seed: safeStr(caseSeed || seed, 80),
+      city: city ? safeStr(city, 80) : undefined,
+      tribunal: tribunal ? safeStr(tribunal, 120) : undefined,
+      chambre: chambre ? safeStr(chambre, 120) : undefined,
+    };
+
+    const system = buildJusticeLabGenerateCaseSystemPrompt().trim();
+
+    const userFull = `
+PARAMÈTRES:
+- Mode: full
+- Domaine: ${domaine}
+- Niveau: ${level}
+- Langue: ${lang}
+- Seed: ${metaHints.seed}
+
+Tu dois retourner EXACTEMENT un JSON au format suivant:
+{
+  "caseId": string,
+  "domaine": string,
+  "niveau": string,
+  "titre": string,
+  "resume": string,
+  "parties": {
+    "demandeur": string,
+    "defendeur": string,
+    "ministerePublic": string | null
+  },
+  "qualificationInitiale": string,
+  "pieces": [
+    { "id": "P1", "title": string, "type": string, "isLate": boolean, "reliability": number },
+    { "id": "P2", "title": string, "type": string, "isLate": boolean, "reliability": number }
+  ],
+  "audienceSeed": [ string, string ],
+  "risquesProceduraux": [ string, string ],
+  "meta": {
+    "templateId": string,
+    "seed": string,
+    "city": string,
+    "tribunal": string,
+    "chambre": string,
+    "generatedAt": string
+  }
+}
+
+Contraintes:
+- pieces: 5 à 8 pièces (P1..P8), toutes cohérentes avec les faits.
+- Ajoute au moins 1 pièce tardive (isLate=true) et 1 pièce “contestable” (reliability plus faible).
+- resume: 5 à 10 lignes, très clair, contexte RDC.
+- audienceSeed: 6 à 10 “points de débat” courts (1 phrase chacun).
+- risquesProceduraux: 4 à 7 risques.
+- meta.*: remplis au mieux (city/tribunal/chambre si possible).
+- Ne mentionne pas d'articles numérotés.
+`.trim();
+
+    const userEnrich = `
+PARAMÈTRES:
+- Mode: enrich
+- Domaine: ${domaine}
+- Niveau: ${level}
+- Langue: ${lang}
+- Seed: ${metaHints.seed}
+
+Voici un DRAFT (déjà jouable). Tu dois l'enrichir sans casser la structure.
+DRAFT:
+${safeStr(JSON.stringify(draft || {}, null, 2), 9000)}
+
+Règles:
+- Retourne EXACTEMENT un JSON qui ressemble à caseData complet.
+- Conserve les IDs des pièces déjà présentes (P1..), tu peux ajouter P6..P8 si besoin.
+- Améliore : résumé, audienceSeed, risques, qualité des pièces (titres/types), parties, qualificationInitiale.
+- Ne mets pas d'articles numérotés.
+- Ne change pas caseId si déjà présent.
+`.trim();
+
+    const completion = await openai.chat.completions.create({
+      model: process.env.JUSTICE_LAB_CASE_MODEL || process.env.JUSTICE_LAB_MODEL || "gpt-4o-mini",
+      messages: [
+        { role: "system", content: system },
+        { role: "user", content: safeMode === "enrich" ? userEnrich : userFull },
+      ],
+      temperature: Number(process.env.JUSTICE_LAB_CASE_TEMPERATURE || 0.6),
+      max_tokens: Number(process.env.JUSTICE_LAB_CASE_MAX_TOKENS || 1400),
+      response_format: { type: "json_object" },
+    });
+
+    const raw = completion.choices?.[0]?.message?.content || "{}";
+
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      // fallback: si enrich => draft, sinon objet minimal
+      const fallback = safeMode === "enrich" ? (draft || {}) : {};
+      const caseData = sanitizeCaseData(fallback, {
+        domaine,
+        niveau: level,
+        meta: { ...metaHints, generatedAt: new Date().toISOString() },
+      });
+      return res.json({ caseData });
+    }
+
+    // Injecter meta hints si manquants + sanitization
+    const fallbackBase =
+      safeMode === "enrich"
+        ? (draft && typeof draft === "object" ? draft : {})
+        : {};
+
+    const sanitized = sanitizeCaseData(parsed, {
+      ...fallbackBase,
+      domaine,
+      niveau: level,
+      meta: { ...metaHints, generatedAt: new Date().toISOString() },
+    });
+
+    // S’assurer meta
+    sanitized.meta = {
+      ...(sanitized.meta || {}),
+      templateId: sanitized.meta?.templateId || metaHints.templateId || "AI_FULL",
+      seed: sanitized.meta?.seed || metaHints.seed,
+      city: sanitized.meta?.city || metaHints.city || "RDC",
+      tribunal: sanitized.meta?.tribunal || metaHints.tribunal || "Juridiction (simulation)",
+      chambre: sanitized.meta?.chambre || metaHints.chambre || "Chambre (simulation)",
+      generatedAt: sanitized.meta?.generatedAt || new Date().toISOString(),
+    };
+
+    // Retour compatible front: {caseData}
+    return res.json({ caseData: sanitized });
+  } catch (e) {
+    console.error("❌ /justice-lab/generate-case error:", e);
+    const fallback = req.body?.mode === "enrich" ? (req.body?.draft || {}) : {};
+    const caseData = sanitizeCaseData(fallback, {
+      domaine: req.body?.domaine || "Pénal",
+      niveau: req.body?.level || "Intermédiaire",
+      meta: { generatedAt: new Date().toISOString() },
+    });
+    return res.status(200).json({ caseData, warning: "fallback" });
   }
 });
 
@@ -748,8 +969,6 @@ Contraintes de volume:
       };
     });
 
-    // ✅ Retour : on conserve {turns, objections} pour compat UI,
-    // et on ajoute les champs pro (scene/phases/piecesCatalog).
     return res.json({
       scene: safeScene,
       phases: safePhases,
@@ -889,9 +1108,6 @@ Rappels :
 /* =========================================================
    ✅ JUSTICE LAB — APPEAL IA (V4)
    POST /justice-lab/appeal
-   Body accepté:
-   - { caseData, run, scored }
-   - ou { caseData, runData, scored }
 ========================================================= */
 app.post("/justice-lab/appeal", requireAuth, async (req, res) => {
   const t0 = Date.now();
@@ -1006,10 +1222,6 @@ Contraintes:
 /* =========================================================
    ✅ JUSTICE LAB — INSTANT FEEDBACK IA (HYBRIDE)
    POST /justice-lab/instant-feedback
-
-   But: avis expert IA court après chaque objection
-   - Timeout court (UX jeu)
-   - Fallback immédiat (ne casse jamais le gameplay)
 ========================================================= */
 app.post("/justice-lab/instant-feedback", requireAuth, async (req, res) => {
   const t0 = Date.now();
@@ -1024,7 +1236,6 @@ app.post("/justice-lab/instant-feedback", requireAuth, async (req, res) => {
 
     const role = normalizeRole(runData?.answers?.role || "Juge");
 
-    // Payload court (tokens/latence)
     const payload = {
       caseId: caseData.caseId,
       domaine: caseData.domaine,
@@ -1079,7 +1290,6 @@ INPUT:
 ${JSON.stringify(payload, null, 2)}
 `.trim();
 
-    // ⚡ Timeout court pour UX
     const completion = await withTimeout(
       openai.chat.completions.create({
         model:
