@@ -11,13 +11,6 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 5002;
 
-/**
- * ✅ CORS
- * Origines par défaut :
- *  - Prod : https://www.droitgpt.com
- *  - Dev : http://localhost:5173 et 5174
- * + éventuellement ce qui est mis dans CORS_ORIGIN
- */
 const defaultOrigins = [
   "https://www.droitgpt.com",
   "http://localhost:5173",
@@ -34,37 +27,24 @@ const allowedOrigins = [...new Set([...defaultOrigins, ...envOrigins])];
 app.use(
   cors({
     origin(origin, callback) {
-      // autorise aussi les requêtes sans origin (Postman, curl, healthcheck…)
-      if (!origin || allowedOrigins.includes(origin)) {
-        callback(null, true);
-      } else {
-        console.warn("❌ Origin non autorisée par CORS :", origin);
-        callback(new Error("Not allowed by CORS"));
-      }
+      if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
+      console.warn("❌ Origin non autorisée par CORS :", origin);
+      return callback(new Error("Not allowed by CORS"));
     },
     methods: ["GET", "POST", "OPTIONS"],
-    // ✅ IMPORTANT: pour que le frontend envoie Authorization sans blocage CORS
-    allowedHeaders: ["Content-Type", "Authorization"],
+    allowedHeaders: ["Content-Type", "Authorization"], // ✅
   })
 );
 
-// pré-vol CORS
 app.options("*", cors());
-
 app.use(express.json());
 
-// ✅ OpenAI
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// ✅ Route d'analyse de document (+ OCR images)
 app.use("/analyse-document", createAnalyseDocumentRoute(openai));
 
-// ✅ Route de test
-app.get("/", (req, res) => {
-  res.send("✅ Service d’analyse de documents juridique + OCR opérationnel.");
-});
+app.get("/", (req, res) => res.send("✅ Analyse OCR + IA opérationnelle."));
 
-// ✅ Lancement serveur
 app.listen(PORT, () => {
   console.log(`🚀 Analyse Service lancé sur http://localhost:${PORT}`);
   console.log("🌐 CORS autorisés :", allowedOrigins.join(" , "));
