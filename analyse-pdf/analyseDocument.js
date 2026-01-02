@@ -1,6 +1,6 @@
 // analyseDocument.js
 // Analyse PDF/DOCX + OCR images
-// ✅ Tesseract en 1er, ✅ fallback OpenAI Vision si texte trop court (vraie "IA" OCR)
+// ✅ Optimisé vitesse : 1 variante preprocess, cleanup IA uniquement si confiance < 60, resize plus léger
 
 const express = require("express");
 const multer = require("multer");
@@ -58,43 +58,18 @@ async function ocrImage(filePath, lang, psm = 6) {
   return { text, tessConf };
 }
 
-// ✅ Prétraitement soft/hard
-async function preprocessVariant(inputPath, variant = "soft") {
-  const outPath = inputPath + (variant === "soft" ? "_soft.png" : "_hard.png");
+// ✅ Prétraitement "soft" unique (plus rapide)
+async function preprocessSoft(inputPath) {
+  const outPath = inputPath + "_soft.png";
 
   let img = sharp(inputPath).rotate().grayscale().normalize();
-  img = img.linear(1.15, -8).sharpen();
-  img = img.resize({ width: 3000, withoutEnlargement: true });
+  img = img.linear(1.12, -6).sharpen();
 
-  if (variant === "hard") {
-    img = img.threshold(150);
-  }
+  // ✅ plus léger que 3000 (gain temps)
+  img = img.resize({ width: 2200, withoutEnlargement: true });
 
   await img.png({ compressionLevel: 9 }).toFile(outPath);
   return outPath;
-}
-
-async function bestOcrFromVariants(filePath, ocrLang) {
-  const softPath = await preprocessVariant(filePath, "soft");
-  const hardPath = await preprocessVariant(filePath, "hard");
-
-  const r1 = await ocrImage(softPath, ocrLang, 6);
-  const c1 = computeConfidencePercent(r1.text, r1.tessConf);
-  const len1 = (r1.text || "").trim().length;
-
-  const r2 = await ocrImage(hardPath, ocrLang, 6);
-  const c2 = computeConfidencePercent(r2.text, r2.tessConf);
-  const len2 = (r2.text || "").trim().length;
-
-  const choose2 = c2 > c1 + 3 || (c2 >= c1 && len2 > len1 + 80);
-
-  return {
-    bestText: choose2 ? r2.text : r1.text,
-    bestTessConf: choose2 ? r2.tessConf : r1.tessConf,
-    bestConfPct: choose2 ? c2 : c1,
-    bestPath: choose2 ? hardPath : softPath,
-    tempPaths: [softPath, hardPath],
-  };
 }
 
 // ✅ OCR Vision OpenAI (fallback) : transcrit fidèlement sans inventer
@@ -175,7 +150,6 @@ module.exports = function (openai) {
     const useOcrPreprocess = String(req.body?.useOcrPreprocess || "1") === "1";
     const useOcrCleanup = String(req.body?.useOcrCleanup || "1") === "1";
 
-    // temporaires à supprimer
     let tempPaths = [];
 
     try {
@@ -187,13 +161,11 @@ module.exports = function (openai) {
       if (ext === ".pdf") {
         text = await extractTextFromPdf(filePath);
 
-        // ✅ PDF scanné détecté
         if (useOcr && (!text || text.trim().length < 80)) {
           return res.status(422).json({
             error: "PDF scanné détecté",
             scannedPdf: true,
-            details:
-              "Ce PDF semble être un scan (image). Conversion des pages en images requise pour OCR.",
+            details: "Ce PDF semble être un scan (image). Conversion des pages en images requise pour OCR.",
           });
         }
       } else if (ext === ".docx") {
@@ -202,25 +174,21 @@ module.exports = function (openai) {
       } else if (isImageExt(ext)) {
         ocrUsed = true;
 
-        // 1) OCR Tesseract (prétraitement multi-essais)
-        let rawOcrText = "";
-        let confPct = 0;
+        // 1) OCR Tesseract (soft preprocess only)
         let bestPathForOcr = filePath;
 
         if (useOcrPreprocess) {
-          const r = await bestOcrFromVariants(filePath, ocrLang);
-          rawOcrText = r.bestText || "";
-          confPct = r.bestConfPct || 0;
-          bestPathForOcr = r.bestPath || filePath;
-          tempPaths.push(...(r.tempPaths || []));
-        } else {
-          const r = await ocrImage(filePath, ocrLang, 6);
-          rawOcrText = r.text || "";
-          confPct = computeConfidencePercent(rawOcrText, r.tessConf);
+          const softPath = await preprocessSoft(filePath);
+          tempPaths.push(softPath);
+          bestPathForOcr = softPath;
         }
 
-        // fallback PSM4 si faible
-        if (confPct < 45 || rawOcrText.trim().length < 80) {
+        const r1 = await ocrImage(bestPathForOcr, ocrLang, 6);
+        let rawOcrText = r1.text || "";
+        let confPct = computeConfidencePercent(rawOcrText, r1.tessConf);
+
+        // 2) fallback PSM4 uniquement si vraiment mauvais
+        if (confPct < 35 && rawOcrText.trim().length < 80) {
           const rAlt = await ocrImage(bestPathForOcr, ocrLang, 4);
           const cAlt = computeConfidencePercent(rAlt.text, rAlt.tessConf);
           const lenA = rawOcrText.trim().length;
@@ -236,20 +204,19 @@ module.exports = function (openai) {
         text = rawOcrText;
         ocrConfidence = confPct;
 
-        // 2) ✅ Fallback OpenAI Vision si toujours trop court
+        // 3) Fallback Vision si toujours trop court
         const allowVision = (process.env.OCR_VISION_FALLBACK || "1") === "1";
         if (allowVision && (!text || text.trim().length < 80)) {
           const visionText = await visionOcrWithOpenAI(openai, bestPathForOcr);
           if (visionText && visionText.trim().length >= 40) {
             text = visionText;
             ocrEngine = "vision";
-            // confiance estimée heuristique (pas parfaite, mais utile)
             ocrConfidence = Math.max(ocrConfidence || 0, Math.round(40 + ocrQualityScore(text) * 60));
           }
         }
 
-        // 3) Correction IA contrôlée (facultatif)
-        if (useOcrCleanup && text.trim().length > 20) {
+        // 4) Correction IA contrôlée uniquement si confiance < 60
+        if (useOcrCleanup && text.trim().length > 20 && Number.isFinite(ocrConfidence) && ocrConfidence < 60) {
           const cleaned = await cleanOcrWithAI(openai, text);
           if (cleaned && cleaned.trim().length > 20) {
             text = cleaned;
@@ -263,19 +230,12 @@ module.exports = function (openai) {
         });
       }
 
-      // ✅ seuil minimal : si Vision a donné quelque chose, on accepte dès 40 chars
       const minLen = 50;
       if (!text || text.trim().length < minLen) {
-        // IMPORTANT: on renvoie un peu de debug utile
         return res.status(500).json({
           error: "Erreur analyse",
-          details:
-            "Texte trop court/illisible après extraction/OCR. Conseil: meilleure lumière, zoom, page à plat.",
-          debug: {
-            len: (text || "").trim().length,
-            engine: ocrEngine,
-            confidence: ocrConfidence,
-          },
+          details: "Texte trop court/illisible après extraction/OCR. Conseil: meilleure lumière, zoom, page à plat.",
+          debug: { len: (text || "").trim().length, engine: ocrEngine, confidence: ocrConfidence },
         });
       }
 
