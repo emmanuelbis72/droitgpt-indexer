@@ -43,7 +43,8 @@ app.use(
       }
     },
     methods: ["GET", "POST", "OPTIONS"],
-    allowedHeaders: ["Content-Type"],
+    // ✅ IMPORTANT: pour que le frontend envoie Authorization sans blocage CORS
+    allowedHeaders: ["Content-Type", "Authorization"],
   })
 );
 
@@ -55,12 +56,12 @@ app.use(express.json());
 // ✅ OpenAI
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// ✅ Route d'analyse de document
+// ✅ Route d'analyse de document (+ OCR images)
 app.use("/analyse-document", createAnalyseDocumentRoute(openai));
 
 // ✅ Route de test
 app.get("/", (req, res) => {
-  res.send("✅ Service d’analyse de documents juridique opérationnel.");
+  res.send("✅ Service d’analyse de documents juridique + OCR opérationnel.");
 });
 
 // ✅ Lancement serveur

@@ -1,26 +1,48 @@
 // analyseDocument.js
-// Route d'analyse de documents (PDF / DOCX) pour DroitGPT
+// Route d'analyse de documents (PDF / DOCX / IMAGES) pour DroitGPT + OCR (manuscrits/scans)
 
 const express = require("express");
 const multer = require("multer");
 const fs = require("fs");
 const path = require("path");
 const mammoth = require("mammoth");
-const pdfParse = require("pdf-parse"); // ✅ en CommonJS
+const pdfParse = require("pdf-parse");
+
+// ✅ OCR WASM stable sur Render
+const Tesseract = require("tesseract.js");
 
 // Dossier temporaire pour les uploads
 const upload = multer({ dest: "uploads/" });
 
-// Extraction texte PDF
+// Extraction texte PDF (si PDF texte)
 async function extractTextFromPdf(filePath) {
   const dataBuffer = fs.readFileSync(filePath);
   const data = await pdfParse(dataBuffer);
   return data.text || "";
 }
 
+// OCR images
+async function ocrImageToText(filePath, lang) {
+  const { data } = await Tesseract.recognize(filePath, lang, {
+    logger: () => {}, // tu peux logguer le progrès si tu veux
+  });
+  return (data && data.text) ? data.text : "";
+}
+
+function isImageExt(ext) {
+  return [".jpg", ".jpeg", ".png", ".webp", ".tif", ".tiff", ".bmp"].includes(ext);
+}
+
 module.exports = function (openai) {
   const router = express.Router();
 
+  /**
+   * POST /analyse-document
+   * FormData:
+   * - file: PDF / DOCX / IMAGE
+   * - useOcr: "1" | "0" (optionnel)
+   * - ocrLang: "fra+eng" (optionnel)
+   */
   router.post("/", upload.single("file"), async (req, res) => {
     if (!req.file) {
       console.error("❌ Aucun fichier reçu");
@@ -30,39 +52,52 @@ module.exports = function (openai) {
     const filePath = req.file.path;
     const ext = path.extname(req.file.originalname).toLowerCase();
 
+    // Toggle OCR + langue OCR
+    const useOcr = String(req.body?.useOcr || "0") === "1";
+    const ocrLang = String(req.body?.ocrLang || process.env.OCR_LANG || "fra+eng");
+
     try {
       let text = "";
+      let ocrUsed = false;
 
       if (ext === ".pdf") {
         text = await extractTextFromPdf(filePath);
+
+        // ✅ PDF scanné (texte trop court) + OCR demandé : on refuse proprement
+        // (Sans conversion PDF->images, on reste stable sur Render)
+        if (useOcr && (!text || text.trim().length < 80)) {
+          return res.status(422).json({
+            error: "PDF scanné détecté",
+            details:
+              "Ce PDF semble être un scan (image). Pour une OCR stable, exporte les pages en images (JPG/PNG) ou prends des photos, puis ré-uploade en mode OCR multi-images.",
+          });
+        }
       } else if (ext === ".docx") {
         const result = await mammoth.extractRawText({ path: filePath });
         text = result.value || "";
+      } else if (isImageExt(ext)) {
+        // ✅ OCR image
+        ocrUsed = true;
+        text = await ocrImageToText(filePath, ocrLang);
       } else {
         console.error("❌ Format non supporté :", ext);
-        return res
-          .status(400)
-          .json({ error: "Format non supporté. PDF ou DOCX requis." });
+        return res.status(400).json({
+          error: "Format non supporté.",
+          details: "Formats acceptés: PDF, DOCX, JPG/PNG/WEBP/TIFF/BMP.",
+        });
       }
 
-      if (!text || text.length < 50) {
-        throw new Error("Texte trop court ou vide après extraction.");
+      if (!text || text.trim().length < 50) {
+        throw new Error(
+          "Texte trop court ou vide après extraction/OCR. Essaie une image plus nette (bonne lumière, zoom, contraste)."
+        );
       }
 
-      // On limite la taille pour éviter d'exploser le contexte du modèle
-      const shortText = text.slice(0, 8000);
-
-      // 🧠 Prompt + system améliorés
-      const userPrompt = `
-Le texte ci-dessous est un document juridique (contrat, lettre, décision, acte, etc.).
-Tu dois l’analyser et produire un avis structuré, pédagogique et applicable au contexte congolais.
-
-Document à analyser :
-"""${shortText}"""
-`;
+      // Limite taille pour éviter de saturer le contexte
+      const shortText = text.slice(0, 9000);
 
       const completion = await openai.chat.completions.create({
-        model: "gpt-4o-mini",
+        model: process.env.ANALYSE_MODEL || "gpt-4o-mini",
         messages: [
           {
             role: "system",
@@ -108,28 +143,30 @@ Règles importantes :
 - Ne génère AUCUN autre type de balise HTML (pas de tableaux, pas de styles inline, pas de <br> en série).
 - Ne mets pas de disclaimer technique sur l’IA ; concentre-toi sur l’analyse juridique et les conseils pratiques.
 - N’écris rien en dehors de cette structure HTML.
-`,
+
+Document à analyser :
+"""${shortText}"""
+`.trim(),
           },
         ],
-        temperature: 0.3,
-        max_tokens: 1400,
+        temperature: Number(process.env.ANALYSE_TEMPERATURE || 0.3),
+        max_tokens: Number(process.env.ANALYSE_MAX_TOKENS || 1400),
       });
 
-      const finalAnswer = completion.choices[0].message.content;
+      const finalAnswer = completion.choices?.[0]?.message?.content || "<p>❌ Analyse vide.</p>";
 
-      // ✅ On renvoie aussi le texte du document
-      //    pour permettre le "chat avec ce document" côté frontend
       res.json({
         analysis: finalAnswer,
         documentText: shortText,
+        ocrUsed,
       });
     } catch (err) {
       console.error("❌ Erreur analyse :", err.message);
-      res
-        .status(500)
-        .json({ error: "Erreur analyse", details: err.message || "Inconnue" });
+      res.status(500).json({
+        error: "Erreur analyse",
+        details: err.message || "Inconnue",
+      });
     } finally {
-      // On nettoie le fichier temporaire
       if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
     }
   });
