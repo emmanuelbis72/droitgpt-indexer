@@ -1,5 +1,5 @@
 // analyseDocument.js
-// Analyse PDF/DOCX + OCR images (prétraitement + correction IA + confiance)
+// Analyse PDF/DOCX + OCR images (prétraitement multi-essais + correction IA + confiance)
 
 const express = require("express");
 const multer = require("multer");
@@ -22,19 +22,8 @@ function isImageExt(ext) {
   return [".jpg", ".jpeg", ".png", ".webp", ".tif", ".tiff", ".bmp"].includes(ext);
 }
 
-async function preprocessImageToPng(inputPath) {
-  const outPath = inputPath + "_pre.png";
-  await sharp(inputPath)
-    .rotate()
-    .grayscale()
-    .normalize()
-    .linear(1.25, -10)
-    .resize({ width: 2000, withoutEnlargement: true })
-    .threshold(175)
-    .png({ compressionLevel: 9 })
-    .toFile(outPath);
-
-  return outPath;
+function clamp(n, min, max) {
+  return Math.max(min, Math.min(max, n));
 }
 
 function ocrQualityScore(text) {
@@ -48,6 +37,13 @@ function ocrQualityScore(text) {
   return 0.7 * letterRatio + 0.3 * wordScore;
 }
 
+function computeConfidencePercent(text, tessConf) {
+  const q = ocrQualityScore(text);
+  const t = Number.isFinite(tessConf) ? clamp(tessConf / 100, 0, 1) : null;
+  const combined = t === null ? q : 0.75 * t + 0.25 * q;
+  return Math.round(clamp(combined, 0, 1) * 100);
+}
+
 async function ocrImage(filePath, lang, psm = 6) {
   const { data } = await Tesseract.recognize(filePath, lang, {
     logger: () => {},
@@ -59,6 +55,56 @@ async function ocrImage(filePath, lang, psm = 6) {
   const text = data?.text ? data.text : "";
   const tessConf = Number.isFinite(data?.confidence) ? data.confidence : null;
   return { text, tessConf };
+}
+
+/**
+ * ✅ Prétraitement multi-essais
+ * - "soft": améliore contraste + netteté sans threshold (utile pour textes gris)
+ * - "hard": ajoute threshold mais plus bas que 175 (utile pour scans bien contrastés)
+ */
+async function preprocessVariant(inputPath, variant = "soft") {
+  const outPath = inputPath + (variant === "soft" ? "_soft.png" : "_hard.png");
+
+  let img = sharp(inputPath).rotate().grayscale().normalize();
+
+  // Contraste + netteté
+  img = img.linear(1.15, -8).sharpen();
+
+  // OCR préfère des images plus larges
+  img = img.resize({ width: 2600, withoutEnlargement: true });
+
+  if (variant === "hard") {
+    // seuil moins agressif que 175 pour éviter de "manger" le texte gris
+    img = img.threshold(155);
+  }
+
+  await img.png({ compressionLevel: 9 }).toFile(outPath);
+  return outPath;
+}
+
+async function bestOcrFromVariants(filePath, ocrLang) {
+  const softPath = await preprocessVariant(filePath, "soft");
+  const hardPath = await preprocessVariant(filePath, "hard");
+
+  // OCR soft
+  const r1 = await ocrImage(softPath, ocrLang, 6);
+  const c1 = computeConfidencePercent(r1.text, r1.tessConf);
+  const len1 = (r1.text || "").trim().length;
+
+  // OCR hard
+  const r2 = await ocrImage(hardPath, ocrLang, 6);
+  const c2 = computeConfidencePercent(r2.text, r2.tessConf);
+  const len2 = (r2.text || "").trim().length;
+
+  // Choix best: priorité au % puis à la longueur
+  const choose2 = c2 > c1 + 3 || (c2 >= c1 && len2 > len1 + 80);
+
+  return {
+    bestText: choose2 ? r2.text : r1.text,
+    bestTessConf: choose2 ? r2.tessConf : r1.tessConf,
+    bestConfPct: choose2 ? c2 : c1,
+    tempPaths: [softPath, hardPath],
+  };
 }
 
 async function cleanOcrWithAI(openai, rawText) {
@@ -92,17 +138,6 @@ async function cleanOcrWithAI(openai, rawText) {
   return completion.choices?.[0]?.message?.content?.trim() || t;
 }
 
-function clamp(n, min, max) {
-  return Math.max(min, Math.min(max, n));
-}
-
-function computeConfidencePercent(text, tessConf) {
-  const q = ocrQualityScore(text);
-  const t = Number.isFinite(tessConf) ? clamp(tessConf / 100, 0, 1) : null;
-  const combined = t === null ? q : 0.75 * t + 0.25 * q;
-  return Math.round(clamp(combined, 0, 1) * 100);
-}
-
 module.exports = function (openai) {
   const router = express.Router();
 
@@ -117,6 +152,7 @@ module.exports = function (openai) {
     const useOcrPreprocess = String(req.body?.useOcrPreprocess || "1") === "1";
     const useOcrCleanup = String(req.body?.useOcrCleanup || "1") === "1";
 
+    // Peut être string ou array selon pipeline
     let prePath = null;
 
     try {
@@ -127,11 +163,11 @@ module.exports = function (openai) {
       if (ext === ".pdf") {
         text = await extractTextFromPdf(filePath);
 
-        // ✅ PDF scanné détecté
+        // ✅ PDF scanné détecté (si l’OCR est demandé)
         if (useOcr && (!text || text.trim().length < 80)) {
           return res.status(422).json({
             error: "PDF scanné détecté",
-            scannedPdf: true, // ✅ IMPORTANT pour frontend
+            scannedPdf: true,
             details:
               "Ce PDF semble être un scan (image). Conversion des pages en images requise pour OCR.",
           });
@@ -142,24 +178,43 @@ module.exports = function (openai) {
       } else if (isImageExt(ext)) {
         ocrUsed = true;
 
-        const inputForOcr = useOcrPreprocess ? await preprocessImageToPng(filePath) : filePath;
-        if (useOcrPreprocess) prePath = inputForOcr;
+        let rawOcrText = "";
+        let confPct = 0;
+        let tessConf = null;
+        let tempPaths = [];
 
-        let { text: ocr1, tessConf: conf1 } = await ocrImage(inputForOcr, ocrLang, 6);
-        let c1 = computeConfidencePercent(ocr1, conf1);
+        if (useOcrPreprocess) {
+          // ✅ multi-essais (soft + hard) => choix automatique
+          const r = await bestOcrFromVariants(filePath, ocrLang);
+          rawOcrText = r.bestText || "";
+          tessConf = r.bestTessConf;
+          confPct = r.bestConfPct;
+          tempPaths = r.tempPaths || [];
+        } else {
+          const r = await ocrImage(filePath, ocrLang, 6);
+          rawOcrText = r.text || "";
+          tessConf = r.tessConf;
+          confPct = computeConfidencePercent(rawOcrText, tessConf);
+        }
 
-        if (c1 < 45) {
-          const { text: ocr2, tessConf: conf2 } = await ocrImage(inputForOcr, ocrLang, 4);
-          const c2 = computeConfidencePercent(ocr2, conf2);
-          if (c2 > c1) {
-            ocr1 = ocr2;
-            conf1 = conf2;
-            c1 = c2;
+        // ✅ fallback PSM 4 si faible
+        if (confPct < 45 || rawOcrText.trim().length < 80) {
+          const altSource = useOcrPreprocess && tempPaths[0] ? tempPaths[0] : filePath;
+          const rAlt = await ocrImage(altSource, ocrLang, 4);
+          const cAlt = computeConfidencePercent(rAlt.text, rAlt.tessConf);
+
+          const lenA = rawOcrText.trim().length;
+          const lenB = (rAlt.text || "").trim().length;
+
+          if (cAlt > confPct || lenB > lenA + 80) {
+            rawOcrText = rAlt.text || "";
+            tessConf = rAlt.tessConf;
+            confPct = cAlt;
           }
         }
 
-        text = ocr1 || "";
-        ocrConfidence = computeConfidencePercent(text, conf1);
+        text = rawOcrText;
+        ocrConfidence = confPct;
 
         if (useOcrCleanup && text.trim().length > 20) {
           const cleaned = await cleanOcrWithAI(openai, text);
@@ -168,6 +223,9 @@ module.exports = function (openai) {
             ocrConfidence = clamp(ocrConfidence + 5, 0, 100);
           }
         }
+
+        // ✅ supprimer aussi les fichiers temporaires (soft/hard)
+        if (useOcrPreprocess && tempPaths.length) prePath = tempPaths;
       } else {
         return res.status(400).json({
           error: "Format non supporté.",
@@ -175,6 +233,7 @@ module.exports = function (openai) {
         });
       }
 
+      // ✅ seuil minimal (tu peux baisser à 30 si tu veux forcer)
       if (!text || text.trim().length < 50) {
         throw new Error(
           "Texte trop court/illisible après extraction/OCR. Conseil: meilleure lumière, zoom, page à plat."
@@ -239,7 +298,19 @@ Texte:
     } finally {
       try {
         if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-        if (prePath && fs.existsSync(prePath)) fs.unlinkSync(prePath);
+
+        // ✅ suppression des temporaires
+        if (Array.isArray(prePath)) {
+          prePath.forEach((p) => {
+            try {
+              if (p && fs.existsSync(p)) fs.unlinkSync(p);
+            } catch {}
+          });
+        } else {
+          try {
+            if (prePath && fs.existsSync(prePath)) fs.unlinkSync(prePath);
+          } catch {}
+        }
       } catch {}
     }
   });
