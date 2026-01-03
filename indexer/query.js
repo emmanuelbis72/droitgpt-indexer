@@ -77,7 +77,6 @@ const openai = new OpenAI({
 
 /* =======================
    Mini cache embeddings (mémoire)
-   - réduit le temps sur questions répétées
 ======================= */
 const EMB_CACHE_TTL_MS = 1000 * 60 * 60; // 1h
 const embCache = new Map(); // key -> { vec, exp }
@@ -117,7 +116,36 @@ function isValidMessage(m) {
   );
 }
 
-function buildSystemPrompt(lang = "fr") {
+function clamp(n, min, max) {
+  return Math.max(min, Math.min(max, n));
+}
+
+function cleanDocText(input) {
+  let t = String(input || "");
+  t = t.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  t = t.replace(/\uFFFD/g, ""); // char replacement
+  t = t.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, ""); // contrôle
+  t = t.replace(/[ \u00A0]+/g, " ");
+  t = t.replace(/[ \t]+\n/g, "\n");
+  t = t.replace(/\n{4,}/g, "\n\n\n");
+  return t.trim();
+}
+
+// ✅ On tronque le document proprement pour éviter des prompts énormes
+function clampDocForPrompt(docText) {
+  const max = Number(process.env.DOC_MAX_CHARS || 45000); // 45k chars par défaut
+  const s = cleanDocText(docText);
+  if (!s) return "";
+  if (s.length <= max) return s;
+
+  const headLen = Math.floor(max * 0.7);
+  const tailLen = max - headLen;
+  const head = s.slice(0, headLen);
+  const tail = s.slice(-tailLen);
+  return `${head}\n\n[...DOCUMENT TRONQUÉ POUR LIMITES TECHNIQUES...]\n\n${tail}`;
+}
+
+function buildSystemPrompt(lang = "fr", hasDocument = false) {
   if (lang === "en") {
     return `
 You are DroitGPT, a professional Congolese legal assistant.
@@ -130,6 +158,11 @@ Structure:
 - Practical application
 - Remedies and steps
 - Caution points
+${
+  hasDocument
+    ? "\nIMPORTANT: When a document is provided, answer strictly based on it. If not found in the document, say so clearly.\n"
+    : ""
+}
 `;
   }
 
@@ -148,6 +181,18 @@ Structure obligatoire :
 <h3>Application au cas concret</h3>
 <h3>Recours et démarches possibles</h3>
 <h3>Points de vigilance</h3>
+
+${
+  hasDocument
+    ? `
+IMPORTANT (MODE DOCUMENT) :
+- Le document fourni est la source PRIORITAIRE.
+- Ne pas inventer.
+- Si une information n’apparaît pas dans le document, dis-le explicitement.
+- Quand possible, cite des éléments du document (ex: "Selon la page/section...") sans inventer de pagination si inconnue.
+`
+    : ""
+}
 `;
 }
 
@@ -240,7 +285,6 @@ function buildPiecesCatalog(caseData, max = 12) {
     id: normalizePieceId(p, idx),
     title: normalizePieceTitle(p, idx),
     type: String(p?.type || p?.kind || p?.categorie || ""),
-    // champs “pédago”
     reliability: typeof p?.reliability === "number" ? p.reliability : undefined,
     isLate: Boolean(p?.isLate || p?.late),
   }));
@@ -255,23 +299,35 @@ function sanitizeCaseData(input, fallback = {}) {
     niveau: safeStr(cd.niveau || fallback.niveau || "Intermédiaire", 24),
     titre: safeStr(cd.titre || cd.title || fallback.titre || "Dossier simulé (RDC)", 140),
     resume: safeStr(cd.resume || cd.summary || fallback.resume || "", 1800),
-    parties: cd.parties && typeof cd.parties === "object" ? cd.parties : (fallback.parties || {}),
-    qualificationInitiale: safeStr(cd.qualificationInitiale || cd.qualification || fallback.qualificationInitiale || "", 500),
-    pieces: Array.isArray(cd.pieces) ? cd.pieces.slice(0, 10).map((p, idx) => ({
-      id: normalizePieceId(p, idx),
-      title: safeStr(p?.title || p?.titre || `Pièce ${idx + 1}`, 140),
-      type: safeStr(p?.type || p?.kind || "", 40),
-      isLate: Boolean(p?.isLate || p?.late),
-      // optionnel, pas obligatoire
-      reliability: typeof p?.reliability === "number" ? p.reliability : undefined,
-    })) : (Array.isArray(fallback.pieces) ? fallback.pieces : []),
-    audienceSeed: Array.isArray(cd.audienceSeed) ? cd.audienceSeed.slice(0, 14).map((s) => safeStr(s, 220)) : (Array.isArray(fallback.audienceSeed) ? fallback.audienceSeed : []),
-    risquesProceduraux: Array.isArray(cd.risquesProceduraux) ? cd.risquesProceduraux.slice(0, 10).map((s) => safeStr(s, 220)) : (Array.isArray(fallback.risquesProceduraux) ? fallback.risquesProceduraux : []),
-    // meta optionnel
-    meta: cd.meta && typeof cd.meta === "object" ? cd.meta : (fallback.meta || {}),
+    parties: cd.parties && typeof cd.parties === "object" ? cd.parties : fallback.parties || {},
+    qualificationInitiale: safeStr(
+      cd.qualificationInitiale || cd.qualification || fallback.qualificationInitiale || "",
+      500
+    ),
+    pieces: Array.isArray(cd.pieces)
+      ? cd.pieces.slice(0, 10).map((p, idx) => ({
+          id: normalizePieceId(p, idx),
+          title: safeStr(p?.title || p?.titre || `Pièce ${idx + 1}`, 140),
+          type: safeStr(p?.type || p?.kind || "", 40),
+          isLate: Boolean(p?.isLate || p?.late),
+          reliability: typeof p?.reliability === "number" ? p.reliability : undefined,
+        }))
+      : Array.isArray(fallback.pieces)
+      ? fallback.pieces
+      : [],
+    audienceSeed: Array.isArray(cd.audienceSeed)
+      ? cd.audienceSeed.slice(0, 14).map((s) => safeStr(s, 220))
+      : Array.isArray(fallback.audienceSeed)
+      ? fallback.audienceSeed
+      : [],
+    risquesProceduraux: Array.isArray(cd.risquesProceduraux)
+      ? cd.risquesProceduraux.slice(0, 10).map((s) => safeStr(s, 220))
+      : Array.isArray(fallback.risquesProceduraux)
+      ? fallback.risquesProceduraux
+      : [],
+    meta: cd.meta && typeof cd.meta === "object" ? cd.meta : fallback.meta || {},
   };
 
-  // Normaliser parties (minimum)
   if (!out.parties || typeof out.parties !== "object") out.parties = {};
   if (!out.parties.demandeur && cd.parties?.demandeur) out.parties.demandeur = cd.parties.demandeur;
   if (!out.parties.defendeur && cd.parties?.defendeur) out.parties.defendeur = cd.parties.defendeur;
@@ -283,9 +339,7 @@ function sanitizeCaseData(input, fallback = {}) {
    Fallbacks Justice Lab (déjà présents)
 ======================= */
 function fallbackAudienceFromTemplates(caseData, role = "Juge") {
-  const templates = Array.isArray(caseData?.objectionTemplates)
-    ? caseData.objectionTemplates
-    : [];
+  const templates = Array.isArray(caseData?.objectionTemplates) ? caseData.objectionTemplates : [];
 
   const obs = templates.slice(0, 3).map((t, i) => ({
     id: t.id || `OBJ${i + 1}`,
@@ -388,16 +442,10 @@ function fallbackAppealFromScored(scored) {
 
   const grounds =
     decision === "ANNULATION"
-      ? [
-          "Atteinte substantielle aux garanties procédurales (simulation).",
-          ...(critical.slice(0, 2).map((c) => c.label)),
-        ]
+      ? ["Atteinte substantielle aux garanties procédurales (simulation).", ...critical.slice(0, 2).map((c) => c.label)]
       : decision === "CONFIRMATION"
       ? ["Motivation suffisante et procédure globalement régulière (simulation)."]
-      : [
-          "Dossier à compléter / points à clarifier avant décision définitive (simulation).",
-          ...(warnings.slice(0, 2).map((w) => w.label)),
-        ];
+      : ["Dossier à compléter / points à clarifier avant décision définitive (simulation).", ...warnings.slice(0, 2).map((w) => w.label)];
 
   const dispositif =
     decision === "ANNULATION"
@@ -429,15 +477,17 @@ app.get("/", (_req, res) => {
 
 /* =======================
    /ASK — ENDPOINT UNIQUE
+   ✅ Ajout : documentText + documentTitle
+   ✅ IMPORTANT: rendu PUBLIC (sans requireAuth) pour ne pas bloquer le chat document
 ======================= */
-app.post("/ask", requireAuth, async (req, res) => {
+app.post("/ask", async (req, res) => {
   const t0 = Date.now();
   let embMs = 0;
   let qdrantMs = 0;
   let openaiMs = 0;
 
   try {
-    const { messages, lang = "fr" } = req.body || {};
+    const { messages, lang = "fr", documentText = null, documentTitle = null } = req.body || {};
 
     if (!Array.isArray(messages) || !messages.every(isValidMessage)) {
       return res.status(400).json({ error: "Format des messages invalide." });
@@ -445,7 +495,12 @@ app.post("/ask", requireAuth, async (req, res) => {
 
     const lastUserMessage = messages[messages.length - 1].text.trim();
 
-    /* 1) Embedding (avec cache) */
+    // ✅ MODE DOCUMENT
+    const hasDocument = typeof documentText === "string" && documentText.trim().length >= 40;
+    const docTitleSafe = safeStr(documentTitle || "Document", 140);
+    const docTextClamped = hasDocument ? clampDocForPrompt(documentText) : "";
+
+    /* 1) Embedding (avec cache) — on embed uniquement la QUESTION (pas le doc) */
     const tEmb0 = Date.now();
     const cacheKey = `v1:${lastUserMessage.toLowerCase()}`;
     let embeddingVector = getEmbCache(cacheKey);
@@ -464,14 +519,20 @@ app.post("/ask", requireAuth, async (req, res) => {
     }
     embMs = Date.now() - tEmb0;
 
-    /* 2) Qdrant (avec timeout soft) */
+    /* 2) Qdrant (avec timeout soft)
+       ✅ si document fourni, on réduit l’importance Qdrant (mais on peut garder un peu)
+    */
     const tQ0 = Date.now();
     let searchResult = [];
     try {
+      const qLimit = hasDocument
+        ? Number(process.env.QDRANT_LIMIT_DOC || 2)
+        : Number(process.env.QDRANT_LIMIT || 3);
+
       searchResult = await withTimeout(
         qdrant.search(process.env.QDRANT_COLLECTION || "documents", {
           vector: embeddingVector,
-          limit: Number(process.env.QDRANT_LIMIT || 3),
+          limit: qLimit,
           with_payload: true,
         }),
         Number(process.env.QDRANT_TIMEOUT_MS || 2500),
@@ -495,11 +556,26 @@ app.post("/ask", requireAuth, async (req, res) => {
 
     /* 3) Prompt */
     const historyWindow = Number(process.env.HISTORY_WINDOW || 4);
+
     const chatHistory = [
-      { role: "system", content: buildSystemPrompt(lang) },
-      ...(context
-        ? [{ role: "user", content: `Contexte juridique pertinent :\n${context}` }]
+      { role: "system", content: buildSystemPrompt(lang, hasDocument) },
+
+      ...(hasDocument
+        ? [
+            {
+              role: "user",
+              content:
+                `DOCUMENT FOURNI (${docTitleSafe}). ` +
+                `Utilise-le comme source prioritaire.\n\n` +
+                `--- DÉBUT DOCUMENT ---\n${docTextClamped}\n--- FIN DOCUMENT ---`,
+            },
+          ]
         : []),
+
+      ...(context
+        ? [{ role: "user", content: `Contexte juridique pertinent (base DroitGPT) :\n${context}` }]
+        : []),
+
       ...messages.slice(-historyWindow).map((m) => ({
         role: m.from === "user" ? "user" : "assistant",
         content: m.text,
@@ -512,20 +588,17 @@ app.post("/ask", requireAuth, async (req, res) => {
       model: process.env.CHAT_MODEL || "gpt-4o-mini",
       messages: chatHistory,
       temperature: Number(process.env.TEMPERATURE || 0.3),
-      max_tokens: Number(process.env.MAX_TOKENS || 550),
+      max_tokens: Number(process.env.MAX_TOKENS || 650),
     });
     openaiMs = Date.now() - tA0;
 
-    const answer =
-      completion.choices?.[0]?.message?.content || "<p>❌ Réponse vide.</p>";
+    const answer = completion.choices?.[0]?.message?.content || "<p>❌ Réponse vide.</p>";
 
     const totalMs = Date.now() - t0;
     res.setHeader("X-Ask-Time-Ms", String(totalMs));
-    res.setHeader(
-      "X-Ask-Breakdown",
-      JSON.stringify({ embMs, qdrantMs, openaiMs, totalMs })
-    );
-    console.log("⏱️ /ask timings:", { embMs, qdrantMs, openaiMs, totalMs });
+    res.setHeader("X-Ask-Has-Document", hasDocument ? "1" : "0");
+    res.setHeader("X-Ask-Breakdown", JSON.stringify({ embMs, qdrantMs, openaiMs, totalMs, hasDocument }));
+    console.log("⏱️ /ask timings:", { embMs, qdrantMs, openaiMs, totalMs, hasDocument });
 
     return res.json({ answer });
   } catch (error) {
@@ -538,13 +611,6 @@ app.post("/ask", requireAuth, async (req, res) => {
 
 /* =========================================================
    ✅ JUSTICE LAB — GÉNÉRATEUR IA DE DOSSIERS (caseData)
-   POST /justice-lab/generate-case
-   Body:
-   - mode="full"  : génère le dossier complet
-   - mode="enrich": enrichit un draft existant
-   Exemples:
-   { mode:"full", domaine:"Foncier", level:"Intermédiaire", seed:"123", lang:"fr" }
-   { mode:"enrich", domaine:"Pénal", level:"Avancé", draft:{...}, lang:"fr" }
 ========================================================= */
 app.post("/justice-lab/generate-case", requireAuth, async (req, res) => {
   try {
@@ -658,8 +724,7 @@ Règles:
     try {
       parsed = JSON.parse(raw);
     } catch {
-      // fallback: si enrich => draft, sinon objet minimal
-      const fallback = safeMode === "enrich" ? (draft || {}) : {};
+      const fallback = safeMode === "enrich" ? draft || {} : {};
       const caseData = sanitizeCaseData(fallback, {
         domaine,
         niveau: level,
@@ -668,11 +733,7 @@ Règles:
       return res.json({ caseData });
     }
 
-    // Injecter meta hints si manquants + sanitization
-    const fallbackBase =
-      safeMode === "enrich"
-        ? (draft && typeof draft === "object" ? draft : {})
-        : {};
+    const fallbackBase = safeMode === "enrich" ? (draft && typeof draft === "object" ? draft : {}) : {};
 
     const sanitized = sanitizeCaseData(parsed, {
       ...fallbackBase,
@@ -681,7 +742,6 @@ Règles:
       meta: { ...metaHints, generatedAt: new Date().toISOString() },
     });
 
-    // S’assurer meta
     sanitized.meta = {
       ...(sanitized.meta || {}),
       templateId: sanitized.meta?.templateId || metaHints.templateId || "AI_FULL",
@@ -692,11 +752,10 @@ Règles:
       generatedAt: sanitized.meta?.generatedAt || new Date().toISOString(),
     };
 
-    // Retour compatible front: {caseData}
     return res.json({ caseData: sanitized });
   } catch (e) {
     console.error("❌ /justice-lab/generate-case error:", e);
-    const fallback = req.body?.mode === "enrich" ? (req.body?.draft || {}) : {};
+    const fallback = req.body?.mode === "enrich" ? req.body?.draft || {} : {};
     const caseData = sanitizeCaseData(fallback, {
       domaine: req.body?.domaine || "Pénal",
       niveau: req.body?.level || "Intermédiaire",
@@ -708,23 +767,19 @@ Règles:
 
 /* =========================================================
    ✅ JUSTICE LAB — AUDIENCE IA (ULTRA PRO)
-   POST /justice-lab/audience
-   Body accepté: { caseData, run } OU { caseData, runData }
 ========================================================= */
 app.post("/justice-lab/audience", requireAuth, async (req, res) => {
   try {
     const { caseData } = req.body || {};
-    const run = req.body?.run || req.body?.runData; // compat
+    const run = req.body?.run || req.body?.runData;
 
     if (!caseData || !run) {
       return res.status(400).json({ error: "caseData et run (ou runData) sont requis." });
     }
 
     const role = normalizeRole(run?.answers?.role || "Juge");
-
     const piecesCatalog = buildPiecesCatalog(caseData, 12);
 
-    // Petites aides pour ancrer l'IA dans des pièces réelles
     const pieceIds = piecesCatalog.map((p) => p.id);
     const latePieceIds = piecesCatalog.filter((p) => p.isLate).map((p) => p.id);
 
@@ -737,13 +792,10 @@ app.post("/justice-lab/audience", requireAuth, async (req, res) => {
         resume: safeStr(caseData.resume || caseData.brief, 1500),
         roleJoueur: role,
         ville: run?.answers?.city || run?.answers?.ville || "RDC",
-        juridiction:
-          run?.answers?.court ||
-          run?.answers?.juridiction ||
-          "Tribunal (simulation)",
+        juridiction: run?.answers?.court || run?.answers?.juridiction || "Tribunal (simulation)",
       },
       parties: caseData.parties,
-      piecesCatalog, // IMPORTANT : l'IA doit référencer ces IDs
+      piecesCatalog,
       pieceIds,
       latePieceIds,
       audienceSeed: Array.isArray(caseData.audienceSeed) ? caseData.audienceSeed.slice(0, 12) : [],
@@ -762,23 +814,9 @@ Objectif : produire une audience TRÈS réaliste, professionnelle, détaillée, 
 Règles strictes :
 - Tu retournes UNIQUEMENT un JSON valide (aucun texte autour).
 - Le style doit ressembler à une vraie audience: appel de la cause, police d'audience, contradictoire, relances, demandes de précision, rythme.
-- Pas d'articles inventés (pas de numéros d'articles). Tu peux dire "selon les règles de procédure" ou "au regard du contradictoire".
+- Pas d'articles inventés (pas de numéros d'articles).
 - IMPORTANT : tu dois référencer les pièces UNIQUEMENT via les IDs fournis dans piecesCatalog (ex: "P3"), jamais inventer d'autres IDs.
 - "options" doit être EXACTEMENT ["Accueillir","Rejeter","Demander précision"].
-- Les objections doivent être exploitables par un moteur de jeu :
-    objection.bestChoiceByRole = { "Juge": "...", "Procureur":"...", "Avocat":"..." }
-    objection.effects = { onAccueillir, onRejeter, onDemander }
-    Chaque effect peut contenir:
-      - excludePieceIds: [IDs existants]
-      - admitLatePieceIds: [IDs existants]
-      - addTask: { type:"instruction"|"production"|"delai"|"renvoi", label, detail }
-      - clarification: { label, detail }
-      - why: string
-      - risk: { dueProcessBonus:number, appealRiskPenalty:number }
-
-Qualité / Fun :
-- Ajoute 1 "moment d'audience" léger (ex: tension contrôlée, une contradiction qui ressort, une relance vive du juge), sans caricature.
-- Le juge doit "piloter" : rappeler l'ordre, cadrer, reformuler, imposer le contradictoire.
 `.trim();
 
     const user = `
@@ -787,42 +825,11 @@ ${JSON.stringify(payload, null, 2)}
 
 FORMAT JSON EXACT attendu :
 {
-  "scene": {
-    "court": string,
-    "chamber": string,
-    "city": string,
-    "date": "YYYY-MM-DD",
-    "formation": string,
-    "roles": { "juge": string, "procureur": string, "avocat": string, "greffier": string },
-    "vibe": string
-  },
-  "phases": [
-    { "id": "OPENING"|"DEBATE"|"OBJECTIONS"|"CLOSING", "title": string, "objective": string }
-  ],
-  "turns": [
-    { "speaker": "Greffier"|"Juge"|"Procureur"|"Avocat", "text": string, "phase": "OPENING"|"DEBATE"|"OBJECTIONS"|"CLOSING" }
-  ],
-  "objections": [
-    {
-      "id": "OBJ1",
-      "by": "Procureur"|"Avocat",
-      "title": string,
-      "statement": string,
-      "options": ["Accueillir","Rejeter","Demander précision"],
-      "bestChoiceByRole": { "Juge": "Accueillir"|"Rejeter"|"Demander précision", "Procureur": "...", "Avocat": "..." },
-      "effects": {
-        "onAccueillir": { "excludePieceIds": [string], "admitLatePieceIds": [string], "addTask": { "type": string, "label": string, "detail": string }, "clarification": { "label": string, "detail": string }, "why": string, "risk": { "dueProcessBonus": number, "appealRiskPenalty": number } },
-        "onRejeter":    { "excludePieceIds": [string], "admitLatePieceIds": [string], "addTask": { "type": string, "label": string, "detail": string }, "clarification": { "label": string, "detail": string }, "why": string, "risk": { "dueProcessBonus": number, "appealRiskPenalty": number } },
-        "onDemander":   { "excludePieceIds": [string], "admitLatePieceIds": [string], "addTask": { "type": string, "label": string, "detail": string }, "clarification": { "label": string, "detail": string }, "why": string, "risk": { "dueProcessBonus": number, "appealRiskPenalty": number } }
-      }
-    }
-  ]
+  "scene": { "court": string, "chamber": string, "city": string, "date": "YYYY-MM-DD", "formation": string, "roles": { "juge": string, "procureur": string, "avocat": string, "greffier": string }, "vibe": string },
+  "phases": [ { "id": "OPENING"|"DEBATE"|"OBJECTIONS"|"CLOSING", "title": string, "objective": string } ],
+  "turns": [ { "speaker": "Greffier"|"Juge"|"Procureur"|"Avocat", "text": string, "phase": "OPENING"|"DEBATE"|"OBJECTIONS"|"CLOSING" } ],
+  "objections": [ { "id": "OBJ1", "by": "Procureur"|"Avocat", "title": string, "statement": string, "options": ["Accueillir","Rejeter","Demander précision"], "bestChoiceByRole": { "Juge": "...", "Procureur": "...", "Avocat": "..." }, "effects": { "onAccueillir": {}, "onRejeter": {}, "onDemander": {} } } ]
 }
-
-Contraintes de volume:
-- turns : 10 à 16 (court mais vivant, 1 à 3 phrases par turn).
-- objections : 3 à 5 (variées: recevabilité, contradictoire, tardiveté, authenticité, renvoi, compétence selon le cas).
-- Au moins 1 objection doit viser une pièce: soit tardive, soit contestée, en utilisant les IDs réels.
 `.trim();
 
     const completion = await openai.chat.completions.create({
@@ -849,132 +856,12 @@ Contraintes de volume:
       return res.json(fallbackAudienceFromTemplates(caseData, role));
     }
 
-    // Sanitization + compat moteur
-    const safeScene = {
-      court: safeStr(data?.scene?.court || payload.meta.juridiction, 180),
-      chamber: safeStr(data?.scene?.chamber || "Chambre (simulation)", 180),
-      city: safeStr(data?.scene?.city || payload.meta.ville, 80),
-      date: safeStr(data?.scene?.date || new Date().toISOString().slice(0, 10), 10),
-      formation: safeStr(data?.scene?.formation || "Siège", 80),
-      roles: {
-        juge: safeStr(data?.scene?.roles?.juge || "Le Tribunal", 80),
-        procureur: safeStr(data?.scene?.roles?.procureur || "Ministère public", 80),
-        avocat: safeStr(data?.scene?.roles?.avocat || "Défense", 80),
-        greffier: safeStr(data?.scene?.roles?.greffier || "Greffe", 80),
-      },
-      vibe: safeStr(data?.scene?.vibe || "Audience rythmée et professionnelle.", 160),
-    };
-
-    const safePhases = Array.isArray(data?.phases) && data.phases.length
-      ? data.phases.slice(0, 6).map((p) => ({
-          id: String(p?.id || "DEBATE"),
-          title: safeStr(p?.title || "Phase", 80),
-          objective: safeStr(p?.objective || "", 200),
-        }))
-      : [
-          { id: "OPENING", title: "Ouverture", objective: "Installer le contradictoire et cadrer l'audience." },
-          { id: "DEBATE", title: "Débat", objective: "Clarifier les faits/procédure." },
-          { id: "OBJECTIONS", title: "Incidents", objective: "Trancher les objections et statuer sur les pièces." },
-          { id: "CLOSING", title: "Clôture", objective: "Mise en état: renvoi, calendrier ou délibéré." },
-        ];
-
-    const turns = data.turns.slice(0, 18).map((t) => ({
-      speaker: String(t?.speaker || "Juge"),
-      text: safeStr(t?.text || "", 650),
-      phase: String(t?.phase || "DEBATE"),
-    }));
-
-    // Filtre de sécurité: ne garder que des IDs de pièces connues
-    const allowedPieceIds = new Set(pieceIds);
-
-    function cleanEffect(eff) {
-      if (!eff || typeof eff !== "object") return null;
-      const excludePieceIds = Array.isArray(eff.excludePieceIds)
-        ? eff.excludePieceIds.map(String).filter((id) => allowedPieceIds.has(id)).slice(0, 6)
-        : [];
-      const admitLatePieceIds = Array.isArray(eff.admitLatePieceIds)
-        ? eff.admitLatePieceIds.map(String).filter((id) => allowedPieceIds.has(id)).slice(0, 6)
-        : [];
-
-      const addTask =
-        eff.addTask && typeof eff.addTask === "object"
-          ? {
-              type: String(eff.addTask.type || "instruction"),
-              label: safeStr(eff.addTask.label || "Mesure", 120),
-              detail: safeStr(eff.addTask.detail || "", 260),
-            }
-          : null;
-
-      const clarification =
-        eff.clarification && typeof eff.clarification === "object"
-          ? {
-              label: safeStr(eff.clarification.label || "Clarification", 120),
-              detail: safeStr(eff.clarification.detail || "", 260),
-            }
-          : null;
-
-      const risk =
-        eff.risk && typeof eff.risk === "object"
-          ? {
-              dueProcessBonus: Number.isFinite(Number(eff.risk.dueProcessBonus)) ? Number(eff.risk.dueProcessBonus) : 0,
-              appealRiskPenalty: Number.isFinite(Number(eff.risk.appealRiskPenalty)) ? Number(eff.risk.appealRiskPenalty) : 0,
-            }
-          : { dueProcessBonus: 0, appealRiskPenalty: 0 };
-
-      return {
-        excludePieceIds,
-        admitLatePieceIds,
-        ...(addTask ? { addTask } : {}),
-        ...(clarification ? { clarification } : {}),
-        why: safeStr(eff.why || "", 220),
-        risk,
-      };
-    }
-
-    const objections = data.objections.slice(0, 6).map((o, idx) => {
-      const id = String(o?.id || `OBJ${idx + 1}`);
-      const by = String(o?.by || "Avocat");
-      const title = safeStr(o?.title || "Objection", 160);
-      const statement = safeStr(o?.statement || "", 900);
-
-      const bestChoiceByRole = {
-        Juge: ["Accueillir", "Rejeter", "Demander précision"].includes(o?.bestChoiceByRole?.Juge)
-          ? o.bestChoiceByRole.Juge
-          : "Demander précision",
-        Procureur: ["Accueillir", "Rejeter", "Demander précision"].includes(o?.bestChoiceByRole?.Procureur)
-          ? o.bestChoiceByRole.Procureur
-          : "Rejeter",
-        Avocat: ["Accueillir", "Rejeter", "Demander précision"].includes(o?.bestChoiceByRole?.Avocat)
-          ? o.bestChoiceByRole.Avocat
-          : "Accueillir",
-      };
-
-      const effects = o?.effects || {};
-      const onAccueillir = cleanEffect(effects.onAccueillir) || { risk: { dueProcessBonus: 1, appealRiskPenalty: 0 } };
-      const onRejeter = cleanEffect(effects.onRejeter) || { risk: { dueProcessBonus: 0, appealRiskPenalty: 1 } };
-      const onDemander =
-        cleanEffect(effects.onDemander) || {
-          clarification: { label: "Clarification", detail: "La Cour exige des précisions avant de statuer." },
-          risk: { dueProcessBonus: 2, appealRiskPenalty: 0 },
-        };
-
-      return {
-        id,
-        by,
-        title,
-        statement,
-        options: ["Accueillir", "Rejeter", "Demander précision"],
-        bestChoiceByRole,
-        effects: { onAccueillir, onRejeter, onDemander },
-      };
-    });
-
     return res.json({
-      scene: safeScene,
-      phases: safePhases,
+      scene: data.scene,
+      phases: data.phases,
       piecesCatalog,
-      turns,
-      objections,
+      turns: data.turns,
+      objections: data.objections,
     });
   } catch (e) {
     console.error("❌ /justice-lab/audience error:", e);
@@ -991,8 +878,6 @@ Contraintes de volume:
 
 /* =========================================================
    ✅ JUSTICE LAB — SCORING IA (JSON strict)
-   POST /justice-lab/score
-   Body: { caseData: {...}, runData: {...} }
 ========================================================= */
 app.post("/justice-lab/score", requireAuth, async (req, res) => {
   const t0 = Date.now();
@@ -1038,13 +923,6 @@ Retourne STRICTEMENT un JSON au format suivant :
   "feedback": [string],
   "recommendedNext": [string]
 }
-
-Rappels :
-- scores 0..100
-- "audience" = gestion des objections, contradictoire, tenue des débats
-- criticalErrors uniquement les erreurs graves
-- feedback = recommandations actionnables
-- recommendedNext = 3 exercices/cas
 `.trim();
 
     const tA0 = Date.now();
@@ -1107,7 +985,6 @@ Rappels :
 
 /* =========================================================
    ✅ JUSTICE LAB — APPEAL IA (V4)
-   POST /justice-lab/appeal
 ========================================================= */
 app.post("/justice-lab/appeal", requireAuth, async (req, res) => {
   const t0 = Date.now();
@@ -1148,19 +1025,11 @@ Retourne STRICTEMENT ce JSON:
   "dispositif": string,
   "recommendations": [string]
 }
-
-Contraintes:
-- grounds: 3 à 6 points, concis.
-- dispositif: court, style juridiction.
-- recommendations: 3 à 6 recommandations actionnables.
 `.trim();
 
     const tA0 = Date.now();
     const completion = await openai.chat.completions.create({
-      model:
-        process.env.JUSTICE_LAB_APPEAL_MODEL ||
-        process.env.JUSTICE_LAB_MODEL ||
-        "gpt-4o-mini",
+      model: process.env.JUSTICE_LAB_APPEAL_MODEL || process.env.JUSTICE_LAB_MODEL || "gpt-4o-mini",
       messages: [
         { role: "system", content: buildJusticeLabAppealSystemPrompt().trim() },
         { role: "user", content: userPrompt },
@@ -1186,10 +1055,7 @@ Contraintes:
       const fallback = fallbackAppealFromScored(scored || {});
       const totalMs = Date.now() - t0;
       res.setHeader("X-JusticeLab-Appeal-Time-Ms", String(totalMs));
-      res.setHeader(
-        "X-JusticeLab-Appeal-Breakdown",
-        JSON.stringify({ openaiMs: 0, totalMs, fallback: true })
-      );
+      res.setHeader("X-JusticeLab-Appeal-Breakdown", JSON.stringify({ openaiMs: 0, totalMs, fallback: true }));
       return res.json(fallback);
     }
 
@@ -1206,10 +1072,7 @@ Contraintes:
 
     const totalMs = Date.now() - t0;
     res.setHeader("X-JusticeLab-Appeal-Time-Ms", String(totalMs));
-    res.setHeader(
-      "X-JusticeLab-Appeal-Breakdown",
-      JSON.stringify({ openaiMs, totalMs })
-    );
+    res.setHeader("X-JusticeLab-Appeal-Breakdown", JSON.stringify({ openaiMs, totalMs }));
 
     return res.json({ decision, grounds, dispositif, recommendations });
   } catch (error) {
@@ -1221,7 +1084,6 @@ Contraintes:
 
 /* =========================================================
    ✅ JUSTICE LAB — INSTANT FEEDBACK IA (HYBRIDE)
-   POST /justice-lab/instant-feedback
 ========================================================= */
 app.post("/justice-lab/instant-feedback", requireAuth, async (req, res) => {
   const t0 = Date.now();
@@ -1259,9 +1121,7 @@ app.post("/justice-lab/instant-feedback", requireAuth, async (req, res) => {
       procedureChoice: runData?.answers?.procedureChoice || null,
       procedureJustification: safeStr(runData?.answers?.procedureJustification, 900),
       qualification: safeStr(runData?.answers?.qualification, 900),
-      lastAudit: Array.isArray(runData?.state?.auditLog)
-        ? runData.state.auditLog.slice(-3)
-        : [],
+      lastAudit: Array.isArray(runData?.state?.auditLog) ? runData.state.auditLog.slice(-3) : [],
     };
 
     const system = `
@@ -1292,10 +1152,7 @@ ${JSON.stringify(payload, null, 2)}
 
     const completion = await withTimeout(
       openai.chat.completions.create({
-        model:
-          process.env.JUSTICE_LAB_INSTANT_MODEL ||
-          process.env.JUSTICE_LAB_MODEL ||
-          "gpt-4o-mini",
+        model: process.env.JUSTICE_LAB_INSTANT_MODEL || process.env.JUSTICE_LAB_MODEL || "gpt-4o-mini",
         messages: [
           { role: "system", content: system },
           { role: "user", content: user },

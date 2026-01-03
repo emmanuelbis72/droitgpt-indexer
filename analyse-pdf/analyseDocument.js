@@ -28,8 +28,8 @@ function clamp(n, min, max) {
 function cleanExtractedText(input) {
   let t = String(input || "");
   t = t.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-  t = t.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, ""); // contrôle
-  t = t.replace(/\uFFFD/g, ""); // replacement char
+  t = t.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "");
+  t = t.replace(/\uFFFD/g, "");
   t = t.replace(/[ \u00A0]+/g, " ");
   t = t.replace(/[ \t]+\n/g, "\n");
   t = t.replace(/\n{4,}/g, "\n\n\n");
@@ -313,7 +313,7 @@ async function analyseFullText(openai, fullTextRaw) {
   const MAX_CHUNKS = Number(process.env.ANALYSE_MAX_CHUNKS || 30);
 
   const CHUNK_TIMEOUT_MS = Number(process.env.ANALYSE_CHUNK_TIMEOUT_MS || 45000);
-  const GLOBAL_TIMEOUT_MS = Number(process.env.ANALYSE_GLOBAL_TIMEOUT_MS || 180000); // 3 minutes
+  const GLOBAL_TIMEOUT_MS = Number(process.env.ANALYSE_GLOBAL_TIMEOUT_MS || 180000);
 
   const chunks = chunkText(fullText, CHUNK_SIZE, OVERLAP).slice(0, MAX_CHUNKS);
   const concurrency = process.env.ANALYSE_CHUNK_CONCURRENCY
@@ -480,6 +480,7 @@ module.exports = function (openai) {
 
     const filePath = req.file.path;
     const originalName = req.file.originalname || "document";
+    const documentTitle = originalName;
 
     const skipAnalysis = String(req.body?.skipAnalysis || "0") === "1";
     let tempPaths = [];
@@ -491,6 +492,7 @@ module.exports = function (openai) {
       if (skipAnalysis) {
         return res.json({
           analysis: null,
+          documentTitle,
           documentText: extracted.fullText,
           ocrUsed: extracted.ocrUsed,
           ocrConfidence: extracted.ocrConfidence,
@@ -504,6 +506,7 @@ module.exports = function (openai) {
 
       return res.json({
         analysis: analysed.analysisHtml,
+        documentTitle,
         documentText: analysed.documentText,
         ocrUsed: extracted.ocrUsed,
         ocrConfidence: extracted.ocrConfidence,
@@ -557,6 +560,7 @@ module.exports = function (openai) {
       const analysed = await analyseFullText(openai, text);
       return res.json({
         analysis: analysed.analysisHtml,
+        documentTitle: req.body?.documentTitle || "Texte importé",
         documentText: analysed.documentText,
         meta: { ...analysed.meta, ext: "text" },
       });
