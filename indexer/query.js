@@ -859,7 +859,8 @@ FORMAT JSON EXACT attendu :
 ========================================================= */
 app.post("/justice-lab/ai-judge", requireAuth, async (req, res) => {
   try {
-    const { caseData, runData, objection, recommendation } = req.body || {};
+    const { caseData, runData, objection, recommendation, playerSuggestion } = req.body || {};
+    const rec = recommendation || playerSuggestion || null;
     if (!caseData || !runData || !objection) {
       return res.status(400).json({ error: "caseData, runData et objection sont requis." });
     }
@@ -883,11 +884,11 @@ app.post("/justice-lab/ai-judge", requireAuth, async (req, res) => {
         statement: safeStr(objection.statement, 1200),
         options: Array.isArray(objection.options) ? objection.options.slice(0, 3) : ["Accueillir", "Rejeter", "Demander précision"],
       },
-      recommendation: recommendation
+      recommendation: rec
         ? {
-            byRole: safeStr(recommendation.byRole || "", 20),
-            choice: safeStr(recommendation.choice || "", 40),
-            reasoning: safeStr(recommendation.reasoning || "", 1200),
+            byRole: safeStr(rec.byRole || rec.role || "", 20),
+            choice: safeStr(rec.choice || rec.decision || "", 40),
+            reasoning: safeStr(rec.reasoning || rec.reason || "", 1200),
           }
         : null,
     };
@@ -939,16 +940,20 @@ Format:
     const ok = ["Accueillir", "Rejeter", "Demander précision"].includes(decision);
 
     if (!ok) {
-      return res.json({ decision: fallbackChoice, reason: "Décision IA fallback (format/validation)." });
+      return res.json({ choice: fallbackChoice, reasoning: "Décision IA fallback (format/validation).", decision: fallbackChoice, reason: "Décision IA fallback (format/validation)." });
     }
 
     return res.json({
+      // ✅ compat front: attend parfois {choice, reasoning}
+      choice: decision,
+      reasoning: safeStr(out?.reason || "Décision motivée (IA).", 380),
+      // ✅ clés historiques
       decision,
       reason: safeStr(out?.reason || "Décision motivée (IA).", 380),
     });
   } catch (e) {
     console.warn("⚠️ /justice-lab/ai-judge fallback:", e?.message);
-    return res.json({ decision: "Demander précision", reason: "IA indisponible, décision prudente." });
+    return res.json({ choice: "Demander précision", reasoning: "IA indisponible, décision prudente.", decision: "Demander précision", reason: "IA indisponible, décision prudente." });
   }
 });
 
@@ -1525,7 +1530,7 @@ app.post("/justice-lab/rooms/action", requireAuth, async (req, res) => {
     // --- snapshot sync (host) ---
     if (type === "SNAPSHOT" || type === "SYNC_SNAPSHOT") {
       if (!me?.isHost) return res.status(403).json({ error: "HOST_ONLY" });
-      const snap = payload?.snapshot;
+      const snap = payload?.snapshot || action?.snapshot;
       if (!snap || typeof snap !== "object") return res.status(400).json({ error: "SNAPSHOT_REQUIRED" });
 
       room.snapshot = snap;
@@ -1537,16 +1542,22 @@ app.post("/justice-lab/rooms/action", requireAuth, async (req, res) => {
 
     // --- suggestion (Procureur/Avocat) ---
     if (type === "SUGGESTION") {
-      const sug = {
+            const sugIn = payload?.suggestion && typeof payload.suggestion === "object" ? payload.suggestion : payload;
+      const legacySug = action?.suggestion && typeof action.suggestion === "object" ? action.suggestion : null;
+      const src = legacySug || sugIn || {};
+
+const sug = {
         id: `SUG_${Date.now()}_${Math.random().toString(16).slice(2)}`,
         ts: t,
-        role: me?.role || safeStr(payload?.role || "", 20),
+        role: me?.role || safeStr(src?.role || src?.byRole || "", 20),
         participantId: me?.participantId || null,
-        displayName: me?.displayName || safeStr(payload?.displayName || "", 60),
-        objectionId: safeStr(payload?.objectionId || "", 40),
-        decision: safeStr(payload?.decision || payload?.choice || "", 40),
-        reasoning: safeStr(payload?.reasoning || "", 1400),
+        displayName: me?.displayName || safeStr(src?.displayName || "", 60),
+        objectionId: safeStr(src?.objectionId || "", 40),
+        decision: safeStr(src?.decision || src?.choice || "", 40),
+        reasoning: safeStr(src?.reasoning || src?.reason || "", 1400),
       };
+
+
 
       room.suggestions = Array.isArray(room.suggestions) ? room.suggestions : [];
       room.suggestions.unshift(sug);
@@ -1691,8 +1702,8 @@ app.post("/justice-lab/rooms/judge-decision", requireAuth, async (req, res) => {
   }
 });
 
-
-START SERVER
+/* =======================
+   START SERVER
 ======================= */
 const port = process.env.PORT || 3000;
 app.listen(port, () => {
