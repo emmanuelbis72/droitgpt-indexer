@@ -780,33 +780,106 @@ app.post("/justice-lab/audience", requireAuth, async (req, res) => {
       },
     };
 
+        const audienceStyle = String(req.body?.audienceStyle || req.body?.data?.audienceStyle || "STANDARD").toUpperCase();
+    const ultraPro = audienceStyle === "ULTRA_PRO";
+
+    const minTurns = clamp(
+      Number(req.body?.minTurns || (ultraPro ? 55 : 40)),
+      18,
+      120
+    );
+    const minObjections = clamp(
+      Number(req.body?.minObjections || (ultraPro ? 10 : 8)),
+      2,
+      25
+    );
+    const includeIncidents = req.body?.includeIncidents !== false; // default true
+    const includePiecesLinks = req.body?.includePiecesLinks !== false; // default true
+
     const system = `
-Tu es un "Moteur d'audience judiciaire" (RDC) pour un jeu pédagogique de magistrature.
-Objectif : produire une audience TRÈS réaliste, professionnelle, détaillée, mais rythmée.
+Tu es un "Moteur d'audience judiciaire" (RDC) pour un jeu de FORMATION CONTINUE (magistrats, parquet, avocats, greffe).
+Objectif : produire une audience TRÈS réaliste, professionnelle, pratico-pratique, cohérente avec un dossier RDC.
 
-Règles strictes :
-- turns: minimum 40 (sinon invalid)
-- objections: minimum 8, et chaque objection doit référencer au moins une pièce (id dans pieceIds)
-- inclure au moins 2 incidents procéduraux (ex: tardiveté, compétence, nullité, renvoi, témoin absent)
-- chaque phase doit avoir un objectif clair et une progression (ouverture → débat pièces → exceptions → conclusions → mise en état)
+STYLE: formel, vocabulaire judiciaire RDC, phrases courtes, rythme d'audience.
 
-- Tu retournes UNIQUEMENT un JSON valide.
-- Pas d'articles inventés (pas de numéros d'articles).
-- IMPORTANT : tu dois référencer les pièces UNIQUEMENT via les IDs dans piecesCatalog (ex: "P3").
-- "options" doit être EXACTEMENT ["Accueillir","Rejeter","Demander précision"].
+PARAMÈTRES:
+- audienceStyle: ${audienceStyle}
+- minTurns: ${minTurns} (obligatoire)
+- minObjections: ${minObjections} (obligatoire)
+- includeIncidents: ${includeIncidents}
+- includePiecesLinks: ${includePiecesLinks}
+
+RÈGLES STRICTES (NON NÉGOCIABLES) :
+1) Tu retournes UNIQUEMENT un JSON valide (aucun texte autour).
+2) Pas d'articles numérotés inventés. Utilise des principes: contradictoire, droits de la défense, compétence, recevabilité, motivation.
+3) Tu dois référencer les pièces UNIQUEMENT via les IDs dans piecesCatalog (ex: "P3").
+4) turns.length >= minTurns ; objections.length >= minObjections.
+5) Chaque objection:
+   - options EXACTES: ["Accueillir","Rejeter","Demander précision"]
+   - bestChoiceByRole.Juge doit être une des 3 options
+   - doit référencer au moins 1 pièce via pieceIds (dans statement et/ou dans effects)
+   - effects doit contenir onAccueillir/onRejeter/onDemander avec au minimum excludePieceIds/admitLatePieceIds (tableaux) + why (texte court).
+6) Si includeIncidents=true => au moins 2 incidents procéduraux (tardiveté, compétence, nullité, renvoi, communication de pièces, témoin absent, jonction/disjonction…).
+7) Progression pédagogique: le juge pose des questions, recadre, protège le contradictoire, tranche les incidents, mène au fond, conclut et met en délibéré.
+8) Tu dois mentionner explicitement au moins 6 pièces dans les turns (si le dossier en contient moins, mentionne toutes).
+
+SPÉCIAL "ULTRA_PRO":
+- Si audienceStyle = ULTRA_PRO, phases OBLIGATOIRES = 5 :
+  1) OUVERTURE (police d'audience, appel de la cause, vérification comparution/citations)
+  2) INCIDENTS (exceptions/renvoi/communication pièces)
+  3) FOND (débat factuel + discussion de pièces + questions du siège)
+  4) CONCLUSIONS (positions finales / réquisitions / plaidoiries)
+  5) CLOTURE (clôture des débats + mise en délibéré + annonce date)
+- Chaque phase doit être clairement identifiable dans phases[] et utilisée dans turns[].phase.
 `.trim();
 
     const user = `
 INPUT:
 ${JSON.stringify(payload, null, 2)}
 
-FORMAT JSON EXACT attendu :
+FORMAT JSON attendu (retourne EXACTEMENT ce JSON, sans texte autour) :
 {
-  "scene": { "court": string, "chamber": string, "city": string, "date": "YYYY-MM-DD", "formation": string, "roles": { "juge": string, "procureur": string, "avocat": string, "greffier": string }, "vibe": string },
-  "phases": [ { "id": "OPENING"|"DEBATE"|"OBJECTIONS"|"CLOSING", "title": string, "objective": string } ],
-  "turns": [ { "speaker": "Greffier"|"Juge"|"Procureur"|"Avocat", "text": string, "phase": "OPENING"|"DEBATE"|"OBJECTIONS"|"CLOSING" } ],
-  "objections": [ { "id": "OBJ1", "by": "Procureur"|"Avocat", "title": string, "statement": string, "options": ["Accueillir","Rejeter","Demander précision"], "bestChoiceByRole": { "Juge": "...", "Procureur": "...", "Avocat": "..." }, "effects": { "onAccueillir": {}, "onRejeter": {}, "onDemander": {} } } ]
+  "scene": {
+    "court": string,
+    "chamber": string,
+    "city": string,
+    "date": "YYYY-MM-DD",
+    "formation": string,
+    "roles": { "juge": string, "procureur": string, "avocat": string, "greffier": string },
+    "vibe": string
+  },
+  "phases": [
+    { "id": string, "title": string, "objective": string }
+  ],
+  "turns": [
+    {
+      "speaker": "Greffier"|"Juge"|"Procureur"|"Avocat",
+      "text": string,
+      "phase": string,
+      "pieceRefs": [ "P1", "P2" ]
+    }
+  ],
+  "objections": [
+    {
+      "id": "OBJ1",
+      "by": "Procureur"|"Avocat",
+      "title": string,
+      "statement": string,
+      "options": ["Accueillir","Rejeter","Demander précision"],
+      "bestChoiceByRole": { "Juge": "Accueillir"|"Rejeter"|"Demander précision", "Procureur": string, "Avocat": string },
+      "effects": {
+        "onAccueillir": { "excludePieceIds": [string], "admitLatePieceIds": [string], "why": string },
+        "onRejeter": { "excludePieceIds": [string], "admitLatePieceIds": [string], "why": string },
+        "onDemander": { "excludePieceIds": [string], "admitLatePieceIds": [string], "why": string, "clarification": { "label": string, "detail": string } }
+      }
+    }
+  ]
 }
+
+NOTES:
+- pieceRefs est optionnel mais recommandé si includePiecesLinks=true.
+- excludePieceIds/admitLatePieceIds doivent utiliser uniquement les IDs présents dans piecesCatalog.
+- Les phases Ultra Pro attendues : OUVERTURE, INCIDENTS, FOND, CONCLUSIONS, CLOTURE.
 `.trim();
 
     const completion = await openai.chat.completions.create({
@@ -833,6 +906,29 @@ FORMAT JSON EXACT attendu :
       return res.json(fallbackAudienceFromTemplates(caseData, role));
     }
 
+    // ✅ Validation minimale (qualité Ultra Pro)
+    const turnsLen = data.turns.length;
+    const objectionsLen = data.objections.length;
+
+    if (turnsLen < minTurns || objectionsLen < minObjections) {
+      res.setHeader("X-JusticeLab-Audience-Fallback", "true");
+      return res.json(fallbackAudienceFromTemplates(caseData, role));
+    }
+
+    if (!Array.isArray(data?.phases) || data.phases.length < 2) {
+      res.setHeader("X-JusticeLab-Audience-Fallback", "true");
+      return res.json(fallbackAudienceFromTemplates(caseData, role));
+    }
+
+    if (ultraPro) {
+      const reqPhaseIds = ["OUVERTURE", "INCIDENTS", "FOND", "CONCLUSIONS", "CLOTURE"];
+      const got = new Set(data.phases.map((p) => String(p?.id || "").toUpperCase()));
+      const missing = reqPhaseIds.filter((id) => !got.has(id));
+      if (missing.length) {
+        res.setHeader("X-JusticeLab-Audience-Fallback", "true");
+        return res.json(fallbackAudienceFromTemplates(caseData, role));
+      }
+    }
     return res.json({
       scene: data.scene,
       phases: data.phases,
