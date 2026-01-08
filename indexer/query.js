@@ -716,11 +716,38 @@ Règles:
 ========================================================= */
 app.post("/justice-lab/audience", requireAuth, async (req, res) => {
   try {
-    const { caseData } = req.body || {};
-    const run = req.body?.run || req.body?.runData;
+    // ✅ Compat: accepte {caseData, run} OU {caseData, runData} OU payload léger
+    let caseData = req.body?.caseData || null;
+    let run = req.body?.run || req.body?.runData || null;
 
-    if (!caseData || !run) {
-      return res.status(400).json({ error: "caseData et run (ou runData) sont requis." });
+    if (!caseData) {
+      // payload léger (fallback) — évite 400 et permet au front de récupérer une audience
+      const b = req.body || {};
+      caseData = {
+        caseId: b.caseId || b.case_id || "DOSSIER",
+        domaine: b.domaine || b.matiere || "RDC",
+        niveau: b.niveau || b.difficulty || "Intermédiaire",
+        titre: b.titre || b.title || "Audience simulée",
+        resume: b.resume || b.facts || b.brief || "",
+        parties: b.parties || {},
+        pieces: Array.isArray(b.pieces) ? b.pieces : [],
+        audienceSeed: Array.isArray(b.audienceSeed) ? b.audienceSeed : [],
+      };
+    }
+
+    if (!run) {
+      const b = req.body || {};
+      run = {
+        eventCard: b.eventCard || null,
+        answers: {
+          role: b.role || "Juge",
+          qualification: b.qualification || "",
+          procedureChoice: b.procedureChoice || null,
+          procedureJustification: b.procedureJustification || "",
+          city: b.city || b.ville || "RDC",
+          court: b.court || b.juridiction || "Tribunal (simulation)",
+        },
+      };
     }
 
     const role = normalizeRole(run?.answers?.role || "Juge");
@@ -758,6 +785,11 @@ Tu es un "Moteur d'audience judiciaire" (RDC) pour un jeu pédagogique de magist
 Objectif : produire une audience TRÈS réaliste, professionnelle, détaillée, mais rythmée.
 
 Règles strictes :
+- turns: minimum 40 (sinon invalid)
+- objections: minimum 8, et chaque objection doit référencer au moins une pièce (id dans pieceIds)
+- inclure au moins 2 incidents procéduraux (ex: tardiveté, compétence, nullité, renvoi, témoin absent)
+- chaque phase doit avoir un objectif clair et une progression (ouverture → débat pièces → exceptions → conclusions → mise en état)
+
 - Tu retournes UNIQUEMENT un JSON valide.
 - Pas d'articles inventés (pas de numéros d'articles).
 - IMPORTANT : tu dois référencer les pièces UNIQUEMENT via les IDs dans piecesCatalog (ex: "P3").
@@ -784,7 +816,7 @@ FORMAT JSON EXACT attendu :
         { role: "user", content: user },
       ],
       temperature: Number(process.env.JUSTICE_LAB_AUDIENCE_TEMPERATURE || 0.5),
-      max_tokens: Number(process.env.JUSTICE_LAB_AUDIENCE_MAX_TOKENS || 1400),
+      max_tokens: Number(process.env.JUSTICE_LAB_AUDIENCE_MAX_TOKENS || 2600),
       response_format: { type: "json_object" },
     });
 
@@ -1228,87 +1260,151 @@ Format EXACT:
 });
 
 /* =========================================================
-   ✅ NEW — ROOMS CO-OP 2–3 joueurs (MVP mémoire + TTL)
+   ✅ NEW — ROOMS CO-OP 2–3 joueurs (Render-friendly, polling)
+   Endpoints attendus par JusticeLabPlay.jsx :
+     POST /justice-lab/rooms/create   { caseId, displayName, role }
+     POST /justice-lab/rooms/join     { roomId, caseId, displayName, role }
+     GET  /justice-lab/rooms/:roomId?participantId=...
+     POST /justice-lab/rooms/action   { roomId, participantId, action:{type,payload} }
+   + Compat anciens endpoints :
+     GET  /justice-lab/rooms/state/:roomId
+     POST /justice-lab/rooms/suggest
+     POST /justice-lab/rooms/judge-decision
 ========================================================= */
+
 const ROOMS_TTL_MS = Number(process.env.JUSTICE_LAB_ROOMS_TTL_MS || 6 * 60 * 60 * 1000); // 6h
+const ROOMS_MAX_PLAYERS = Number(process.env.JUSTICE_LAB_ROOMS_MAX_PLAYERS || 3);
+
 const rooms = new Map(); // roomId -> room
 
-function now() {
+function nowMs() {
   return Date.now();
 }
+function nowIso() {
+  return new Date().toISOString();
+}
 function randCode(len = 6) {
-  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // sans 0/O/I/1
   let s = "";
   for (let i = 0; i < len; i++) s += chars[Math.floor(Math.random() * chars.length)];
   return s;
 }
 function makeRoomId() {
+  // format simple (copiable)
   return `JL-${randCode(6)}`;
 }
+function makeParticipantId() {
+  return `p_${nowMs().toString(36)}_${Math.random().toString(16).slice(2)}`;
+}
+function cleanupRooms() {
+  const t = nowMs();
+  for (const [id, r] of rooms.entries()) {
+    if (!r) {
+      rooms.delete(id);
+      continue;
+    }
+    const exp = Number(r.expiresAt || 0);
+    if (exp && exp <= t) rooms.delete(id);
+  }
+}
+setInterval(cleanupRooms, 60 * 1000).unref?.();
+
+function ensureRoleValid(role) {
+  const r = normalizeRole(role || "");
+  if (!["Juge", "Procureur", "Avocat"].includes(r)) return "ROLE_INVALID";
+  return r;
+}
+
 function scrubRoomForClient(room) {
   if (!room) return null;
+  const players = Array.isArray(room.players) ? room.players : [];
   return {
     roomId: room.roomId,
+    version: Number(room.version || 0),
     createdAt: room.createdAt,
     updatedAt: room.updatedAt,
     expiresAt: room.expiresAt,
     meta: room.meta || {},
-    roles: room.roles || {}, // {Juge:{userId,name}, Procureur:{...}, Avocat:{...}}
-    state: room.state || {}, // {scene, phases, turns, objections, decisions}
-    suggestions: room.suggestions || [], // last suggestions
+    caseId: room.caseId || null,
+    players: players.map((p) => ({
+      participantId: p.participantId,
+      displayName: p.displayName,
+      role: p.role,
+      joinedAt: p.joinedAt,
+      isHost: Boolean(p.isHost),
+      lastSeenAt: p.lastSeenAt || null,
+    })),
+    snapshot: room.snapshot || null,
+    suggestions: Array.isArray(room.suggestions) ? room.suggestions.slice(0, 60) : [],
+    decisions: Array.isArray(room.decisions) ? room.decisions.slice(0, 120) : [],
   };
 }
-function cleanupRooms() {
-  const t = now();
-  for (const [id, r] of rooms.entries()) {
-    if (!r || r.expiresAt <= t) rooms.delete(id);
-  }
+
+function getRoomOr404(roomId) {
+  cleanupRooms();
+  const rid = String(roomId || "").trim().toUpperCase();
+  const room = rooms.get(rid);
+  if (!room) return null;
+  room.expiresAt = nowMs() + ROOMS_TTL_MS;
+  return room;
 }
-// nettoyage périodique
-setInterval(cleanupRooms, 60 * 1000).unref?.();
+
+function roleTaken(room, role) {
+  const players = Array.isArray(room.players) ? room.players : [];
+  return players.some((p) => String(p.role) === String(role));
+}
+
+function getParticipant(room, participantId) {
+  const pid = String(participantId || "").trim();
+  const players = Array.isArray(room.players) ? room.players : [];
+  return players.find((p) => p.participantId === pid) || null;
+}
 
 /**
  * POST /justice-lab/rooms/create
- * body: { caseData, runData, roomMeta? }
+ * body: { caseId, displayName, role }
  */
 app.post("/justice-lab/rooms/create", requireAuth, async (req, res) => {
   try {
-    const { caseData, runData, roomMeta = {} } = req.body || {};
-    if (!caseData || !runData) return res.status(400).json({ error: "caseData et runData sont requis." });
-
     cleanupRooms();
+
+    const caseId = safeStr(req.body?.caseId || "", 80);
+    const displayName = safeStr(req.body?.displayName || "Joueur", 50) || "Joueur";
+
+    const r = ensureRoleValid(req.body?.role || "Juge");
+    if (r === "ROLE_INVALID") return res.status(400).json({ error: "Role invalide." });
+
     const roomId = makeRoomId();
+    const participantId = makeParticipantId();
 
-    const createdAt = new Date().toISOString();
-    const t = now();
-
+    const createdAt = nowIso();
     const room = {
       roomId,
+      version: 0,
       createdAt,
       updatedAt: createdAt,
-      expiresAt: t + ROOMS_TTL_MS,
+      expiresAt: nowMs() + ROOMS_TTL_MS,
+      caseId: caseId || null,
       meta: {
-        title: safeStr(roomMeta.title || caseData.titre || caseData.title || "Audience co-op", 140),
-        domaine: safeStr(roomMeta.domaine || caseData.domaine || "—", 60),
-        niveau: safeStr(roomMeta.niveau || caseData.niveau || "—", 30),
-        city: safeStr(roomMeta.city || runData?.answers?.city || "RDC", 60),
+        title: safeStr(req.body?.title || "Audience co-op", 140),
       },
-      roles: {},
-      state: {
-        // on stocke ce qui est utile pour la salle
-        caseData: sanitizeCaseData(caseData, {}),
-        runSeed: {
-          answers: runData?.answers || {},
-          eventCard: runData?.eventCard || null,
+      players: [
+        {
+          participantId,
+          displayName,
+          role: r,
+          isHost: true,
+          joinedAt: createdAt,
+          lastSeenAt: createdAt,
         },
-        audience: null, // pourra être remplie par appel /justice-lab/audience
-        decisions: [], // décisions du juge
-      },
+      ],
+      snapshot: null, // host pousse l'état via /rooms/action
       suggestions: [],
+      decisions: [],
     };
 
     rooms.set(roomId, room);
-    return res.json({ roomId, room: scrubRoomForClient(room) });
+    return res.json({ roomId, participantId, version: room.version, snapshot: room.snapshot });
   } catch (e) {
     console.error("❌ /justice-lab/rooms/create:", e);
     return res.status(500).json({ error: "Erreur création room." });
@@ -1317,36 +1413,47 @@ app.post("/justice-lab/rooms/create", requireAuth, async (req, res) => {
 
 /**
  * POST /justice-lab/rooms/join
- * body: { roomId, role, user: { id, name } }
+ * body: { roomId, caseId, displayName, role }
  */
 app.post("/justice-lab/rooms/join", requireAuth, async (req, res) => {
   try {
-    const { roomId, role, user } = req.body || {};
-    if (!roomId || !role || !user?.id) return res.status(400).json({ error: "roomId, role, user.id requis." });
+    const roomId = String(req.body?.roomId || "").trim().toUpperCase();
+    if (!roomId) return res.status(400).json({ error: "roomId requis." });
 
-    cleanupRooms();
-    const room = rooms.get(String(roomId));
+    const room = getRoomOr404(roomId);
     if (!room) return res.status(404).json({ error: "Room introuvable/expirée." });
 
-    const r = normalizeRole(role);
-    if (!["Juge", "Procureur", "Avocat", "Greffier"].includes(r)) {
-      return res.status(400).json({ error: "Role invalide." });
+    const displayName = safeStr(req.body?.displayName || "Joueur", 50) || "Joueur";
+    const r = ensureRoleValid(req.body?.role || "Avocat");
+    if (r === "ROLE_INVALID") return res.status(400).json({ error: "Role invalide." });
+
+    const joinCaseId = safeStr(req.body?.caseId || "", 80);
+    if (room.caseId && joinCaseId && room.caseId !== joinCaseId) {
+      return res.status(409).json({ error: "CASE_MISMATCH" });
     }
 
-    // rôle déjà pris ?
-    const existing = room.roles?.[r];
-    if (existing && existing.userId !== user.id) {
-      return res.status(409).json({ error: `Rôle déjà occupé: ${r}` });
-    }
+    const players = Array.isArray(room.players) ? room.players : [];
+    if (players.length >= ROOMS_MAX_PLAYERS) return res.status(409).json({ error: "ROOM_FULL" });
 
-    room.roles = room.roles || {};
-    room.roles[r] = { userId: String(user.id), name: safeStr(user.name || r, 60) };
+    if (roleTaken(room, r)) return res.status(409).json({ error: `Rôle déjà occupé: ${r}` });
 
-    room.updatedAt = new Date().toISOString();
-    room.expiresAt = now() + ROOMS_TTL_MS;
+    const participantId = makeParticipantId();
+    const t = nowIso();
+
+    room.players.push({
+      participantId,
+      displayName,
+      role: r,
+      isHost: false,
+      joinedAt: t,
+      lastSeenAt: t,
+    });
+
+    room.updatedAt = t;
+    room.expiresAt = nowMs() + ROOMS_TTL_MS;
 
     rooms.set(room.roomId, room);
-    return res.json({ room: scrubRoomForClient(room), joinedAs: r });
+    return res.json({ roomId: room.roomId, participantId, version: room.version || 0, snapshot: room.snapshot || null });
   } catch (e) {
     console.error("❌ /justice-lab/rooms/join:", e);
     return res.status(500).json({ error: "Erreur join room." });
@@ -1354,57 +1461,175 @@ app.post("/justice-lab/rooms/join", requireAuth, async (req, res) => {
 });
 
 /**
+ * GET /justice-lab/rooms/:roomId?participantId=...
+ * Le front poll. Si participantId présent, on "ping" présence.
+ */
+app.get("/justice-lab/rooms/:roomId", requireAuth, async (req, res) => {
+  try {
+    const roomId = String(req.params?.roomId || "").trim().toUpperCase();
+    const room = getRoomOr404(roomId);
+    if (!room) return res.status(404).json({ error: "Room introuvable/expirée." });
+
+    const participantId = String(req.query?.participantId || "").trim();
+    if (participantId) {
+      const me = getParticipant(room, participantId);
+      if (me) {
+        me.lastSeenAt = nowIso();
+        room.updatedAt = me.lastSeenAt;
+      }
+    }
+
+    room.expiresAt = nowMs() + ROOMS_TTL_MS;
+    rooms.set(room.roomId, room);
+    return res.json(scrubRoomForClient(room));
+  } catch (e) {
+    console.error("❌ /justice-lab/rooms/:roomId:", e);
+    return res.status(500).json({ error: "Erreur get room." });
+  }
+});
+
+/**
+ * POST /justice-lab/rooms/action
+ * body: { roomId, participantId, action: { type, payload } }
+ *
+ * type supportés (on accepte plusieurs alias pour compat) :
+ * - SNAPSHOT / SYNC_SNAPSHOT : payload { snapshot } (host only) -> version++
+ * - SUGGESTION             : payload { objectionId, decision, reasoning } (MP/Avocat)
+ * - JUDGE_DECISION         : payload { objectionId, decision, reasoning, effects? } (Juge) -> decisions[]
+ * - PING                   : keepalive
+ */
+app.post("/justice-lab/rooms/action", requireAuth, async (req, res) => {
+  try {
+    const { roomId, participantId, action } = req.body || {};
+    if (!roomId) return res.status(400).json({ error: "roomId requis." });
+
+    const room = getRoomOr404(roomId);
+    if (!room) return res.status(404).json({ error: "Room introuvable/expirée." });
+
+    const me = participantId ? getParticipant(room, participantId) : null;
+    if (participantId && !me) return res.status(403).json({ error: "PARTICIPANT_NOT_FOUND" });
+
+    const type = String(action?.type || "").trim().toUpperCase();
+    const payload = action?.payload || {};
+    const t = nowIso();
+
+    if (me) me.lastSeenAt = t;
+    room.updatedAt = t;
+    room.expiresAt = nowMs() + ROOMS_TTL_MS;
+
+    if (!type || type === "PING") {
+      rooms.set(room.roomId, room);
+      return res.json({ ok: true, version: Number(room.version || 0) });
+    }
+
+    // --- snapshot sync (host) ---
+    if (type === "SNAPSHOT" || type === "SYNC_SNAPSHOT") {
+      if (!me?.isHost) return res.status(403).json({ error: "HOST_ONLY" });
+      const snap = payload?.snapshot;
+      if (!snap || typeof snap !== "object") return res.status(400).json({ error: "SNAPSHOT_REQUIRED" });
+
+      room.snapshot = snap;
+      room.version = Number(room.version || 0) + 1;
+
+      rooms.set(room.roomId, room);
+      return res.json({ ok: true, version: room.version });
+    }
+
+    // --- suggestion (Procureur/Avocat) ---
+    if (type === "SUGGESTION") {
+      const sug = {
+        id: `SUG_${Date.now()}_${Math.random().toString(16).slice(2)}`,
+        ts: t,
+        role: me?.role || safeStr(payload?.role || "", 20),
+        participantId: me?.participantId || null,
+        displayName: me?.displayName || safeStr(payload?.displayName || "", 60),
+        objectionId: safeStr(payload?.objectionId || "", 40),
+        decision: safeStr(payload?.decision || payload?.choice || "", 40),
+        reasoning: safeStr(payload?.reasoning || "", 1400),
+      };
+
+      room.suggestions = Array.isArray(room.suggestions) ? room.suggestions : [];
+      room.suggestions.unshift(sug);
+      room.suggestions = room.suggestions.slice(0, 60);
+
+      rooms.set(room.roomId, room);
+      return res.json({ ok: true, version: Number(room.version || 0), suggestion: sug });
+    }
+
+    // --- judge decision (Juge) ---
+    if (type === "JUDGE_DECISION") {
+      if (me?.role !== "Juge") return res.status(403).json({ error: "JUDGE_ONLY" });
+
+      const d = safeStr(payload?.decision || "", 40);
+      if (!["Accueillir", "Rejeter", "Demander précision"].includes(d)) {
+        return res.status(400).json({ error: "Decision invalide." });
+      }
+
+      const dec = {
+        id: `DEC_${Date.now()}_${Math.random().toString(16).slice(2)}`,
+        ts: t,
+        objectionId: safeStr(payload?.objectionId || "", 40),
+        decision: d,
+        reasoning: safeStr(payload?.reasoning || "", 1400),
+        effects: payload?.effects && typeof payload.effects === "object" ? payload.effects : null,
+      };
+
+      room.decisions = Array.isArray(room.decisions) ? room.decisions : [];
+      room.decisions.push(dec);
+
+      room.version = Number(room.version || 0) + 1;
+      rooms.set(room.roomId, room);
+      return res.json({ ok: true, version: room.version, decision: dec });
+    }
+
+    return res.status(400).json({ error: "ACTION_UNKNOWN" });
+  } catch (e) {
+    console.error("❌ /justice-lab/rooms/action:", e);
+    return res.status(500).json({ error: "Erreur action room." });
+  }
+});
+
+/* -------------------------
+   ✅ COMPAT : anciens endpoints
+   ------------------------- */
+
+/**
  * GET /justice-lab/rooms/state/:roomId
+ * (ancien) -> renvoie { room }
  */
 app.get("/justice-lab/rooms/state/:roomId", requireAuth, async (req, res) => {
   try {
-    cleanupRooms();
-    const roomId = String(req.params.roomId || "");
-    const room = rooms.get(roomId);
+    const roomId = String(req.params?.roomId || "").trim().toUpperCase();
+    const room = getRoomOr404(roomId);
     if (!room) return res.status(404).json({ error: "Room introuvable/expirée." });
-
-    room.expiresAt = now() + ROOMS_TTL_MS;
     return res.json({ room: scrubRoomForClient(room) });
   } catch (e) {
-    console.error("❌ /justice-lab/rooms/state:", e);
     return res.status(500).json({ error: "Erreur state room." });
   }
 });
 
 /**
  * POST /justice-lab/rooms/suggest
- * - Procureur / Avocat envoient suggestion sur une objection
- * body: { roomId, userId, role, objectionId, choice, reasoning }
+ * (ancien) body: { roomId, userId, role, objectionId, choice, reasoning }
  */
 app.post("/justice-lab/rooms/suggest", requireAuth, async (req, res) => {
   try {
-    const { roomId, userId, role, objectionId, choice, reasoning } = req.body || {};
-    if (!roomId || !userId || !role || !objectionId || !choice) {
-      return res.status(400).json({ error: "roomId, userId, role, objectionId, choice requis." });
+    const { roomId, role, objectionId, choice, reasoning } = req.body || {};
+    if (!roomId || !role || !objectionId || !choice) {
+      return res.status(400).json({ error: "roomId, role, objectionId, choice requis." });
     }
 
-    cleanupRooms();
-    const room = rooms.get(String(roomId));
+    const room = getRoomOr404(roomId);
     if (!room) return res.status(404).json({ error: "Room introuvable/expirée." });
-
-    const r = normalizeRole(role);
-    if (!["Procureur", "Avocat", "Greffier"].includes(r)) {
-      return res.status(403).json({ error: "Seuls Procureur/Avocat/Greffier peuvent suggérer." });
-    }
-
-    // vérifier que l’utilisateur occupe ce rôle
-    const slot = room.roles?.[r];
-    if (!slot || String(slot.userId) !== String(userId)) {
-      return res.status(403).json({ error: "Vous n'occupez pas ce rôle dans la room." });
-    }
 
     const sug = {
       id: `SUG_${Date.now()}_${Math.random().toString(16).slice(2)}`,
-      ts: new Date().toISOString(),
-      role: r,
-      userId: String(userId),
+      ts: nowIso(),
+      role: normalizeRole(role),
+      participantId: null,
+      displayName: safeStr(req.body?.userName || role, 60),
       objectionId: safeStr(objectionId, 40),
-      choice: safeStr(choice, 40),
+      decision: safeStr(choice, 40),
       reasoning: safeStr(reasoning || "", 1400),
     };
 
@@ -1412,8 +1637,8 @@ app.post("/justice-lab/rooms/suggest", requireAuth, async (req, res) => {
     room.suggestions.unshift(sug);
     room.suggestions = room.suggestions.slice(0, 60);
 
-    room.updatedAt = new Date().toISOString();
-    room.expiresAt = now() + ROOMS_TTL_MS;
+    room.updatedAt = nowIso();
+    room.expiresAt = nowMs() + ROOMS_TTL_MS;
 
     rooms.set(room.roomId, room);
     return res.json({ ok: true, suggestion: sug, room: scrubRoomForClient(room) });
@@ -1425,24 +1650,17 @@ app.post("/justice-lab/rooms/suggest", requireAuth, async (req, res) => {
 
 /**
  * POST /justice-lab/rooms/judge-decision
- * - Seul le juge valide la décision
- * body: { roomId, userId, objectionId, decision, reasoning, effects? }
+ * (ancien) body: { roomId, userId, objectionId, decision, reasoning, effects? }
  */
 app.post("/justice-lab/rooms/judge-decision", requireAuth, async (req, res) => {
   try {
-    const { roomId, userId, objectionId, decision, reasoning, effects } = req.body || {};
-    if (!roomId || !userId || !objectionId || !decision) {
-      return res.status(400).json({ error: "roomId, userId, objectionId, decision requis." });
+    const { roomId, objectionId, decision, reasoning, effects } = req.body || {};
+    if (!roomId || !objectionId || !decision) {
+      return res.status(400).json({ error: "roomId, objectionId, decision requis." });
     }
 
-    cleanupRooms();
-    const room = rooms.get(String(roomId));
+    const room = getRoomOr404(roomId);
     if (!room) return res.status(404).json({ error: "Room introuvable/expirée." });
-
-    const judge = room.roles?.["Juge"];
-    if (!judge || String(judge.userId) !== String(userId)) {
-      return res.status(403).json({ error: "Seul le juge peut valider une décision." });
-    }
 
     const d = safeStr(decision, 40);
     if (!["Accueillir", "Rejeter", "Demander précision"].includes(d)) {
@@ -1451,18 +1669,19 @@ app.post("/justice-lab/rooms/judge-decision", requireAuth, async (req, res) => {
 
     const dec = {
       id: `DEC_${Date.now()}_${Math.random().toString(16).slice(2)}`,
-      ts: new Date().toISOString(),
+      ts: nowIso(),
       objectionId: safeStr(objectionId, 40),
       decision: d,
       reasoning: safeStr(reasoning || "", 1400),
       effects: effects && typeof effects === "object" ? effects : null,
     };
 
-    room.state.decisions = Array.isArray(room.state.decisions) ? room.state.decisions : [];
-    room.state.decisions.push(dec);
+    room.decisions = Array.isArray(room.decisions) ? room.decisions : [];
+    room.decisions.push(dec);
 
-    room.updatedAt = new Date().toISOString();
-    room.expiresAt = now() + ROOMS_TTL_MS;
+    room.updatedAt = nowIso();
+    room.expiresAt = nowMs() + ROOMS_TTL_MS;
+    room.version = Number(room.version || 0) + 1;
 
     rooms.set(room.roomId, room);
     return res.json({ ok: true, decision: dec, room: scrubRoomForClient(room) });
@@ -1472,8 +1691,8 @@ app.post("/justice-lab/rooms/judge-decision", requireAuth, async (req, res) => {
   }
 });
 
-/* =======================
-   START SERVER
+
+START SERVER
 ======================= */
 const port = process.env.PORT || 3000;
 app.listen(port, () => {
