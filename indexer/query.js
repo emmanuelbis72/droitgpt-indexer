@@ -1421,6 +1421,7 @@ function scrubRoomForClient(room) {
   const players = Array.isArray(room.players) ? room.players : [];
   return {
     roomId: room.roomId,
+    caseData: room.caseData || null,
     version: Number(room.version || 0),
     createdAt: room.createdAt,
     updatedAt: room.updatedAt,
@@ -1465,7 +1466,7 @@ function getParticipant(room, participantId) {
  * POST /justice-lab/rooms/create
  * body: { caseId, displayName, role }
  */
-app.post("/justice-lab/rooms/create", requireAuth, async (req, res) => {
+app.post("/justice-lab/rooms/create", async (req, res) => {
   try {
     cleanupRooms();
 
@@ -1486,6 +1487,21 @@ app.post("/justice-lab/rooms/create", requireAuth, async (req, res) => {
       updatedAt: createdAt,
       expiresAt: nowMs() + ROOMS_TTL_MS,
       caseId: caseId || null,
+
+      caseData: (() => {
+        const cd = req.body?.caseData;
+        if (!cd || typeof cd !== "object") return null;
+        try {
+          return sanitizeCaseData(cd, {
+            caseId: caseId || `JL-${Date.now()}`,
+            domaine: cd.domaine || "Pénal",
+            niveau: cd.niveau || "Intermédiaire",
+            meta: { generatedAt: new Date().toISOString() },
+          });
+        } catch {
+          return null;
+        }
+      })(),
       meta: {
         title: safeStr(req.body?.title || "Audience co-op", 140),
       },
@@ -1505,7 +1521,7 @@ app.post("/justice-lab/rooms/create", requireAuth, async (req, res) => {
     };
 
     rooms.set(roomId, room);
-    return res.json({ roomId, participantId, version: room.version, snapshot: room.snapshot });
+    return res.json({ roomId, participantId, version: room.version, snapshot: room.snapshot, caseData: room.caseData || null });
   } catch (e) {
     console.error("❌ /justice-lab/rooms/create:", e);
     return res.status(500).json({ error: "Erreur création room." });
@@ -1516,7 +1532,7 @@ app.post("/justice-lab/rooms/create", requireAuth, async (req, res) => {
  * POST /justice-lab/rooms/join
  * body: { roomId, caseId, displayName, role }
  */
-app.post("/justice-lab/rooms/join", requireAuth, async (req, res) => {
+app.post("/justice-lab/rooms/join", async (req, res) => {
   try {
     const roomId = String(req.body?.roomId || "").trim().toUpperCase();
     if (!roomId) return res.status(400).json({ error: "roomId requis." });
@@ -1532,6 +1548,27 @@ app.post("/justice-lab/rooms/join", requireAuth, async (req, res) => {
     if (room.caseId && joinCaseId && room.caseId !== joinCaseId) {
       return res.status(409).json({ error: "CASE_MISMATCH" });
     }
+
+
+    // ✅ If room has no caseId yet, accept joinCaseId
+    if (!room.caseId && joinCaseId) {
+      room.caseId = joinCaseId;
+    }
+
+    // ✅ If room has no caseData yet, accept a provided caseData (useful when host creates room from client)
+    if (!room.caseData && req.body?.caseData && typeof req.body.caseData === "object") {
+      try {
+        room.caseData = sanitizeCaseData(req.body.caseData, {
+          caseId: room.caseId || joinCaseId || `JL-${Date.now()}`,
+          domaine: req.body.caseData?.domaine || "Pénal",
+          niveau: req.body.caseData?.niveau || "Intermédiaire",
+          meta: { generatedAt: new Date().toISOString() },
+        });
+      } catch {
+        // ignore
+      }
+    }
+
 
     const players = Array.isArray(room.players) ? room.players : [];
     if (players.length >= ROOMS_MAX_PLAYERS) return res.status(409).json({ error: "ROOM_FULL" });
@@ -1554,7 +1591,7 @@ app.post("/justice-lab/rooms/join", requireAuth, async (req, res) => {
     room.expiresAt = nowMs() + ROOMS_TTL_MS;
 
     rooms.set(room.roomId, room);
-    return res.json({ roomId: room.roomId, participantId, version: room.version || 0, snapshot: room.snapshot || null });
+    return res.json({ roomId: room.roomId, participantId, version: room.version || 0, snapshot: room.snapshot || null, caseData: room.caseData || null });
   } catch (e) {
     console.error("❌ /justice-lab/rooms/join:", e);
     return res.status(500).json({ error: "Erreur join room." });
@@ -1565,7 +1602,7 @@ app.post("/justice-lab/rooms/join", requireAuth, async (req, res) => {
  * GET /justice-lab/rooms/:roomId?participantId=...
  * Le front poll. Si participantId présent, on "ping" présence.
  */
-app.get("/justice-lab/rooms/:roomId", requireAuth, async (req, res) => {
+app.get("/justice-lab/rooms/:roomId", async (req, res) => {
   try {
     const roomId = String(req.params?.roomId || "").trim().toUpperCase();
     const room = getRoomOr404(roomId);
@@ -1599,7 +1636,7 @@ app.get("/justice-lab/rooms/:roomId", requireAuth, async (req, res) => {
  * - JUDGE_DECISION         : payload { objectionId, decision, reasoning, effects? } (Juge) -> decisions[]
  * - PING                   : keepalive
  */
-app.post("/justice-lab/rooms/action", requireAuth, async (req, res) => {
+app.post("/justice-lab/rooms/action", async (req, res) => {
   try {
     const { roomId, participantId, action } = req.body || {};
     if (!roomId) return res.status(400).json({ error: "roomId requis." });
@@ -1704,7 +1741,7 @@ const sug = {
  * GET /justice-lab/rooms/state/:roomId
  * (ancien) -> renvoie { room }
  */
-app.get("/justice-lab/rooms/state/:roomId", requireAuth, async (req, res) => {
+app.get("/justice-lab/rooms/state/:roomId", async (req, res) => {
   try {
     const roomId = String(req.params?.roomId || "").trim().toUpperCase();
     const room = getRoomOr404(roomId);
@@ -1719,7 +1756,7 @@ app.get("/justice-lab/rooms/state/:roomId", requireAuth, async (req, res) => {
  * POST /justice-lab/rooms/suggest
  * (ancien) body: { roomId, userId, role, objectionId, choice, reasoning }
  */
-app.post("/justice-lab/rooms/suggest", requireAuth, async (req, res) => {
+app.post("/justice-lab/rooms/suggest", async (req, res) => {
   try {
     const { roomId, role, objectionId, choice, reasoning } = req.body || {};
     if (!roomId || !role || !objectionId || !choice) {
@@ -1759,7 +1796,7 @@ app.post("/justice-lab/rooms/suggest", requireAuth, async (req, res) => {
  * POST /justice-lab/rooms/judge-decision
  * (ancien) body: { roomId, userId, objectionId, decision, reasoning, effects? }
  */
-app.post("/justice-lab/rooms/judge-decision", requireAuth, async (req, res) => {
+app.post("/justice-lab/rooms/judge-decision", async (req, res) => {
   try {
     const { roomId, objectionId, decision, reasoning, effects } = req.body || {};
     if (!roomId || !objectionId || !decision) {
