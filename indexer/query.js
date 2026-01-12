@@ -1441,14 +1441,17 @@ function scrubRoomForClient(room) {
   };
 }
 
+
 function getRoomOr404(roomIdNorm) {
   cleanupRooms();
-  const rid = String(roomId || "").trim().toUpperCase();
+  const rid = String(roomIdNorm || "").trim().toUpperCase();
+  if (!rid) return null;
   const room = rooms.get(rid);
   if (!room) return null;
   room.expiresAt = nowMs() + ROOMS_TTL_MS;
   return room;
 }
+
 
 function roleTaken(room, role) {
   const players = Array.isArray(room.players) ? room.players : [];
@@ -1518,8 +1521,8 @@ app.post("/justice-lab/rooms/create", async (req, res) => {
  */
 app.post("/justice-lab/rooms/join", async (req, res) => {
   try {
-    const roomId = String(req.body?.roomId || "").trim().toUpperCase();
-    if (!roomId) return res.status(400).json({ error: "roomId requis." });
+    const roomIdNorm = String(req.body?.roomId || req.body?.code || req.body?.room || "").trim().toUpperCase();
+    if (!roomIdNorm) return res.status(400).json({ error: "roomId requis." });
 
     const room = getRoomOr404(roomIdNorm);
     if (!room) return res.status(404).json({ error: "Room introuvable/expirée." });
@@ -1567,7 +1570,7 @@ app.post("/justice-lab/rooms/join", async (req, res) => {
  */
 app.get("/justice-lab/rooms/:roomId", async (req, res) => {
   try {
-    const roomId = String(req.params?.roomId || "").trim().toUpperCase();
+    const roomIdNorm = String(req.params?.roomId || "").trim().toUpperCase();
     const room = getRoomOr404(roomIdNorm);
     if (!room) return res.status(404).json({ error: "Room introuvable/expirée." });
 
@@ -1605,7 +1608,7 @@ app.post("/justice-lab/rooms/action", async (req, res) => {
     const rid0 = String(roomId || code || room || "").trim();
     const roomIdNorm = rid0.toUpperCase();
 
-    if (!roomId) return res.status(400).json({ error: "roomId requis." });
+    if (!roomIdNorm) return res.status(400).json({ error: "roomId requis." });
 
     const room = getRoomOr404(roomIdNorm);
     if (!room) return res.status(404).json({ error: "Room introuvable/expirée." });
@@ -1709,7 +1712,7 @@ const sug = {
  */
 app.get("/justice-lab/rooms/state/:roomId", async (req, res) => {
   try {
-    const roomId = String(req.params?.roomId || "").trim().toUpperCase();
+    const roomIdNorm = String(req.params?.roomId || "").trim().toUpperCase();
     const room = getRoomOr404(roomIdNorm);
     if (!room) return res.status(404).json({ error: "Room introuvable/expirée." });
     return res.json({ room: scrubRoomForClient(room) });
@@ -1802,9 +1805,9 @@ app.post("/justice-lab/rooms/judge-decision", async (req, res) => {
 });
 
 /* =======================
-   START SERVER
+   START SERVER (Render-safe)
 ======================= */
-const port = process.env.PORT || 3000;
-app.listen(port, () => {
-  console.log(`🚀 DroitGPT API démarrée sur le port ${port}`);
+const PORT = Number(process.env.PORT || 3000);
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`🚀 DroitGPT API démarrée sur le port ${PORT}`);
 });
