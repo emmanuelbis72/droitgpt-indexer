@@ -1361,21 +1361,12 @@ Format EXACT:
 });
 
 /* =========================================================
-   ✅ ROOMS CO-OP 2–3 joueurs (Render/Cluster-safe)
-   Objectif: permettre à 2–3 utilisateurs (sur appareils différents) de rejoindre une même salle via un code,
-   même si l'API tourne sur plusieurs instances Render.
-
-   ➜ IMPORTANT:
-   - Le stockage en mémoire (Map) ne marche pas en multi-instances (un user peut tomber sur une autre instance).
-   - Ici: on persiste les rooms dans MongoDB (si MONGODB_URI est configuré).
-   - Fallback: Map mémoire si Mongo n'est pas dispo (dev/local).
-
+   ✅ NEW — ROOMS CO-OP 2–3 joueurs (Render-friendly, polling)
    Endpoints attendus par JusticeLabPlay.jsx :
-     POST /justice-lab/rooms/create   { caseId, displayName, role, title?, caseData? }
-     POST /justice-lab/rooms/join     { roomId, caseId, displayName, role, caseData? }
+     POST /justice-lab/rooms/create   { caseId, displayName, role }
+     POST /justice-lab/rooms/join     { roomId, caseId, displayName, role }
      GET  /justice-lab/rooms/:roomId?participantId=...
      POST /justice-lab/rooms/action   { roomId, participantId, action:{type,payload} }
-
    + Compat anciens endpoints :
      GET  /justice-lab/rooms/state/:roomId
      POST /justice-lab/rooms/suggest
@@ -1385,11 +1376,7 @@ Format EXACT:
 const ROOMS_TTL_MS = Number(process.env.JUSTICE_LAB_ROOMS_TTL_MS || 6 * 60 * 60 * 1000); // 6h
 const ROOMS_MAX_PLAYERS = Number(process.env.JUSTICE_LAB_ROOMS_MAX_PLAYERS || 3);
 
-// ---------- Persistence switch ----------
-const ROOMS_USE_MONGO = Boolean(process.env.MONGODB_URI);
-
-// ---------- In-memory fallback ----------
-const rooms = new Map(); // roomId -> room (fallback only)
+const rooms = new Map(); // roomId -> room
 
 function nowMs() {
   return Date.now();
@@ -1404,11 +1391,24 @@ function randCode(len = 6) {
   return s;
 }
 function makeRoomId() {
+  // format simple (copiable)
   return `JL-${randCode(6)}`;
 }
 function makeParticipantId() {
   return `p_${nowMs().toString(36)}_${Math.random().toString(16).slice(2)}`;
 }
+function cleanupRooms() {
+  const t = nowMs();
+  for (const [id, r] of rooms.entries()) {
+    if (!r) {
+      rooms.delete(id);
+      continue;
+    }
+    const exp = Number(r.expiresAt || 0);
+    if (exp && exp <= t) rooms.delete(id);
+  }
+}
+setInterval(cleanupRooms, 60 * 1000).unref?.();
 
 function ensureRoleValid(role) {
   const r = normalizeRole(role || "");
@@ -1438,8 +1438,16 @@ function scrubRoomForClient(room) {
     snapshot: room.snapshot || null,
     suggestions: Array.isArray(room.suggestions) ? room.suggestions.slice(0, 60) : [],
     decisions: Array.isArray(room.decisions) ? room.decisions.slice(0, 120) : [],
-    caseData: room.caseData || null, // utile pour joindre même si le dossier n'est pas local
   };
+}
+
+function getRoomOr404(roomIdNorm) {
+  cleanupRooms();
+  const rid = String(roomId || "").trim().toUpperCase();
+  const room = rooms.get(rid);
+  if (!room) return null;
+  room.expiresAt = nowMs() + ROOMS_TTL_MS;
+  return room;
 }
 
 function roleTaken(room, role) {
@@ -1453,125 +1461,14 @@ function getParticipant(room, participantId) {
   return players.find((p) => p.participantId === pid) || null;
 }
 
-/* -----------------------------
-   Mongo Model (TTL via expiresAt)
------------------------------- */
-let RoomModel = null;
-
-if (ROOMS_USE_MONGO) {
-  const PlayerSchema = new mongoose.Schema(
-    {
-      participantId: { type: String, required: true },
-      displayName: { type: String, required: true },
-      role: { type: String, required: true },
-      isHost: { type: Boolean, default: false },
-      joinedAt: { type: String, required: true },
-      lastSeenAt: { type: String, default: null },
-    },
-    { _id: false }
-  );
-
-  const RoomSchema = new mongoose.Schema(
-    {
-      roomId: { type: String, unique: true, index: true, required: true },
-      version: { type: Number, default: 0 },
-      createdAt: { type: String, required: true },
-      updatedAt: { type: String, required: true },
-      expiresAt: { type: Date, index: true, required: true }, // TTL index (see below)
-      meta: { type: Object, default: {} },
-      caseId: { type: String, default: null },
-      caseData: { type: Object, default: null },
-      players: { type: [PlayerSchema], default: [] },
-      snapshot: { type: Object, default: null },
-      suggestions: { type: Array, default: [] },
-      decisions: { type: Array, default: [] },
-    },
-    { minimize: false }
-  );
-
-  // TTL: Mongo supprimera automatiquement après expiresAt
-  RoomSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
-
-  // éviter OverwriteModelError en dev/hot reload
-  RoomModel = mongoose.models?.JusticeLabRoom || mongoose.model("JusticeLabRoom", RoomSchema);
-}
-
-/* -----------------------------
-   Storage helpers (Mongo or Map)
------------------------------- */
-async function roomGet(roomId) {
-  const rid = String(roomId || "").trim().toUpperCase();
-  if (!rid) return null;
-
-  if (RoomModel) {
-    const doc = await RoomModel.findOne({ roomId: rid }).lean();
-    if (!doc) return null;
-    // hard-expire (au cas où TTL n'a pas encore purgé)
-    if (doc.expiresAt && new Date(doc.expiresAt).getTime() <= nowMs()) return null;
-    return doc;
-  }
-
-  // fallback memory
-  const room = rooms.get(rid);
-  if (!room) return null;
-  const exp = Number(room.expiresAt || 0);
-  if (exp && exp <= nowMs()) {
-    rooms.delete(rid);
-    return null;
-  }
-  return room;
-}
-
-async function roomPut(room) {
-  if (!room || !room.roomId) return;
-  const rid = String(room.roomId).trim().toUpperCase();
-
-  if (RoomModel) {
-    const expMs = Number(room.expiresAtMs || 0) || nowMs() + ROOMS_TTL_MS;
-    const expiresAt = new Date(expMs);
-    const payload = {
-      ...room,
-      roomId: rid,
-      expiresAt,
-    };
-    delete payload.expiresAtMs;
-    // upsert
-    await RoomModel.updateOne({ roomId: rid }, { $set: payload }, { upsert: true });
-    return;
-  }
-
-  rooms.set(rid, room);
-}
-
-async function roomTouch(roomId) {
-  const rid = String(roomId || "").trim().toUpperCase();
-  if (!rid) return;
-
-  if (RoomModel) {
-    await RoomModel.updateOne(
-      { roomId: rid },
-      { $set: { expiresAt: new Date(nowMs() + ROOMS_TTL_MS) } }
-    ).catch(() => {});
-    return;
-  }
-
-  const room = rooms.get(rid);
-  if (room) {
-    room.expiresAt = nowMs() + ROOMS_TTL_MS;
-    rooms.set(rid, room);
-  }
-}
-
-/* =========================================================
-   API Rooms
-========================================================= */
-
 /**
  * POST /justice-lab/rooms/create
- * body: { caseId, displayName, role, title?, caseData? }
+ * body: { caseId, displayName, role }
  */
-app.post("/justice-lab/rooms/create", requireAuth, async (req, res) => {
+app.post("/justice-lab/rooms/create", async (req, res) => {
   try {
+    cleanupRooms();
+
     const caseId = safeStr(req.body?.caseId || "", 80);
     const displayName = safeStr(req.body?.displayName || "Joueur", 50) || "Joueur";
 
@@ -1582,16 +1479,16 @@ app.post("/justice-lab/rooms/create", requireAuth, async (req, res) => {
     const participantId = makeParticipantId();
 
     const createdAt = nowIso();
-    const expMs = nowMs() + ROOMS_TTL_MS;
-
     const room = {
       roomId,
       version: 0,
       createdAt,
       updatedAt: createdAt,
-      expiresAtMs: expMs,
+      expiresAt: nowMs() + ROOMS_TTL_MS,
       caseId: caseId || null,
-      meta: { title: safeStr(req.body?.title || "Audience co-op", 140) },
+      meta: {
+        title: safeStr(req.body?.title || "Audience co-op", 140),
+      },
       players: [
         {
           participantId,
@@ -1602,22 +1499,13 @@ app.post("/justice-lab/rooms/create", requireAuth, async (req, res) => {
           lastSeenAt: createdAt,
         },
       ],
-      snapshot: null,
+      snapshot: null, // host pousse l'état via /rooms/action
       suggestions: [],
       decisions: [],
-      caseData:
-        req.body?.caseData && typeof req.body.caseData === "object"
-          ? sanitizeCaseData(req.body.caseData, {
-              caseId: caseId || `JL-${Date.now()}`,
-              domaine: req.body.caseData?.domaine || "Pénal",
-              niveau: req.body.caseData?.niveau || "Intermédiaire",
-              meta: { generatedAt: new Date().toISOString() },
-            })
-          : null,
     };
 
-    await roomPut(room);
-    return res.json({ roomId, participantId, version: 0, snapshot: null, caseData: room.caseData || null });
+    rooms.set(roomId, room);
+    return res.json({ roomId, participantId, version: room.version, snapshot: room.snapshot });
   } catch (e) {
     console.error("❌ /justice-lab/rooms/create:", e);
     return res.status(500).json({ error: "Erreur création room." });
@@ -1626,14 +1514,14 @@ app.post("/justice-lab/rooms/create", requireAuth, async (req, res) => {
 
 /**
  * POST /justice-lab/rooms/join
- * body: { roomId, caseId, displayName, role, caseData? }
+ * body: { roomId, caseId, displayName, role }
  */
-app.post("/justice-lab/rooms/join", requireAuth, async (req, res) => {
+app.post("/justice-lab/rooms/join", async (req, res) => {
   try {
     const roomId = String(req.body?.roomId || "").trim().toUpperCase();
     if (!roomId) return res.status(400).json({ error: "roomId requis." });
 
-    const room = await roomGet(roomId);
+    const room = getRoomOr404(roomIdNorm);
     if (!room) return res.status(404).json({ error: "Room introuvable/expirée." });
 
     const displayName = safeStr(req.body?.displayName || "Joueur", 50) || "Joueur";
@@ -1641,62 +1529,32 @@ app.post("/justice-lab/rooms/join", requireAuth, async (req, res) => {
     if (r === "ROLE_INVALID") return res.status(400).json({ error: "Role invalide." });
 
     const joinCaseId = safeStr(req.body?.caseId || "", 80);
-
-    // caseId cohérence
     if (room.caseId && joinCaseId && room.caseId !== joinCaseId) {
       return res.status(409).json({ error: "CASE_MISMATCH" });
     }
 
-    // si room n'a pas encore de caseId, on l'accepte
-    if (!room.caseId && joinCaseId) {
-      room.caseId = joinCaseId;
-    }
-
-    // injecter caseData si manquant (utile quand l'hôte a créé depuis client)
-    if (!room.caseData && req.body?.caseData && typeof req.body.caseData === "object") {
-      try {
-        room.caseData = sanitizeCaseData(req.body.caseData, {
-          caseId: room.caseId || joinCaseId || `JL-${Date.now()}`,
-          domaine: req.body.caseData?.domaine || "Pénal",
-          niveau: req.body.caseData?.niveau || "Intermédiaire",
-          meta: { generatedAt: new Date().toISOString() },
-        });
-      } catch {
-        // ignore
-      }
-    }
-
     const players = Array.isArray(room.players) ? room.players : [];
     if (players.length >= ROOMS_MAX_PLAYERS) return res.status(409).json({ error: "ROOM_FULL" });
+
     if (roleTaken(room, r)) return res.status(409).json({ error: `Rôle déjà occupé: ${r}` });
 
     const participantId = makeParticipantId();
     const t = nowIso();
 
-    room.players = players.concat([
-      {
-        participantId,
-        displayName,
-        role: r,
-        isHost: false,
-        joinedAt: t,
-        lastSeenAt: t,
-      },
-    ]);
+    room.players.push({
+      participantId,
+      displayName,
+      role: r,
+      isHost: false,
+      joinedAt: t,
+      lastSeenAt: t,
+    });
 
     room.updatedAt = t;
-    room.version = Number(room.version || 0);
-    room.expiresAtMs = nowMs() + ROOMS_TTL_MS;
+    room.expiresAt = nowMs() + ROOMS_TTL_MS;
 
-    await roomPut(room);
-
-    return res.json({
-      roomId: room.roomId,
-      participantId,
-      version: room.version || 0,
-      snapshot: room.snapshot || null,
-      caseData: room.caseData || null,
-    });
+    rooms.set(room.roomId, room);
+    return res.json({ roomId: room.roomId, participantId, version: room.version || 0, snapshot: room.snapshot || null });
   } catch (e) {
     console.error("❌ /justice-lab/rooms/join:", e);
     return res.status(500).json({ error: "Erreur join room." });
@@ -1707,10 +1565,10 @@ app.post("/justice-lab/rooms/join", requireAuth, async (req, res) => {
  * GET /justice-lab/rooms/:roomId?participantId=...
  * Le front poll. Si participantId présent, on "ping" présence.
  */
-app.get("/justice-lab/rooms/:roomId", requireAuth, async (req, res) => {
+app.get("/justice-lab/rooms/:roomId", async (req, res) => {
   try {
     const roomId = String(req.params?.roomId || "").trim().toUpperCase();
-    const room = await roomGet(roomId);
+    const room = getRoomOr404(roomIdNorm);
     if (!room) return res.status(404).json({ error: "Room introuvable/expirée." });
 
     const participantId = String(req.query?.participantId || "").trim();
@@ -1722,9 +1580,8 @@ app.get("/justice-lab/rooms/:roomId", requireAuth, async (req, res) => {
       }
     }
 
-    room.expiresAtMs = nowMs() + ROOMS_TTL_MS;
-    await roomPut(room);
-
+    room.expiresAt = nowMs() + ROOMS_TTL_MS;
+    rooms.set(room.roomId, room);
     return res.json(scrubRoomForClient(room));
   } catch (e) {
     console.error("❌ /justice-lab/rooms/:roomId:", e);
@@ -1736,18 +1593,21 @@ app.get("/justice-lab/rooms/:roomId", requireAuth, async (req, res) => {
  * POST /justice-lab/rooms/action
  * body: { roomId, participantId, action: { type, payload } }
  *
- * type supportés :
+ * type supportés (on accepte plusieurs alias pour compat) :
  * - SNAPSHOT / SYNC_SNAPSHOT : payload { snapshot } (host only) -> version++
  * - SUGGESTION             : payload { objectionId, decision, reasoning } (MP/Avocat)
  * - JUDGE_DECISION         : payload { objectionId, decision, reasoning, effects? } (Juge) -> decisions[]
  * - PING                   : keepalive
  */
-app.post("/justice-lab/rooms/action", requireAuth, async (req, res) => {
+app.post("/justice-lab/rooms/action", async (req, res) => {
   try {
-    const { roomId, participantId, action } = req.body || {};
+    const { roomId, code, room, participantId, action } = req.body || {};
+    const rid0 = String(roomId || code || room || "").trim();
+    const roomIdNorm = rid0.toUpperCase();
+
     if (!roomId) return res.status(400).json({ error: "roomId requis." });
 
-    const room = await roomGet(roomId);
+    const room = getRoomOr404(roomIdNorm);
     if (!room) return res.status(404).json({ error: "Room introuvable/expirée." });
 
     const me = participantId ? getParticipant(room, participantId) : null;
@@ -1759,161 +1619,192 @@ app.post("/justice-lab/rooms/action", requireAuth, async (req, res) => {
 
     if (me) me.lastSeenAt = t;
     room.updatedAt = t;
-    room.expiresAtMs = nowMs() + ROOMS_TTL_MS;
+    room.expiresAt = nowMs() + ROOMS_TTL_MS;
 
     if (!type || type === "PING") {
-      await roomPut(room);
+      rooms.set(room.roomId, room);
       return res.json({ ok: true, version: Number(room.version || 0) });
     }
 
-    // host?
-    const isHost = Boolean(me?.isHost);
-
+    // --- snapshot sync (host) ---
     if (type === "SNAPSHOT" || type === "SYNC_SNAPSHOT") {
-      if (!isHost) return res.status(403).json({ error: "HOST_ONLY" });
-      const snap = payload?.snapshot;
-      if (!snap || typeof snap !== "object") return res.status(400).json({ error: "snapshot requis." });
+      if (!me?.isHost) return res.status(403).json({ error: "HOST_ONLY" });
+      const snap = payload?.snapshot || action?.snapshot;
+      if (!snap || typeof snap !== "object") return res.status(400).json({ error: "SNAPSHOT_REQUIRED" });
 
       room.snapshot = snap;
-      room.caseId = room.caseId || safeStr(snap?.caseId || snap?.caseMeta?.caseId || "", 80) || room.caseId || null;
       room.version = Number(room.version || 0) + 1;
 
-      await roomPut(room);
-      return res.json({ ok: true, version: room.version, snapshot: room.snapshot });
-    }
-
-    if (type === "SUGGESTION") {
-      // MP/Avocat proposent (même le juge peut proposer)
-      const s = {
-        participantId: me?.participantId || null,
-        by: me?.role || "Joueur",
-        displayName: me?.displayName || "Joueur",
-        at: t,
-        objectionId: safeStr(payload?.objectionId || "", 40),
-        decision: safeStr(payload?.decision || "", 40),
-        reasoning: safeStr(payload?.reasoning || payload?.reason || "", 1200),
-      };
-      room.suggestions = Array.isArray(room.suggestions) ? room.suggestions : [];
-      room.suggestions.unshift(s);
-      room.suggestions = room.suggestions.slice(0, 80);
-
-      await roomPut(room);
-      return res.json({ ok: true, version: Number(room.version || 0) });
-    }
-
-    if (type === "JUDGE_DECISION") {
-      // seul le juge (role=Juge) tranche
-      if (String(me?.role || "") !== "Juge") return res.status(403).json({ error: "JUDGE_ONLY" });
-
-      const d = {
-        participantId: me?.participantId || null,
-        by: me?.role || "Juge",
-        displayName: me?.displayName || "Juge",
-        at: t,
-        objectionId: safeStr(payload?.objectionId || "", 40),
-        decision: safeStr(payload?.decision || "", 40),
-        reasoning: safeStr(payload?.reasoning || payload?.reason || "", 1600),
-        effects: payload?.effects && typeof payload.effects === "object" ? payload.effects : null,
-      };
-      room.decisions = Array.isArray(room.decisions) ? room.decisions : [];
-      room.decisions.unshift(d);
-      room.decisions = room.decisions.slice(0, 140);
-      room.version = Number(room.version || 0) + 1;
-
-      await roomPut(room);
+      rooms.set(room.roomId, room);
       return res.json({ ok: true, version: room.version });
     }
 
-    // unknown type => ok but no-op
-    await roomPut(room);
-    return res.json({ ok: true, version: Number(room.version || 0) });
+    // --- suggestion (Procureur/Avocat) ---
+    if (type === "SUGGESTION") {
+            const sugIn = payload?.suggestion && typeof payload.suggestion === "object" ? payload.suggestion : payload;
+      const legacySug = action?.suggestion && typeof action.suggestion === "object" ? action.suggestion : null;
+      const src = legacySug || sugIn || {};
+
+const sug = {
+        id: `SUG_${Date.now()}_${Math.random().toString(16).slice(2)}`,
+        ts: t,
+        role: me?.role || safeStr(src?.role || src?.byRole || "", 20),
+        participantId: me?.participantId || null,
+        displayName: me?.displayName || safeStr(src?.displayName || "", 60),
+        objectionId: safeStr(src?.objectionId || "", 40),
+        decision: safeStr(src?.decision || src?.choice || "", 40),
+        reasoning: safeStr(src?.reasoning || src?.reason || "", 1400),
+      };
+
+
+
+      room.suggestions = Array.isArray(room.suggestions) ? room.suggestions : [];
+      room.suggestions.unshift(sug);
+      room.suggestions = room.suggestions.slice(0, 60);
+
+      rooms.set(room.roomId, room);
+      return res.json({ ok: true, version: Number(room.version || 0), suggestion: sug });
+    }
+
+    // --- judge decision (Juge) ---
+    if (type === "JUDGE_DECISION") {
+      if (me?.role !== "Juge") return res.status(403).json({ error: "JUDGE_ONLY" });
+
+      const d = safeStr(payload?.decision || "", 40);
+      if (!["Accueillir", "Rejeter", "Demander précision"].includes(d)) {
+        return res.status(400).json({ error: "Decision invalide." });
+      }
+
+      const dec = {
+        id: `DEC_${Date.now()}_${Math.random().toString(16).slice(2)}`,
+        ts: t,
+        objectionId: safeStr(payload?.objectionId || "", 40),
+        decision: d,
+        reasoning: safeStr(payload?.reasoning || "", 1400),
+        effects: payload?.effects && typeof payload.effects === "object" ? payload.effects : null,
+      };
+
+      room.decisions = Array.isArray(room.decisions) ? room.decisions : [];
+      room.decisions.push(dec);
+
+      room.version = Number(room.version || 0) + 1;
+      rooms.set(room.roomId, room);
+      return res.json({ ok: true, version: room.version, decision: dec });
+    }
+
+    return res.status(400).json({ error: "ACTION_UNKNOWN" });
   } catch (e) {
     console.error("❌ /justice-lab/rooms/action:", e);
     return res.status(500).json({ error: "Erreur action room." });
   }
 });
 
-/* ---------- Compat endpoints (anciens) ---------- */
-app.get("/justice-lab/rooms/state/:roomId", requireAuth, async (req, res) => {
+/* -------------------------
+   ✅ COMPAT : anciens endpoints
+   ------------------------- */
+
+/**
+ * GET /justice-lab/rooms/state/:roomId
+ * (ancien) -> renvoie { room }
+ */
+app.get("/justice-lab/rooms/state/:roomId", async (req, res) => {
   try {
     const roomId = String(req.params?.roomId || "").trim().toUpperCase();
-    const room = await roomGet(roomId);
+    const room = getRoomOr404(roomIdNorm);
     if (!room) return res.status(404).json({ error: "Room introuvable/expirée." });
-    room.expiresAtMs = nowMs() + ROOMS_TTL_MS;
-    await roomPut(room);
-    return res.json(scrubRoomForClient(room));
+    return res.json({ room: scrubRoomForClient(room) });
   } catch (e) {
-    return res.status(500).json({ error: "Erreur get room." });
+    return res.status(500).json({ error: "Erreur state room." });
   }
 });
 
-app.post("/justice-lab/rooms/suggest", requireAuth, async (req, res) => {
+/**
+ * POST /justice-lab/rooms/suggest
+ * (ancien) body: { roomId, userId, role, objectionId, choice, reasoning }
+ */
+app.post("/justice-lab/rooms/suggest", async (req, res) => {
   try {
-    const { roomId, participantId, objectionId, decision, reasoning } = req.body || {};
-    const room = await roomGet(roomId);
-    if (!room) return res.status(404).json({ error: "Room introuvable/expirée." });
-    const me = participantId ? getParticipant(room, participantId) : null;
-    if (participantId && !me) return res.status(403).json({ error: "PARTICIPANT_NOT_FOUND" });
+    const { roomId, role, objectionId, choice, reasoning } = req.body || {};
+    if (!roomId || !role || !objectionId || !choice) {
+      return res.status(400).json({ error: "roomId, role, objectionId, choice requis." });
+    }
 
-    const t = nowIso();
-    const s = {
-      participantId: me?.participantId || participantId || null,
-      by: me?.role || "Joueur",
-      displayName: me?.displayName || "Joueur",
-      at: t,
-      objectionId: safeStr(objectionId || "", 40),
-      decision: safeStr(decision || "", 40),
-      reasoning: safeStr(reasoning || "", 1200),
+    const room = getRoomOr404(roomIdNorm);
+    if (!room) return res.status(404).json({ error: "Room introuvable/expirée." });
+
+    const sug = {
+      id: `SUG_${Date.now()}_${Math.random().toString(16).slice(2)}`,
+      ts: nowIso(),
+      role: normalizeRole(role),
+      participantId: null,
+      displayName: safeStr(req.body?.userName || role, 60),
+      objectionId: safeStr(objectionId, 40),
+      decision: safeStr(choice, 40),
+      reasoning: safeStr(reasoning || "", 1400),
     };
 
     room.suggestions = Array.isArray(room.suggestions) ? room.suggestions : [];
-    room.suggestions.unshift(s);
-    room.suggestions = room.suggestions.slice(0, 80);
-    room.updatedAt = t;
-    room.expiresAtMs = nowMs() + ROOMS_TTL_MS;
+    room.suggestions.unshift(sug);
+    room.suggestions = room.suggestions.slice(0, 60);
 
-    await roomPut(room);
-    return res.json({ ok: true, version: Number(room.version || 0) });
+    room.updatedAt = nowIso();
+    room.expiresAt = nowMs() + ROOMS_TTL_MS;
+
+    rooms.set(room.roomId, room);
+    return res.json({ ok: true, suggestion: sug, room: scrubRoomForClient(room) });
   } catch (e) {
+    console.error("❌ /justice-lab/rooms/suggest:", e);
     return res.status(500).json({ error: "Erreur suggest." });
   }
 });
 
-app.post("/justice-lab/rooms/judge-decision", requireAuth, async (req, res) => {
+/**
+ * POST /justice-lab/rooms/judge-decision
+ * (ancien) body: { roomId, userId, objectionId, decision, reasoning, effects? }
+ */
+app.post("/justice-lab/rooms/judge-decision", async (req, res) => {
   try {
-    const { roomId, participantId, objectionId, decision, reasoning, effects } = req.body || {};
-    const room = await roomGet(roomId);
-    if (!room) return res.status(404).json({ error: "Room introuvable/expirée." });
-    const me = participantId ? getParticipant(room, participantId) : null;
-    if (participantId && !me) return res.status(403).json({ error: "PARTICIPANT_NOT_FOUND" });
-    if (String(me?.role || "") !== "Juge") return res.status(403).json({ error: "JUDGE_ONLY" });
+    const { roomId, objectionId, decision, reasoning, effects } = req.body || {};
+    if (!roomId || !objectionId || !decision) {
+      return res.status(400).json({ error: "roomId, objectionId, decision requis." });
+    }
 
-    const t = nowIso();
-    const d = {
-      participantId: me?.participantId || participantId || null,
-      by: me?.role || "Juge",
-      displayName: me?.displayName || "Juge",
-      at: t,
-      objectionId: safeStr(objectionId || "", 40),
-      decision: safeStr(decision || "", 40),
-      reasoning: safeStr(reasoning || "", 1600),
+    const room = getRoomOr404(roomIdNorm);
+    if (!room) return res.status(404).json({ error: "Room introuvable/expirée." });
+
+    const d = safeStr(decision, 40);
+    if (!["Accueillir", "Rejeter", "Demander précision"].includes(d)) {
+      return res.status(400).json({ error: "Decision invalide." });
+    }
+
+    const dec = {
+      id: `DEC_${Date.now()}_${Math.random().toString(16).slice(2)}`,
+      ts: nowIso(),
+      objectionId: safeStr(objectionId, 40),
+      decision: d,
+      reasoning: safeStr(reasoning || "", 1400),
       effects: effects && typeof effects === "object" ? effects : null,
     };
 
     room.decisions = Array.isArray(room.decisions) ? room.decisions : [];
-    room.decisions.unshift(d);
-    room.decisions = room.decisions.slice(0, 140);
-    room.version = Number(room.version || 0) + 1;
-    room.updatedAt = t;
-    room.expiresAtMs = nowMs() + ROOMS_TTL_MS;
+    room.decisions.push(dec);
 
-    await roomPut(room);
-    return res.json({ ok: true, version: room.version });
+    room.updatedAt = nowIso();
+    room.expiresAt = nowMs() + ROOMS_TTL_MS;
+    room.version = Number(room.version || 0) + 1;
+
+    rooms.set(room.roomId, room);
+    return res.json({ ok: true, decision: dec, room: scrubRoomForClient(room) });
   } catch (e) {
-    return res.status(500).json({ error: "Erreur judge decision." });
+    console.error("❌ /justice-lab/rooms/judge-decision:", e);
+    return res.status(500).json({ error: "Erreur judge-decision." });
   }
 });
 
+/* =======================
+   START SERVER
+======================= */
+const port = process.env.PORT || 3000;
 app.listen(port, () => {
   console.log(`🚀 DroitGPT API démarrée sur le port ${port}`);
 });
