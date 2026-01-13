@@ -264,8 +264,37 @@ function safeStr(s, max = 8000) {
 function normalizeRole(role) {
   const r = String(role || "").toLowerCase();
   if (r.includes("proc")) return "Procureur";
-  if (r.includes("avoc")) return "Avocat";
   if (r.includes("greff")) return "Greffier";
+
+  // Avocats (2 côtés)
+  if (r.includes("avoc")) {
+    const isDefense =
+      r.includes("def") ||
+      r.includes("déf") ||
+      r.includes("defense") ||
+      r.includes("défense") ||
+      r.includes("accus") ||
+      r.includes("prevenu") ||
+      r.includes("prévenu");
+
+    const isCivil =
+      r.includes("civ") ||
+      r.includes("partie") ||
+      r.includes("plaign") ||
+      r.includes("victim") ||
+      r.includes("demande") ||
+      r.includes("requérant") ||
+      r.includes("requérant") ||
+      r.includes("requete") ||
+      r.includes("requête");
+
+    if (isDefense && !isCivil) return "Avocat Défense";
+    if (isCivil && !isDefense) return "Avocat Partie civile";
+    // défaut: défense
+    return "Avocat Défense";
+  }
+
+  // défaut: juge
   return "Juge";
 }
 
@@ -845,7 +874,7 @@ FORMAT JSON attendu (retourne EXACTEMENT ce JSON, sans texte autour) :
     "city": string,
     "date": "YYYY-MM-DD",
     "formation": string,
-    "roles": { "juge": string, "procureur": string, "avocat": string, "greffier": string },
+    "roles": { "juge": string, "procureur": string, "avocatDefense": string, "avocatPartieCivile": string, "greffier": string },
     "vibe": string
   },
   "phases": [
@@ -853,7 +882,7 @@ FORMAT JSON attendu (retourne EXACTEMENT ce JSON, sans texte autour) :
   ],
   "turns": [
     {
-      "speaker": "Greffier"|"Juge"|"Procureur"|"Avocat",
+      "speaker": "Greffier"|"Juge"|"Procureur"|"Avocat Défense"|"Avocat Partie civile",
       "text": string,
       "phase": string,
       "pieceRefs": [ "P1", "P2" ]
@@ -862,11 +891,11 @@ FORMAT JSON attendu (retourne EXACTEMENT ce JSON, sans texte autour) :
   "objections": [
     {
       "id": "OBJ1",
-      "by": "Procureur"|"Avocat",
+      "by": "Procureur"|"Avocat Défense"|"Avocat Partie civile",
       "title": string,
       "statement": string,
       "options": ["Accueillir","Rejeter","Demander précision"],
-      "bestChoiceByRole": { "Juge": "Accueillir"|"Rejeter"|"Demander précision", "Procureur": string, "Avocat": string },
+      "bestChoiceByRole": { "Juge": "Accueillir"|"Rejeter"|"Demander précision", "Procureur": string, "Avocat Défense": string, "Avocat Partie civile": string },
       "effects": {
         "onAccueillir": { "excludePieceIds": [string], "admitLatePieceIds": [string], "why": string },
         "onRejeter": { "excludePieceIds": [string], "admitLatePieceIds": [string], "why": string },
@@ -1361,48 +1390,66 @@ Format EXACT:
 });
 
 /* =========================================================
-   ✅ ROOMS CO-OP 2–3 joueurs (MongoDB TTL, multi-instance Render)
-   + Championnat + Finale publique + Replay
+   ✅ NEW — ROOMS CO-OP 2–3 joueurs (Render-friendly, polling)
    Endpoints attendus par JusticeLabPlay.jsx :
-     POST /justice-lab/rooms/create   { caseId, displayName, role, title? }
-     POST /justice-lab/rooms/join     { roomId|code|room, caseId?, displayName, role }
+     POST /justice-lab/rooms/create   { caseId, displayName, role }
+     POST /justice-lab/rooms/join     { roomId, caseId, displayName, role }
      GET  /justice-lab/rooms/:roomId?participantId=...
      POST /justice-lab/rooms/action   { roomId, participantId, action:{type,payload} }
-
-   + Championship (pro) :
-     POST /justice-lab/championship/register         (auth) { displayName, institution?, city? }
-     POST /justice-lab/championship/submit-match      (auth) { stage, matchId?, caseId?, players[], scores{}, replayId? }
-     GET  /justice-lab/championship/bracket           (auth) -> bracket + leaderboard
-     GET  /justice-lab/championship/final/public      (public) -> finale + replay
-     GET  /justice-lab/replay/:replayId               (public) -> replay timeline
-
-   + IA Arbitre :
-     POST /justice-lab/championship/ai-referee        (auth) { caseData, objection, suggestions[], judgeRole? }
+   + Compat anciens endpoints :
+     GET  /justice-lab/rooms/state/:roomId
+     POST /justice-lab/rooms/suggest
+     POST /justice-lab/rooms/judge-decision
 ========================================================= */
 
 const ROOMS_TTL_MS = Number(process.env.JUSTICE_LAB_ROOMS_TTL_MS || 6 * 60 * 60 * 1000); // 6h
 const ROOMS_MAX_PLAYERS = Number(process.env.JUSTICE_LAB_ROOMS_MAX_PLAYERS || 3);
 
-function nowMs() { return Date.now(); }
-function nowIso() { return new Date().toISOString(); }
+const rooms = new Map(); // roomId -> room
+
+function nowMs() {
+  return Date.now();
+}
+function nowIso() {
+  return new Date().toISOString();
+}
 function randCode(len = 6) {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // sans 0/O/I/1
   let s = "";
   for (let i = 0; i < len; i++) s += chars[Math.floor(Math.random() * chars.length)];
   return s;
 }
-function makeRoomId() { return `JL-${randCode(6)}`; }
-function makeParticipantId() { return `p_${nowMs().toString(36)}_${Math.random().toString(16).slice(2)}`; }
-function normalizeRoomId(v) { return String(v || "").trim().toUpperCase(); }
+function makeRoomId() {
+  // format simple (copiable)
+  return `JL-${randCode(6)}`;
+}
+function makeParticipantId() {
+  return `p_${nowMs().toString(36)}_${Math.random().toString(16).slice(2)}`;
+}
+function cleanupRooms() {
+  const t = nowMs();
+  for (const [id, r] of rooms.entries()) {
+    if (!r) {
+      rooms.delete(id);
+      continue;
+    }
+    const exp = Number(r.expiresAt || 0);
+    if (exp && exp <= t) rooms.delete(id);
+  }
+}
+setInterval(cleanupRooms, 60 * 1000).unref?.();
 
 function ensureRoleValid(role) {
   const r = normalizeRole(role || "");
-  if (!["Juge", "Procureur", "Avocat"].includes(r)) return "ROLE_INVALID";
-  return r;
+  // compat legacy "Avocat"
+  const rr = r === "Avocat" ? "Avocat Défense" : r;
+  if (!["Juge", "Procureur", "Greffier", "Avocat Défense", "Avocat Partie civile"].includes(rr)) {
+    return "ROLE_INVALID";
+  }
+  return rr;
 }
 
-function scrubRoomForClient(roomDoc) {
-  const room = roomDoc?.toObject ? roomDoc.toObject() : roomDoc;
+function scrubRoomForClient(room) {
   if (!room) return null;
   const players = Array.isArray(room.players) ? room.players : [];
   return {
@@ -1424,208 +1471,107 @@ function scrubRoomForClient(roomDoc) {
     snapshot: room.snapshot || null,
     suggestions: Array.isArray(room.suggestions) ? room.suggestions.slice(0, 60) : [],
     decisions: Array.isArray(room.decisions) ? room.decisions.slice(0, 120) : [],
-    replayId: room.replayId || null,
   };
 }
 
-const mongoReady = () => Boolean(process.env.MONGODB_URI) && Boolean(mongoose?.connection?.readyState);
-
-if (!mongoReady()) {
-  console.warn("⚠️ MongoDB non prêt : Rooms/Championnat/Replay seront indisponibles (MONGODB_URI manquant ou connexion inactive).");
+function getRoomOr404(roomId) {
+  cleanupRooms();
+  const rid = String(roomId || "").trim().toUpperCase();
+  const room = rooms.get(rid);
+  if (!room) return null;
+  room.expiresAt = nowMs() + ROOMS_TTL_MS;
+  return room;
 }
 
-/* -------------------------
-   Mongoose Models
-------------------------- */
-const JusticeLabRoomSchema = new mongoose.Schema(
-  {
-    roomId: { type: String, index: true, unique: true },
-    version: { type: Number, default: 0 },
-    caseId: { type: String, default: null },
-    meta: { type: Object, default: {} },
-    players: [
-      {
-        participantId: String,
-        displayName: String,
-        role: String,
-        isHost: Boolean,
-        joinedAt: String,
-        lastSeenAt: String,
-      },
-    ],
-    snapshot: { type: Object, default: null },
-    suggestions: { type: Array, default: [] },
-    decisions: { type: Array, default: [] },
-    replayId: { type: String, default: null },
-    createdAt: { type: String },
-    updatedAt: { type: String },
-    expiresAt: { type: Date, index: true },
-  },
-  { versionKey: false }
-);
-JusticeLabRoomSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
-
-const JusticeLabReplaySchema = new mongoose.Schema(
-  {
-    replayId: { type: String, index: true, unique: true },
-    roomId: { type: String, index: true },
-    matchId: { type: String, index: true, default: null },
-    stage: { type: String, default: "QUALIF" },
-    isPublic: { type: Boolean, default: false },
-    meta: { type: Object, default: {} },
-    events: { type: Array, default: [] }, // timeline: {ts,type,byRole,byName,payload}
-    createdAt: { type: String },
-    updatedAt: { type: String },
-    expiresAt: { type: Date, index: true },
-  },
-  { versionKey: false }
-);
-JusticeLabReplaySchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
-
-const ChampionshipPlayerSchema = new mongoose.Schema(
-  {
-    userId: { type: String, index: true },
-    displayName: String,
-    institution: String,
-    city: String,
-    createdAt: String,
-    stats: {
-      points: { type: Number, default: 0 },
-      matches: { type: Number, default: 0 },
-      wins: { type: Number, default: 0 },
-      losses: { type: Number, default: 0 },
-      avgScore: { type: Number, default: 0 },
-    },
-  },
-  { versionKey: false }
-);
-
-const ChampionshipMatchSchema = new mongoose.Schema(
-  {
-    matchId: { type: String, index: true, unique: true },
-    stage: { type: String, default: "QUALIF", index: true }, // QUALIF | QF | SF | FINAL
-    caseId: { type: String, default: null },
-    createdAt: String,
-    updatedAt: String,
-    isPublic: { type: Boolean, default: false },
-    players: [
-      {
-        userId: String,
-        displayName: String,
-        role: String,
-      },
-    ],
-    scores: { type: Object, default: {} }, // per userId: {scoreGlobal, scores{...}, appealRisk, ...}
-    winnerUserId: { type: String, default: null },
-    replayId: { type: String, default: null },
-  },
-  { versionKey: false }
-);
-
-const JusticeLabRoom = mongoose.models.JusticeLabRoom || mongoose.model("JusticeLabRoom", JusticeLabRoomSchema);
-const JusticeLabReplay = mongoose.models.JusticeLabReplay || mongoose.model("JusticeLabReplay", JusticeLabReplaySchema);
-const ChampionshipPlayer = mongoose.models.ChampionshipPlayer || mongoose.model("ChampionshipPlayer", ChampionshipPlayerSchema);
-const ChampionshipMatch = mongoose.models.ChampionshipMatch || mongoose.model("ChampionshipMatch", ChampionshipMatchSchema);
-
-/* -------------------------
-   Helpers Championship
-------------------------- */
-function makeMatchId() { return `M-${randCode(8)}`; }
-function makeReplayId() { return `R-${randCode(10)}`; }
-
-function calcPointsFromScore(scoreGlobal, stage = "QUALIF") {
-  const base = clamp(Number(scoreGlobal || 0), 0, 100);
-  const mult = stage === "FINAL" ? 2.0 : stage === "SF" ? 1.6 : stage === "QF" ? 1.3 : 1.0;
-  return Math.round(base * mult);
+function roleTaken(room, role) {
+  const players = Array.isArray(room.players) ? room.players : [];
+  const wanted = String(role);
+  // rôle réservé par l'IA (si activée)
+  const aiRole = String(room?.meta?.aiRole || "").trim();
+  if (aiRole && wanted === aiRole) return true;
+  return players.some((p) => String(p.role) === wanted);
 }
 
-async function upsertPlayerStats(userId, displayName, deltaPoints, deltaMatch, isWin, scoreGlobal) {
-  const p = await ChampionshipPlayer.findOne({ userId }).lean();
-  const prevMatches = Number(p?.stats?.matches || 0);
-  const prevAvg = Number(p?.stats?.avgScore || 0);
-  const newMatches = prevMatches + deltaMatch;
-  const newAvg = newMatches > 0 ? ((prevAvg * prevMatches) + Number(scoreGlobal || 0)) / newMatches : 0;
-
-  await ChampionshipPlayer.updateOne(
-    { userId },
-    {
-      $set: {
-        displayName: displayName || p?.displayName || "Joueur",
-      },
-      $setOnInsert: { createdAt: nowIso() },
-      $inc: {
-        "stats.points": deltaPoints,
-        "stats.matches": deltaMatch,
-        "stats.wins": isWin ? 1 : 0,
-        "stats.losses": isWin ? 0 : 1,
-      },
-      $set: { "stats.avgScore": newAvg },
-    },
-    { upsert: true }
-  );
+function getParticipant(room, participantId) {
+  const pid = String(participantId || "").trim();
+  const players = Array.isArray(room.players) ? room.players : [];
+  return players.find((p) => p.participantId === pid) || null;
 }
 
-/* -------------------------
-   ROOMS endpoints (Mongo TTL)
-------------------------- */
-app.post("/justice-lab/rooms/create", async (req, res) => {
+/**
+ * POST /justice-lab/rooms/create
+ * body: { caseId, displayName, role }
+ */
+app.post("/justice-lab/rooms/create", requireAuth, async (req, res) => {
   try {
-    if (!mongoReady()) return res.status(503).json({ error: "MONGO_NOT_READY" });
+    cleanupRooms();
 
     const caseId = safeStr(req.body?.caseId || "", 80);
     const displayName = safeStr(req.body?.displayName || "Joueur", 50) || "Joueur";
-    const r = ensureRoleValid(req.body?.role || "Juge");
+
+    // ✅ IA : par défaut, le juge est l'IA (modifiable par le créateur)
+    const aiRoleIn = safeStr(req.body?.aiRole || "Juge", 40);
+    const aiRoleNorm =
+      String(aiRoleIn || "").trim().toLowerCase() === "aucun" || String(aiRoleIn || "").trim() === ""
+        ? null
+        : ensureRoleValid(aiRoleIn);
+    if (aiRoleNorm === "ROLE_INVALID") return res.status(400).json({ error: "aiRole invalide." });
+
+    const r = ensureRoleValid(req.body?.role || (aiRoleNorm === "Juge" ? "Procureur" : "Juge"));
     if (r === "ROLE_INVALID") return res.status(400).json({ error: "Role invalide." });
+
+    if (aiRoleNorm && r === aiRoleNorm) {
+      return res.status(409).json({ error: `Rôle réservé à l'IA: ${aiRoleNorm}` });
+    }
 
     const roomId = makeRoomId();
     const participantId = makeParticipantId();
+
     const createdAt = nowIso();
-
-    const replayId = makeReplayId();
-    await JusticeLabReplay.create({
-      replayId,
-      roomId,
-      stage: "COOP",
-      isPublic: false,
-      meta: { title: safeStr(req.body?.title || "Audience co-op", 140), caseId: caseId || null },
-      events: [{ ts: createdAt, type: "ROOM_CREATE", byRole: r, byName: displayName, payload: { roomId, caseId: caseId || null } }],
-      createdAt,
-      updatedAt: createdAt,
-      expiresAt: new Date(nowMs() + ROOMS_TTL_MS),
-    });
-
-    const room = await JusticeLabRoom.create({
+    const room = {
       roomId,
       version: 0,
       createdAt,
       updatedAt: createdAt,
-      expiresAt: new Date(nowMs() + ROOMS_TTL_MS),
+      expiresAt: nowMs() + ROOMS_TTL_MS,
       caseId: caseId || null,
-      replayId,
-      meta: { title: safeStr(req.body?.title || "Audience co-op", 140) },
+      meta: {
+        title: safeStr(req.body?.title || "Audience co-op", 140),
+        aiRole: aiRoleNorm, // ex: "Juge" par défaut
+      },
       players: [
-        { participantId, displayName, role: r, isHost: true, joinedAt: createdAt, lastSeenAt: createdAt },
+        {
+          participantId,
+          displayName,
+          role: r,
+          isHost: true,
+          joinedAt: createdAt,
+          lastSeenAt: createdAt,
+        },
       ],
-      snapshot: null,
+      snapshot: null, // host pousse l'état via /rooms/action
       suggestions: [],
       decisions: [],
-    });
+    };
 
-    return res.json({ roomId, participantId, version: 0, snapshot: null, replayId });
+    rooms.set(roomId, room);
+    return res.json({ roomId, participantId, version: room.version, snapshot: room.snapshot });
   } catch (e) {
     console.error("❌ /justice-lab/rooms/create:", e);
-    return res.status(500).json({ error: "ROOM_CREATE_FAILED" });
+    return res.status(500).json({ error: "Erreur création room." });
   }
 });
 
-app.post("/justice-lab/rooms/join", async (req, res) => {
+/**
+ * POST /justice-lab/rooms/join
+ * body: { roomId, caseId, displayName, role }
+ */
+app.post("/justice-lab/rooms/join", requireAuth, async (req, res) => {
   try {
-    if (!mongoReady()) return res.status(503).json({ error: "MONGO_NOT_READY" });
-
-    const roomId = normalizeRoomId(req.body?.roomId || req.body?.code || req.body?.room);
+    const roomId = String(req.body?.roomId || "").trim().toUpperCase();
     if (!roomId) return res.status(400).json({ error: "roomId requis." });
 
-    const room = await JusticeLabRoom.findOne({ roomId });
+    const room = getRoomOr404(roomId);
     if (!room) return res.status(404).json({ error: "Room introuvable/expirée." });
 
     const displayName = safeStr(req.body?.displayName || "Joueur", 50) || "Joueur";
@@ -1639,90 +1585,95 @@ app.post("/justice-lab/rooms/join", async (req, res) => {
 
     const players = Array.isArray(room.players) ? room.players : [];
     if (players.length >= ROOMS_MAX_PLAYERS) return res.status(409).json({ error: "ROOM_FULL" });
-    if (players.some((p) => String(p.role) === String(r))) return res.status(409).json({ error: `Rôle déjà occupé: ${r}` });
+
+    if (roleTaken(room, r)) return res.status(409).json({ error: `Rôle déjà occupé: ${r}` });
 
     const participantId = makeParticipantId();
     const t = nowIso();
 
-    room.players.push({ participantId, displayName, role: r, isHost: false, joinedAt: t, lastSeenAt: t });
+    room.players.push({
+      participantId,
+      displayName,
+      role: r,
+      isHost: false,
+      joinedAt: t,
+      lastSeenAt: t,
+    });
+
     room.updatedAt = t;
-    room.expiresAt = new Date(nowMs() + ROOMS_TTL_MS);
-    await room.save();
+    room.expiresAt = nowMs() + ROOMS_TTL_MS;
 
-    if (room.replayId) {
-      await JusticeLabReplay.updateOne(
-        { replayId: room.replayId },
-        {
-          $push: { events: { ts: t, type: "ROOM_JOIN", byRole: r, byName: displayName, payload: { participantId } } },
-          $set: { updatedAt: t, expiresAt: new Date(nowMs() + ROOMS_TTL_MS) },
-        }
-      );
-    }
-
-    return res.json({ roomId: room.roomId, participantId, version: Number(room.version || 0), snapshot: room.snapshot || null, replayId: room.replayId || null });
+    rooms.set(room.roomId, room);
+    return res.json({ roomId: room.roomId, participantId, version: room.version || 0, snapshot: room.snapshot || null });
   } catch (e) {
     console.error("❌ /justice-lab/rooms/join:", e);
-    return res.status(500).json({ error: "ROOM_JOIN_FAILED" });
+    return res.status(500).json({ error: "Erreur join room." });
   }
 });
 
-app.get("/justice-lab/rooms/:roomId", async (req, res) => {
+/**
+ * GET /justice-lab/rooms/:roomId?participantId=...
+ * Le front poll. Si participantId présent, on "ping" présence.
+ */
+app.get("/justice-lab/rooms/:roomId", requireAuth, async (req, res) => {
   try {
-    if (!mongoReady()) return res.status(503).json({ error: "MONGO_NOT_READY" });
-
-    const roomId = normalizeRoomId(req.params?.roomId);
-    const room = await JusticeLabRoom.findOne({ roomId });
+    const roomId = String(req.params?.roomId || "").trim().toUpperCase();
+    const room = getRoomOr404(roomId);
     if (!room) return res.status(404).json({ error: "Room introuvable/expirée." });
 
     const participantId = String(req.query?.participantId || "").trim();
-    const t = nowIso();
     if (participantId) {
-      const idx = (room.players || []).findIndex((p) => p.participantId === participantId);
-      if (idx >= 0) {
-        room.players[idx].lastSeenAt = t;
-        room.updatedAt = t;
+      const me = getParticipant(room, participantId);
+      if (me) {
+        me.lastSeenAt = nowIso();
+        room.updatedAt = me.lastSeenAt;
       }
     }
-    room.expiresAt = new Date(nowMs() + ROOMS_TTL_MS);
-    await room.save();
 
+    room.expiresAt = nowMs() + ROOMS_TTL_MS;
+    rooms.set(room.roomId, room);
     return res.json(scrubRoomForClient(room));
   } catch (e) {
     console.error("❌ /justice-lab/rooms/:roomId:", e);
-    return res.status(500).json({ error: "ROOM_GET_FAILED" });
+    return res.status(500).json({ error: "Erreur get room." });
   }
 });
 
-app.post("/justice-lab/rooms/action", async (req, res) => {
+/**
+ * POST /justice-lab/rooms/action
+ * body: { roomId, participantId, action: { type, payload } }
+ *
+ * type supportés (on accepte plusieurs alias pour compat) :
+ * - SNAPSHOT / SYNC_SNAPSHOT : payload { snapshot } (host only) -> version++
+ * - SUGGESTION             : payload { objectionId, decision, reasoning } (MP/Avocat)
+ * - JUDGE_DECISION         : payload { objectionId, decision, reasoning, effects? } (Juge) -> decisions[]
+ * - PING                   : keepalive
+ */
+app.post("/justice-lab/rooms/action", requireAuth, async (req, res) => {
   try {
-    if (!mongoReady()) return res.status(503).json({ error: "MONGO_NOT_READY" });
-
-    const roomId = normalizeRoomId(req.body?.roomId || req.body?.code || req.body?.room);
+    const { roomId, participantId, action } = req.body || {};
     if (!roomId) return res.status(400).json({ error: "roomId requis." });
 
-    const participantId = String(req.body?.participantId || "").trim();
-    const action = req.body?.action || {};
+    const room = getRoomOr404(roomId);
+    if (!room) return res.status(404).json({ error: "Room introuvable/expirée." });
+
+    const me = participantId ? getParticipant(room, participantId) : null;
+    if (participantId && !me) return res.status(403).json({ error: "PARTICIPANT_NOT_FOUND" });
+
     const type = String(action?.type || "").trim().toUpperCase();
     const payload = action?.payload || {};
     const t = nowIso();
 
-    const room = await JusticeLabRoom.findOne({ roomId });
-    if (!room) return res.status(404).json({ error: "Room introuvable/expirée." });
-
-    const me = participantId ? (room.players || []).find((p) => p.participantId === participantId) : null;
-    if (participantId && !me) return res.status(403).json({ error: "PARTICIPANT_NOT_FOUND" });
-
     if (me) me.lastSeenAt = t;
     room.updatedAt = t;
-    room.expiresAt = new Date(nowMs() + ROOMS_TTL_MS);
+    room.expiresAt = nowMs() + ROOMS_TTL_MS;
 
-    // keepalive
     if (!type || type === "PING") {
-      await room.save();
+      rooms.set(room.roomId, room);
       return res.json({ ok: true, version: Number(room.version || 0) });
     }
 
-    // snapshot sync (host)
+    // --- snapshot sync (host) ---
     if (type === "SNAPSHOT" || type === "SYNC_SNAPSHOT") {
       if (!me?.isHost) return res.status(403).json({ error: "HOST_ONLY" });
       const snap = payload?.snapshot || action?.snapshot;
@@ -1730,26 +1681,18 @@ app.post("/justice-lab/rooms/action", async (req, res) => {
 
       room.snapshot = snap;
       room.version = Number(room.version || 0) + 1;
-      await room.save();
 
-      if (room.replayId) {
-        await JusticeLabReplay.updateOne(
-          { replayId: room.replayId },
-          {
-            $push: { events: { ts: t, type: "SNAPSHOT", byRole: me?.role, byName: me?.displayName, payload: { version: room.version } } },
-            $set: { updatedAt: t, expiresAt: new Date(nowMs() + ROOMS_TTL_MS) },
-          }
-        );
-      }
-
+      rooms.set(room.roomId, room);
       return res.json({ ok: true, version: room.version });
     }
 
-    // suggestion (Procureur/Avocat)
+    // --- suggestion (Procureur/Avocat) ---
     if (type === "SUGGESTION") {
-      const src = (payload?.suggestion && typeof payload.suggestion === "object") ? payload.suggestion : payload;
+            const sugIn = payload?.suggestion && typeof payload.suggestion === "object" ? payload.suggestion : payload;
+      const legacySug = action?.suggestion && typeof action.suggestion === "object" ? action.suggestion : null;
+      const src = legacySug || sugIn || {};
 
-      const sug = {
+const sug = {
         id: `SUG_${Date.now()}_${Math.random().toString(16).slice(2)}`,
         ts: t,
         role: me?.role || safeStr(src?.role || src?.byRole || "", 20),
@@ -1760,30 +1703,33 @@ app.post("/justice-lab/rooms/action", async (req, res) => {
         reasoning: safeStr(src?.reasoning || src?.reason || "", 1400),
       };
 
+
+
       room.suggestions = Array.isArray(room.suggestions) ? room.suggestions : [];
       room.suggestions.unshift(sug);
       room.suggestions = room.suggestions.slice(0, 60);
-      await room.save();
 
-      if (room.replayId) {
-        await JusticeLabReplay.updateOne(
-          { replayId: room.replayId },
-          {
-            $push: { events: { ts: t, type: "SUGGESTION", byRole: me?.role, byName: me?.displayName, payload: sug } },
-            $set: { updatedAt: t, expiresAt: new Date(nowMs() + ROOMS_TTL_MS) },
-          }
-        );
-      }
-
+      rooms.set(room.roomId, room);
       return res.json({ ok: true, version: Number(room.version || 0), suggestion: sug });
     }
 
-    // judge decision (Juge)
+    // --- judge decision (Juge) ---
     if (type === "JUDGE_DECISION") {
-      if (me?.role !== "Juge") return res.status(403).json({ error: "JUDGE_ONLY" });
+      const aiRole = String(room?.meta?.aiRole || "").trim();
+      const asAI = Boolean(payload?.asAI || action?.asAI || payload?.by === "AI" || payload?.by === "IA");
+
+      // ✅ Si le juge est l'IA, on autorise l'host à soumettre la décision "au nom" de l'IA.
+      const allowedAsHumanJudge = me?.role === "Juge";
+      const allowedAsAIJudge = aiRole === "Juge" && me?.isHost && asAI;
+
+      if (!allowedAsHumanJudge && !allowedAsAIJudge) {
+        return res.status(403).json({ error: "JUDGE_ONLY" });
+      }
 
       const d = safeStr(payload?.decision || "", 40);
-      if (!["Accueillir", "Rejeter", "Demander précision"].includes(d)) return res.status(400).json({ error: "Decision invalide." });
+      if (!["Accueillir", "Rejeter", "Demander précision"].includes(d)) {
+        return res.status(400).json({ error: "Decision invalide." });
+      }
 
       const dec = {
         id: `DEC_${Date.now()}_${Math.random().toString(16).slice(2)}`,
@@ -1792,41 +1738,36 @@ app.post("/justice-lab/rooms/action", async (req, res) => {
         decision: d,
         reasoning: safeStr(payload?.reasoning || "", 1400),
         effects: payload?.effects && typeof payload.effects === "object" ? payload.effects : null,
+        by: allowedAsAIJudge ? "IA" : (me?.role || "Juge"),
       };
 
       room.decisions = Array.isArray(room.decisions) ? room.decisions : [];
       room.decisions.push(dec);
+
       room.version = Number(room.version || 0) + 1;
-      await room.save();
-
-      if (room.replayId) {
-        await JusticeLabReplay.updateOne(
-          { replayId: room.replayId },
-          {
-            $push: { events: { ts: t, type: "JUDGE_DECISION", byRole: me?.role, byName: me?.displayName, payload: dec } },
-            $set: { updatedAt: t, expiresAt: new Date(nowMs() + ROOMS_TTL_MS) },
-          }
-        );
-      }
-
+      rooms.set(room.roomId, room);
       return res.json({ ok: true, version: room.version, decision: dec });
     }
 
     return res.status(400).json({ error: "ACTION_UNKNOWN" });
   } catch (e) {
     console.error("❌ /justice-lab/rooms/action:", e);
-    return res.status(500).json({ error: "ROOM_ACTION_FAILED" });
+    return res.status(500).json({ error: "Erreur action room." });
   }
 });
 
 /* -------------------------
-   COMPAT anciens endpoints rooms
-------------------------- */
-app.get("/justice-lab/rooms/state/:roomId", async (req, res) => {
+   ✅ COMPAT : anciens endpoints
+   ------------------------- */
+
+/**
+ * GET /justice-lab/rooms/state/:roomId
+ * (ancien) -> renvoie { room }
+ */
+app.get("/justice-lab/rooms/state/:roomId", requireAuth, async (req, res) => {
   try {
-    if (!mongoReady()) return res.status(503).json({ error: "MONGO_NOT_READY" });
-    const roomId = normalizeRoomId(req.params?.roomId);
-    const room = await JusticeLabRoom.findOne({ roomId });
+    const roomId = String(req.params?.roomId || "").trim().toUpperCase();
+    const room = getRoomOr404(roomId);
     if (!room) return res.status(404).json({ error: "Room introuvable/expirée." });
     return res.json({ room: scrubRoomForClient(room) });
   } catch (e) {
@@ -1834,24 +1775,24 @@ app.get("/justice-lab/rooms/state/:roomId", async (req, res) => {
   }
 });
 
-app.post("/justice-lab/rooms/suggest", async (req, res) => {
+/**
+ * POST /justice-lab/rooms/suggest
+ * (ancien) body: { roomId, userId, role, objectionId, choice, reasoning }
+ */
+app.post("/justice-lab/rooms/suggest", requireAuth, async (req, res) => {
   try {
-    if (!mongoReady()) return res.status(503).json({ error: "MONGO_NOT_READY" });
-    const roomId = normalizeRoomId(req.body?.roomId || req.body?.code || req.body?.room);
-    if (!roomId) return res.status(400).json({ error: "roomId requis." });
+    const { roomId, role, objectionId, choice, reasoning } = req.body || {};
+    if (!roomId || !role || !objectionId || !choice) {
+      return res.status(400).json({ error: "roomId, role, objectionId, choice requis." });
+    }
 
-    const room = await JusticeLabRoom.findOne({ roomId });
+    const room = getRoomOr404(roomId);
     if (!room) return res.status(404).json({ error: "Room introuvable/expirée." });
-
-    const role = normalizeRole(req.body?.role || "Avocat");
-    const objectionId = req.body?.objectionId || "";
-    const choice = req.body?.choice || req.body?.decision || "";
-    const reasoning = req.body?.reasoning || "";
 
     const sug = {
       id: `SUG_${Date.now()}_${Math.random().toString(16).slice(2)}`,
       ts: nowIso(),
-      role,
+      role: normalizeRole(role),
       participantId: null,
       displayName: safeStr(req.body?.userName || role, 60),
       objectionId: safeStr(objectionId, 40),
@@ -1862,20 +1803,11 @@ app.post("/justice-lab/rooms/suggest", async (req, res) => {
     room.suggestions = Array.isArray(room.suggestions) ? room.suggestions : [];
     room.suggestions.unshift(sug);
     room.suggestions = room.suggestions.slice(0, 60);
+
     room.updatedAt = nowIso();
-    room.expiresAt = new Date(nowMs() + ROOMS_TTL_MS);
-    await room.save();
+    room.expiresAt = nowMs() + ROOMS_TTL_MS;
 
-    if (room.replayId) {
-      await JusticeLabReplay.updateOne(
-        { replayId: room.replayId },
-        {
-          $push: { events: { ts: sug.ts, type: "SUGGESTION", byRole: role, byName: sug.displayName, payload: sug } },
-          $set: { updatedAt: sug.ts, expiresAt: new Date(nowMs() + ROOMS_TTL_MS) },
-        }
-      );
-    }
-
+    rooms.set(room.roomId, room);
     return res.json({ ok: true, suggestion: sug, room: scrubRoomForClient(room) });
   } catch (e) {
     console.error("❌ /justice-lab/rooms/suggest:", e);
@@ -1883,26 +1815,29 @@ app.post("/justice-lab/rooms/suggest", async (req, res) => {
   }
 });
 
-app.post("/justice-lab/rooms/judge-decision", async (req, res) => {
+/**
+ * POST /justice-lab/rooms/judge-decision
+ * (ancien) body: { roomId, userId, objectionId, decision, reasoning, effects? }
+ */
+app.post("/justice-lab/rooms/judge-decision", requireAuth, async (req, res) => {
   try {
-    if (!mongoReady()) return res.status(503).json({ error: "MONGO_NOT_READY" });
-    const roomId = normalizeRoomId(req.body?.roomId || req.body?.code || req.body?.room);
-    if (!roomId) return res.status(400).json({ error: "roomId requis." });
+    const { roomId, objectionId, decision, reasoning, effects } = req.body || {};
+    if (!roomId || !objectionId || !decision) {
+      return res.status(400).json({ error: "roomId, objectionId, decision requis." });
+    }
 
-    const room = await JusticeLabRoom.findOne({ roomId });
+    const room = getRoomOr404(roomId);
     if (!room) return res.status(404).json({ error: "Room introuvable/expirée." });
 
-    const decision = req.body?.decision;
-    const reasoning = req.body?.reasoning;
-    const effects = req.body?.effects;
-
     const d = safeStr(decision, 40);
-    if (!["Accueillir", "Rejeter", "Demander précision"].includes(d)) return res.status(400).json({ error: "Decision invalide." });
+    if (!["Accueillir", "Rejeter", "Demander précision"].includes(d)) {
+      return res.status(400).json({ error: "Decision invalide." });
+    }
 
     const dec = {
       id: `DEC_${Date.now()}_${Math.random().toString(16).slice(2)}`,
       ts: nowIso(),
-      objectionId: safeStr(req.body?.objectionId || "", 40),
+      objectionId: safeStr(objectionId, 40),
       decision: d,
       reasoning: safeStr(reasoning || "", 1400),
       effects: effects && typeof effects === "object" ? effects : null,
@@ -1910,21 +1845,12 @@ app.post("/justice-lab/rooms/judge-decision", async (req, res) => {
 
     room.decisions = Array.isArray(room.decisions) ? room.decisions : [];
     room.decisions.push(dec);
+
     room.updatedAt = nowIso();
-    room.expiresAt = new Date(nowMs() + ROOMS_TTL_MS);
+    room.expiresAt = nowMs() + ROOMS_TTL_MS;
     room.version = Number(room.version || 0) + 1;
-    await room.save();
 
-    if (room.replayId) {
-      await JusticeLabReplay.updateOne(
-        { replayId: room.replayId },
-        {
-          $push: { events: { ts: dec.ts, type: "JUDGE_DECISION", byRole: "Juge", byName: "Juge", payload: dec } },
-          $set: { updatedAt: dec.ts, expiresAt: new Date(nowMs() + ROOMS_TTL_MS) },
-        }
-      );
-    }
-
+    rooms.set(room.roomId, room);
     return res.json({ ok: true, decision: dec, room: scrubRoomForClient(room) });
   } catch (e) {
     console.error("❌ /justice-lab/rooms/judge-decision:", e);
@@ -1932,263 +1858,10 @@ app.post("/justice-lab/rooms/judge-decision", async (req, res) => {
   }
 });
 
-/* =========================================================
-   ✅ IA ARBITRE (Championnat)
-========================================================= */
-app.post("/justice-lab/championship/ai-referee", requireAuth, async (req, res) => {
-  try {
-    const { caseData, objection, suggestions = [], judgeRole = "Juge" } = req.body || {};
-    if (!caseData || !objection) return res.status(400).json({ error: "caseData et objection requis." });
-
-    const payload = {
-      caseId: caseData.caseId,
-      domaine: caseData.domaine,
-      niveau: caseData.niveau,
-      titre: caseData.titre || caseData.title,
-      resume: safeStr(caseData.resume || caseData.brief, 1200),
-      pieces: Array.isArray(caseData.pieces) ? caseData.pieces.slice(0, 10) : [],
-      objection: {
-        id: safeStr(objection.id, 40),
-        by: safeStr(objection.by, 30),
-        title: safeStr(objection.title, 180),
-        statement: safeStr(objection.statement, 1200),
-        options: ["Accueillir", "Rejeter", "Demander précision"],
-      },
-      suggestions: Array.isArray(suggestions) ? suggestions.slice(0, 6) : [],
-    };
-
-    const system = `
-Tu es l'ARBITRE IA d'un championnat national d'audiences simulées (RDC).
-Tu dois:
-1) Statuer sur l'objection (Accueillir/Rejeter/Demander précision)
-2) Donner une motivation courte et professionnelle
-3) Attribuer des points à chaque proposition reçue (0-10) selon: pertinence juridique, respect du contradictoire, gestion de l'audience, clarté.
-
-Contraintes:
-- Retourne UNIQUEMENT un JSON valide.
-- decision: "Accueillir"|"Rejeter"|"Demander précision"
-- scoring: tableau de notes par suggestion (index) + raison courte.
-
-Format:
-{
-  "decision": "...",
-  "reason": "...",
-  "scores": [
-    { "index": 0, "points": 0-10, "why": "..." }
-  ],
-  "bestIndex": number|null
-}
-`.trim();
-
-    const completion = await openai.chat.completions.create({
-      model: process.env.JUSTICE_LAB_REFEREE_MODEL || process.env.JUSTICE_LAB_MODEL || "gpt-4o-mini",
-      messages: [
-        { role: "system", content: system },
-        { role: "user", content: `INPUT:\\n${JSON.stringify(payload, null, 2)}` },
-      ],
-      temperature: 0.2,
-      max_tokens: 500,
-      response_format: { type: "json_object" },
-    });
-
-    const raw = completion.choices?.[0]?.message?.content || "{}";
-    let out = null;
-    try { out = JSON.parse(raw); } catch { out = null; }
-
-    const decision = String(out?.decision || "").trim();
-    const ok = ["Accueillir", "Rejeter", "Demander précision"].includes(decision);
-    if (!ok) {
-      return res.json({ decision: objection?.bestChoiceByRole?.Juge || "Demander précision", reason: "Arbitre IA fallback.", scores: [], bestIndex: null });
-    }
-
-    return res.json({
-      decision,
-      reason: safeStr(out?.reason || "Décision arbitrale IA.", 420),
-      scores: Array.isArray(out?.scores) ? out.scores.slice(0, 12) : [],
-      bestIndex: typeof out?.bestIndex === "number" ? out.bestIndex : null,
-    });
-  } catch (e) {
-    console.warn("⚠️ /justice-lab/championship/ai-referee:", e?.message);
-    return res.status(200).json({ decision: "Demander précision", reason: "Arbitre IA indisponible.", scores: [], bestIndex: null });
-  }
-});
-
-/* =========================================================
-   ✅ CHAMPIONNAT — Register / Bracket / Submit Match / Finale publique
-========================================================= */
-app.post("/justice-lab/championship/register", requireAuth, async (req, res) => {
-  try {
-    if (!mongoReady()) return res.status(503).json({ error: "MONGO_NOT_READY" });
-    const userId = String(req.user?.id || req.user?._id || req.user?.userId || "").trim();
-    const displayName = safeStr(req.body?.displayName || req.user?.name || "Joueur", 60);
-    const institution = safeStr(req.body?.institution || "", 100);
-    const city = safeStr(req.body?.city || "", 60);
-
-    await ChampionshipPlayer.updateOne(
-      { userId },
-      { $set: { displayName, institution, city }, $setOnInsert: { createdAt: nowIso(), stats: { points: 0, matches: 0, wins: 0, losses: 0, avgScore: 0 } } },
-      { upsert: true }
-    );
-
-    return res.json({ ok: true });
-  } catch (e) {
-    console.error("❌ /championship/register:", e);
-    return res.status(500).json({ error: "REGISTER_FAILED" });
-  }
-});
-
-app.post("/justice-lab/championship/submit-match", requireAuth, async (req, res) => {
-  try {
-    if (!mongoReady()) return res.status(503).json({ error: "MONGO_NOT_READY" });
-
-    const stage = String(req.body?.stage || "QUALIF").toUpperCase();
-    const okStages = ["QUALIF", "QF", "SF", "FINAL"];
-    const stageSafe = okStages.includes(stage) ? stage : "QUALIF";
-
-    const matchId = safeStr(req.body?.matchId || makeMatchId(), 30);
-    const caseId = safeStr(req.body?.caseId || "", 80) || null;
-
-    const players = Array.isArray(req.body?.players) ? req.body.players.slice(0, 3) : [];
-    const scores = req.body?.scores && typeof req.body.scores === "object" ? req.body.scores : {};
-    const replayId = safeStr(req.body?.replayId || "", 40) || null;
-
-    // determine winner by points (or scoreGlobal)
-    let best = { userId: null, value: -1 };
-    for (const p of players) {
-      const uid = String(p?.userId || "").trim();
-      const s = scores?.[uid]?.scoreGlobal ?? scores?.[uid]?.score ?? 0;
-      const v = Number(s || 0);
-      if (v > best.value) best = { userId: uid, value: v };
-    }
-
-    const now = nowIso();
-
-    await ChampionshipMatch.updateOne(
-      { matchId },
-      {
-        $set: {
-          matchId,
-          stage: stageSafe,
-          caseId,
-          updatedAt: now,
-          players: players.map((p) => ({ userId: String(p.userId||"").trim(), displayName: safeStr(p.displayName||"Joueur", 60), role: safeStr(p.role||"", 20) })),
-          scores,
-          winnerUserId: best.userId,
-          replayId,
-          isPublic: stageSafe === "FINAL",
-        },
-        $setOnInsert: { createdAt: now },
-      },
-      { upsert: true }
-    );
-
-    // update stats
-    for (const p of players) {
-      const uid = String(p?.userId || "").trim();
-      if (!uid) continue;
-      const sg = Number(scores?.[uid]?.scoreGlobal ?? 0);
-      const pts = calcPointsFromScore(sg, stageSafe);
-      const isWin = uid === best.userId;
-      await upsertPlayerStats(uid, p?.displayName || "Joueur", pts, 1, isWin, sg);
-    }
-
-    // If replay exists, mark public if FINAL
-    if (replayId && stageSafe === "FINAL") {
-      await JusticeLabReplay.updateOne(
-        { replayId },
-        { $set: { isPublic: true, stage: "FINAL", matchId, updatedAt: now, expiresAt: new Date(nowMs() + 30 * 24 * 60 * 60 * 1000) } }
-      );
-    }
-
-    return res.json({ ok: true, matchId, winnerUserId: best.userId });
-  } catch (e) {
-    console.error("❌ /championship/submit-match:", e);
-    return res.status(500).json({ error: "SUBMIT_MATCH_FAILED" });
-  }
-});
-
-app.get("/justice-lab/championship/bracket", requireAuth, async (_req, res) => {
-  try {
-    if (!mongoReady()) return res.status(503).json({ error: "MONGO_NOT_READY" });
-
-    const matches = await ChampionshipMatch.find({}).sort({ updatedAt: -1 }).limit(200).lean();
-    const leaderboard = await ChampionshipPlayer.find({}).sort({ "stats.points": -1, "stats.avgScore": -1 }).limit(50).lean();
-
-    // Group by stage
-    const byStage = { QUALIF: [], QF: [], SF: [], FINAL: [] };
-    for (const m of matches) {
-      const st = String(m.stage || "QUALIF").toUpperCase();
-      if (!byStage[st]) byStage[st] = [];
-      byStage[st].push(m);
-    }
-
-    return res.json({ bracket: byStage, leaderboard });
-  } catch (e) {
-    console.error("❌ /championship/bracket:", e);
-    return res.status(500).json({ error: "BRACKET_FAILED" });
-  }
-});
-
-// Public final + replay pointer
-app.get("/justice-lab/championship/final/public", async (_req, res) => {
-  try {
-    if (!mongoReady()) return res.status(503).json({ error: "MONGO_NOT_READY" });
-
-    const finalMatch = await ChampionshipMatch.findOne({ stage: "FINAL" }).sort({ updatedAt: -1 }).lean();
-    if (!finalMatch) return res.json({ ok: true, final: null });
-
-    const replay = finalMatch.replayId ? await JusticeLabReplay.findOne({ replayId: finalMatch.replayId, isPublic: true }).lean() : null;
-
-    return res.json({
-      ok: true,
-      final: {
-        matchId: finalMatch.matchId,
-        updatedAt: finalMatch.updatedAt,
-        players: finalMatch.players,
-        scores: finalMatch.scores,
-        winnerUserId: finalMatch.winnerUserId,
-        replayId: replay?.replayId || null,
-      },
-    });
-  } catch (e) {
-    console.error("❌ /championship/final/public:", e);
-    return res.status(500).json({ error: "PUBLIC_FINAL_FAILED" });
-  }
-});
-
-/* =========================================================
-   ✅ REPLAY (public si isPublic=true)
-========================================================= */
-app.get("/justice-lab/replay/:replayId", async (req, res) => {
-  try {
-    if (!mongoReady()) return res.status(503).json({ error: "MONGO_NOT_READY" });
-
-    const replayId = safeStr(req.params?.replayId || "", 40);
-    const replay = await JusticeLabReplay.findOne({ replayId }).lean();
-    if (!replay) return res.status(404).json({ error: "REPLAY_NOT_FOUND" });
-    if (!replay.isPublic) return res.status(403).json({ error: "REPLAY_NOT_PUBLIC" });
-
-    return res.json({
-      replayId: replay.replayId,
-      matchId: replay.matchId || null,
-      stage: replay.stage || null,
-      meta: replay.meta || {},
-      createdAt: replay.createdAt,
-      updatedAt: replay.updatedAt,
-      events: Array.isArray(replay.events) ? replay.events.slice(0, 1500) : [],
-    });
-  } catch (e) {
-    console.error("❌ /replay/:replayId:", e);
-    return res.status(500).json({ error: "REPLAY_FAILED" });
-  }
-});
-
 /* =======================
    START SERVER
 ======================= */
-
-const PORT = Number(process.env.PORT || 10000);
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`🚀 DroitGPT API démarrée sur le port ${PORT}`);
+const port = process.env.PORT || 3000;
+app.listen(port, () => {
+  console.log(`🚀 DroitGPT API démarrée sur le port ${port}`);
 });
-
