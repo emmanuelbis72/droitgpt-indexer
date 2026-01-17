@@ -4,6 +4,8 @@
  * Mode : REST JSON (sans streaming SSE)
  * Optimisé pour réduire la latence réelle
  * + Justice Lab: generate-case + audience + score + appeal + instant-feedback (hybride)
+ * + NEW: IA-Juge (solo multi-rôles)
+ * + NEW: Rooms Co-op 2–3 joueurs (MVP mémoire + TTL)
  * ============================================
  */
 
@@ -17,7 +19,6 @@ import path from "path";
 import { fileURLToPath } from "url";
 import http from "http";
 import https from "https";
-import { Server as SocketIOServer } from "socket.io";
 
 // 🔐 Auth
 import authRoutes from "./auth/auth.routes.js";
@@ -32,14 +33,6 @@ const __dirname = path.dirname(__filename);
 config({ path: path.join(__dirname, ".env") });
 
 const app = express();
-
-// ✅ HTTP server + Socket.IO (JusticeLab V4 lobby temps réel)
-const server = http.createServer(app);
-const io = new SocketIOServer(server, {
-  cors: { origin: true, credentials: true },
-  transports: ["websocket", "polling"],
-});
-app.set("io", io);
 
 /* =======================
    Keep-alive agents (latence réseau ↓)
@@ -86,7 +79,6 @@ const openai = new OpenAI({
 
 /* =======================
    Mini cache embeddings (mémoire)
-   - réduit le temps sur questions répétées
 ======================= */
 const EMB_CACHE_TTL_MS = 1000 * 60 * 60; // 1h
 const embCache = new Map(); // key -> { vec, exp }
@@ -100,7 +92,6 @@ function getEmbCache(key) {
   }
   return it.vec;
 }
-
 function setEmbCache(key, vec) {
   if (embCache.size > 1500) {
     let n = 0;
@@ -126,7 +117,35 @@ function isValidMessage(m) {
   );
 }
 
-function buildSystemPrompt(lang = "fr") {
+function clamp(n, min, max) {
+  return Math.max(min, Math.min(max, n));
+}
+
+function cleanDocText(input) {
+  let t = String(input || "");
+  t = t.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  t = t.replace(/\uFFFD/g, "");
+  t = t.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "");
+  t = t.replace(/[ \u00A0]+/g, " ");
+  t = t.replace(/[ \t]+\n/g, "\n");
+  t = t.replace(/\n{4,}/g, "\n\n\n");
+  return t.trim();
+}
+
+function clampDocForPrompt(docText) {
+  const max = Number(process.env.DOC_MAX_CHARS || 45000);
+  const s = cleanDocText(docText);
+  if (!s) return "";
+  if (s.length <= max) return s;
+
+  const headLen = Math.floor(max * 0.7);
+  const tailLen = max - headLen;
+  const head = s.slice(0, headLen);
+  const tail = s.slice(-tailLen);
+  return `${head}\n\n[...DOCUMENT TRONQUÉ POUR LIMITES TECHNIQUES...]\n\n${tail}`;
+}
+
+function buildSystemPrompt(lang = "fr", hasDocument = false) {
   if (lang === "en") {
     return `
 You are DroitGPT, a professional Congolese legal assistant.
@@ -139,6 +158,11 @@ Structure:
 - Practical application
 - Remedies and steps
 - Caution points
+${
+  hasDocument
+    ? "\nIMPORTANT: When a document is provided, answer strictly based on it. If not found in the document, say so clearly.\n"
+    : ""
+}
 `;
   }
 
@@ -157,13 +181,23 @@ Structure obligatoire :
 <h3>Application au cas concret</h3>
 <h3>Recours et démarches possibles</h3>
 <h3>Points de vigilance</h3>
+
+${
+  hasDocument
+    ? `
+IMPORTANT (MODE DOCUMENT) :
+- Le document fourni est la source PRIORITAIRE.
+- Ne pas inventer.
+- Si une information n’apparaît pas dans le document, dis-le explicitement.
+- Quand possible, cite des éléments du document (ex: "Selon la section...") sans inventer de pagination si inconnue.
+`
+    : ""
+}
 `;
 }
 
 /**
  * Prompt système pour le scoring Justice Lab
- * - Retour JSON strict (pas HTML)
- * - Évaluation type magistrature / pratique congolaise
  */
 function buildJusticeLabSystemPrompt() {
   return `
@@ -201,7 +235,6 @@ Règles:
 `;
 }
 
-/** ✅ NOUVEAU : Prompt système pour génération de dossier (caseData) */
 function buildJusticeLabGenerateCaseSystemPrompt() {
   return `
 Tu es un générateur de DOSSIERS JUDICIAIRES pédagogiques pour la RDC, destinés à la formation (magistrats, juges, parquet, avocats).
@@ -231,7 +264,37 @@ function safeStr(s, max = 8000) {
 function normalizeRole(role) {
   const r = String(role || "").toLowerCase();
   if (r.includes("proc")) return "Procureur";
-  if (r.includes("avoc")) return "Avocat";
+  if (r.includes("greff")) return "Greffier";
+
+  // Avocats (2 côtés)
+  if (r.includes("avoc")) {
+    const isDefense =
+      r.includes("def") ||
+      r.includes("déf") ||
+      r.includes("defense") ||
+      r.includes("défense") ||
+      r.includes("accus") ||
+      r.includes("prevenu") ||
+      r.includes("prévenu");
+
+    const isCivil =
+      r.includes("civ") ||
+      r.includes("partie") ||
+      r.includes("plaign") ||
+      r.includes("victim") ||
+      r.includes("demande") ||
+      r.includes("requérant") ||
+      r.includes("requérant") ||
+      r.includes("requete") ||
+      r.includes("requête");
+
+    if (isDefense && !isCivil) return "Avocat Défense";
+    if (isCivil && !isDefense) return "Avocat Partie civile";
+    // défaut: défense
+    return "Avocat Défense";
+  }
+
+  // défaut: juge
   return "Juge";
 }
 
@@ -249,7 +312,6 @@ function buildPiecesCatalog(caseData, max = 12) {
     id: normalizePieceId(p, idx),
     title: normalizePieceTitle(p, idx),
     type: String(p?.type || p?.kind || p?.categorie || ""),
-    // champs “pédago”
     reliability: typeof p?.reliability === "number" ? p.reliability : undefined,
     isLate: Boolean(p?.isLate || p?.late),
   }));
@@ -264,23 +326,32 @@ function sanitizeCaseData(input, fallback = {}) {
     niveau: safeStr(cd.niveau || fallback.niveau || "Intermédiaire", 24),
     titre: safeStr(cd.titre || cd.title || fallback.titre || "Dossier simulé (RDC)", 140),
     resume: safeStr(cd.resume || cd.summary || fallback.resume || "", 1800),
-    parties: cd.parties && typeof cd.parties === "object" ? cd.parties : (fallback.parties || {}),
+    parties: cd.parties && typeof cd.parties === "object" ? cd.parties : fallback.parties || {},
     qualificationInitiale: safeStr(cd.qualificationInitiale || cd.qualification || fallback.qualificationInitiale || "", 500),
-    pieces: Array.isArray(cd.pieces) ? cd.pieces.slice(0, 10).map((p, idx) => ({
-      id: normalizePieceId(p, idx),
-      title: safeStr(p?.title || p?.titre || `Pièce ${idx + 1}`, 140),
-      type: safeStr(p?.type || p?.kind || "", 40),
-      isLate: Boolean(p?.isLate || p?.late),
-      // optionnel, pas obligatoire
-      reliability: typeof p?.reliability === "number" ? p.reliability : undefined,
-    })) : (Array.isArray(fallback.pieces) ? fallback.pieces : []),
-    audienceSeed: Array.isArray(cd.audienceSeed) ? cd.audienceSeed.slice(0, 14).map((s) => safeStr(s, 220)) : (Array.isArray(fallback.audienceSeed) ? fallback.audienceSeed : []),
-    risquesProceduraux: Array.isArray(cd.risquesProceduraux) ? cd.risquesProceduraux.slice(0, 10).map((s) => safeStr(s, 220)) : (Array.isArray(fallback.risquesProceduraux) ? fallback.risquesProceduraux : []),
-    // meta optionnel
-    meta: cd.meta && typeof cd.meta === "object" ? cd.meta : (fallback.meta || {}),
+    pieces: Array.isArray(cd.pieces)
+      ? cd.pieces.slice(0, 10).map((p, idx) => ({
+          id: normalizePieceId(p, idx),
+          title: safeStr(p?.title || p?.titre || `Pièce ${idx + 1}`, 140),
+          type: safeStr(p?.type || p?.kind || "", 40),
+          isLate: Boolean(p?.isLate || p?.late),
+          reliability: typeof p?.reliability === "number" ? p.reliability : undefined,
+        }))
+      : Array.isArray(fallback.pieces)
+      ? fallback.pieces
+      : [],
+    audienceSeed: Array.isArray(cd.audienceSeed)
+      ? cd.audienceSeed.slice(0, 14).map((s) => safeStr(s, 220))
+      : Array.isArray(fallback.audienceSeed)
+      ? fallback.audienceSeed
+      : [],
+    risquesProceduraux: Array.isArray(cd.risquesProceduraux)
+      ? cd.risquesProceduraux.slice(0, 10).map((s) => safeStr(s, 220))
+      : Array.isArray(fallback.risquesProceduraux)
+      ? fallback.risquesProceduraux
+      : [],
+    meta: cd.meta && typeof cd.meta === "object" ? cd.meta : fallback.meta || {},
   };
 
-  // Normaliser parties (minimum)
   if (!out.parties || typeof out.parties !== "object") out.parties = {};
   if (!out.parties.demandeur && cd.parties?.demandeur) out.parties.demandeur = cd.parties.demandeur;
   if (!out.parties.defendeur && cd.parties?.defendeur) out.parties.defendeur = cd.parties.defendeur;
@@ -292,9 +363,7 @@ function sanitizeCaseData(input, fallback = {}) {
    Fallbacks Justice Lab (déjà présents)
 ======================= */
 function fallbackAudienceFromTemplates(caseData, role = "Juge") {
-  const templates = Array.isArray(caseData?.objectionTemplates)
-    ? caseData.objectionTemplates
-    : [];
+  const templates = Array.isArray(caseData?.objectionTemplates) ? caseData.objectionTemplates : [];
 
   const obs = templates.slice(0, 3).map((t, i) => ({
     id: t.id || `OBJ${i + 1}`,
@@ -302,32 +371,11 @@ function fallbackAudienceFromTemplates(caseData, role = "Juge") {
     title: t.title || "Objection",
     statement: t.statement || "",
     options: ["Accueillir", "Rejeter", "Demander précision"],
-    bestChoiceByRole: {
-      Juge: "Demander précision",
-      Procureur: "Rejeter",
-      Avocat: "Accueillir",
-    },
+    bestChoiceByRole: { Juge: "Demander précision", Procureur: "Rejeter", Avocat: "Accueillir" },
     effects: {
-      onAccueillir: {
-        excludePieceIds: [],
-        admitLatePieceIds: [],
-        why: "Mesure conservatoire (fallback).",
-        risk: { dueProcessBonus: 1, appealRiskPenalty: 0 },
-      },
-      onRejeter: {
-        excludePieceIds: [],
-        admitLatePieceIds: [],
-        why: "Objection écartée (fallback).",
-        risk: { dueProcessBonus: 0, appealRiskPenalty: 1 },
-      },
-      onDemander: {
-        clarification: {
-          label: "Clarification demandée",
-          detail: "La Cour demande des précisions avant de statuer.",
-        },
-        why: "Clarification (fallback).",
-        risk: { dueProcessBonus: 2, appealRiskPenalty: 0 },
-      },
+      onAccueillir: { excludePieceIds: [], admitLatePieceIds: [], why: "Mesure conservatoire (fallback).", risk: { dueProcessBonus: 1, appealRiskPenalty: 0 } },
+      onRejeter: { excludePieceIds: [], admitLatePieceIds: [], why: "Objection écartée (fallback).", risk: { dueProcessBonus: 0, appealRiskPenalty: 1 } },
+      onDemander: { clarification: { label: "Clarification demandée", detail: "La Cour demande des précisions avant de statuer." }, why: "Clarification (fallback).", risk: { dueProcessBonus: 2, appealRiskPenalty: 0 } },
     },
   }));
 
@@ -340,12 +388,7 @@ function fallbackAudienceFromTemplates(caseData, role = "Juge") {
       city: "RDC",
       date: new Date().toISOString().slice(0, 10),
       formation: "Siège",
-      roles: {
-        juge: "Le Tribunal",
-        procureur: "Ministère public",
-        avocat: "Défense",
-        greffier: "Greffe",
-      },
+      roles: { juge: "Le Tribunal", procureur: "Ministère public", avocat: "Défense", greffier: "Greffe" },
       vibe: "Pédagogique, dynamique.",
     },
     phases: [
@@ -356,11 +399,11 @@ function fallbackAudienceFromTemplates(caseData, role = "Juge") {
     ],
     piecesCatalog,
     turns: [
-      { speaker: "Greffier", text: "Affaire appelée. Les parties sont présentes. La Cour prend place." },
-      { speaker: "Juge", text: `L'audience est ouverte. Rôle du joueur: ${role}. Les parties confirment leurs identités.` },
-      { speaker: "Procureur", text: "Le ministère public précise l'objet de l'audience et annonce un point de procédure." },
-      { speaker: "Avocat", text: "La défense répond, conteste un élément et soulève une objection." },
-      { speaker: "Juge", text: "La Cour rappelle le contradictoire et invite à produire/clarifier les pièces pertinentes." },
+      { speaker: "Greffier", text: "Affaire appelée. Les parties sont présentes. La Cour prend place.", phase: "OPENING" },
+      { speaker: "Juge", text: `L'audience est ouverte. Rôle du joueur: ${role}. Les parties confirment leurs identités.`, phase: "OPENING" },
+      { speaker: "Procureur", text: "Le ministère public précise l'objet de l'audience et annonce un point de procédure.", phase: "DEBATE" },
+      { speaker: "Avocat", text: "La défense répond, conteste un élément et soulève une objection.", phase: "OBJECTIONS" },
+      { speaker: "Juge", text: "La Cour rappelle le contradictoire et invite à produire/clarifier les pièces pertinentes.", phase: "OBJECTIONS" },
     ],
     objections: obs.length
       ? obs
@@ -375,10 +418,7 @@ function fallbackAudienceFromTemplates(caseData, role = "Juge") {
             effects: {
               onAccueillir: { risk: { dueProcessBonus: 1, appealRiskPenalty: 0 } },
               onRejeter: { risk: { dueProcessBonus: 0, appealRiskPenalty: 1 } },
-              onDemander: {
-                clarification: { label: "Clarification demandée", detail: "Préciser les arguments et pièces." },
-                risk: { dueProcessBonus: 2, appealRiskPenalty: 0 },
-              },
+              onDemander: { clarification: { label: "Clarification demandée", detail: "Préciser les arguments et pièces." }, risk: { dueProcessBonus: 2, appealRiskPenalty: 0 } },
             },
           },
         ],
@@ -397,16 +437,10 @@ function fallbackAppealFromScored(scored) {
 
   const grounds =
     decision === "ANNULATION"
-      ? [
-          "Atteinte substantielle aux garanties procédurales (simulation).",
-          ...(critical.slice(0, 2).map((c) => c.label)),
-        ]
+      ? ["Atteinte substantielle aux garanties procédurales (simulation).", ...critical.slice(0, 2).map((c) => c.label)]
       : decision === "CONFIRMATION"
       ? ["Motivation suffisante et procédure globalement régulière (simulation)."]
-      : [
-          "Dossier à compléter / points à clarifier avant décision définitive (simulation).",
-          ...(warnings.slice(0, 2).map((w) => w.label)),
-        ];
+      : ["Dossier à compléter / points à clarifier avant décision définitive (simulation).", ...warnings.slice(0, 2).map((w) => w.label)];
 
   const dispositif =
     decision === "ANNULATION"
@@ -437,16 +471,16 @@ app.get("/", (_req, res) => {
 });
 
 /* =======================
-   /ASK — ENDPOINT UNIQUE
+   /ASK — ENDPOINT UNIQUE (public)
 ======================= */
-app.post("/ask", requireAuth, async (req, res) => {
+app.post("/ask", async (req, res) => {
   const t0 = Date.now();
   let embMs = 0;
   let qdrantMs = 0;
   let openaiMs = 0;
 
   try {
-    const { messages, lang = "fr" } = req.body || {};
+    const { messages, lang = "fr", documentText = null, documentTitle = null } = req.body || {};
 
     if (!Array.isArray(messages) || !messages.every(isValidMessage)) {
       return res.status(400).json({ error: "Format des messages invalide." });
@@ -454,7 +488,10 @@ app.post("/ask", requireAuth, async (req, res) => {
 
     const lastUserMessage = messages[messages.length - 1].text.trim();
 
-    /* 1) Embedding (avec cache) */
+    const hasDocument = typeof documentText === "string" && documentText.trim().length >= 40;
+    const docTitleSafe = safeStr(documentTitle || "Document", 140);
+    const docTextClamped = hasDocument ? clampDocForPrompt(documentText) : "";
+
     const tEmb0 = Date.now();
     const cacheKey = `v1:${lastUserMessage.toLowerCase()}`;
     let embeddingVector = getEmbCache(cacheKey);
@@ -473,14 +510,17 @@ app.post("/ask", requireAuth, async (req, res) => {
     }
     embMs = Date.now() - tEmb0;
 
-    /* 2) Qdrant (avec timeout soft) */
     const tQ0 = Date.now();
     let searchResult = [];
     try {
+      const qLimit = hasDocument
+        ? Number(process.env.QDRANT_LIMIT_DOC || 2)
+        : Number(process.env.QDRANT_LIMIT || 3);
+
       searchResult = await withTimeout(
         qdrant.search(process.env.QDRANT_COLLECTION || "documents", {
           vector: embeddingVector,
-          limit: Number(process.env.QDRANT_LIMIT || 3),
+          limit: qLimit,
           with_payload: true,
         }),
         Number(process.env.QDRANT_TIMEOUT_MS || 2500),
@@ -498,62 +538,58 @@ app.post("/ask", requireAuth, async (req, res) => {
       .join("\n");
 
     const MAX_CONTEXT_CHARS = Number(process.env.MAX_CONTEXT_CHARS || 6000);
-    if (context.length > MAX_CONTEXT_CHARS) {
-      context = context.slice(0, MAX_CONTEXT_CHARS);
-    }
+    if (context.length > MAX_CONTEXT_CHARS) context = context.slice(0, MAX_CONTEXT_CHARS);
 
-    /* 3) Prompt */
     const historyWindow = Number(process.env.HISTORY_WINDOW || 4);
+
     const chatHistory = [
-      { role: "system", content: buildSystemPrompt(lang) },
-      ...(context
-        ? [{ role: "user", content: `Contexte juridique pertinent :\n${context}` }]
+      { role: "system", content: buildSystemPrompt(lang, hasDocument) },
+
+      ...(hasDocument
+        ? [{
+            role: "user",
+            content:
+              `DOCUMENT FOURNI (${docTitleSafe}). Utilise-le comme source prioritaire.\n\n` +
+              `--- DÉBUT DOCUMENT ---\n${docTextClamped}\n--- FIN DOCUMENT ---`,
+          }]
         : []),
+
+      ...(context
+        ? [{ role: "user", content: `Contexte juridique pertinent (base DroitGPT) :\n${context}` }]
+        : []),
+
       ...messages.slice(-historyWindow).map((m) => ({
         role: m.from === "user" ? "user" : "assistant",
         content: m.text,
       })),
     ];
 
-    /* 4) OpenAI chat */
     const tA0 = Date.now();
     const completion = await openai.chat.completions.create({
       model: process.env.CHAT_MODEL || "gpt-4o-mini",
       messages: chatHistory,
       temperature: Number(process.env.TEMPERATURE || 0.3),
-      max_tokens: Number(process.env.MAX_TOKENS || 550),
+      max_tokens: Number(process.env.MAX_TOKENS || 650),
     });
     openaiMs = Date.now() - tA0;
 
-    const answer =
-      completion.choices?.[0]?.message?.content || "<p>❌ Réponse vide.</p>";
+    const answer = completion.choices?.[0]?.message?.content || "<p>❌ Réponse vide.</p>";
 
     const totalMs = Date.now() - t0;
     res.setHeader("X-Ask-Time-Ms", String(totalMs));
-    res.setHeader(
-      "X-Ask-Breakdown",
-      JSON.stringify({ embMs, qdrantMs, openaiMs, totalMs })
-    );
-    console.log("⏱️ /ask timings:", { embMs, qdrantMs, openaiMs, totalMs });
+    res.setHeader("X-Ask-Has-Document", hasDocument ? "1" : "0");
+    res.setHeader("X-Ask-Breakdown", JSON.stringify({ embMs, qdrantMs, openaiMs, totalMs, hasDocument }));
 
     return res.json({ answer });
   } catch (error) {
     const totalMs = Date.now() - t0;
     console.error("❌ Erreur /ask :", error);
-    console.log("⏱️ /ask timings (failed):", { embMs, qdrantMs, openaiMs, totalMs });
     return res.status(500).json({ error: "Erreur serveur interne." });
   }
 });
 
 /* =========================================================
-   ✅ JUSTICE LAB — GÉNÉRATEUR IA DE DOSSIERS (caseData)
-   POST /justice-lab/generate-case
-   Body:
-   - mode="full"  : génère le dossier complet
-   - mode="enrich": enrichit un draft existant
-   Exemples:
-   { mode:"full", domaine:"Foncier", level:"Intermédiaire", seed:"123", lang:"fr" }
-   { mode:"enrich", domaine:"Pénal", level:"Avancé", draft:{...}, lang:"fr" }
+   JUSTICE LAB — GÉNÉRATION DOSSIER
 ========================================================= */
 app.post("/justice-lab/generate-case", requireAuth, async (req, res) => {
   try {
@@ -563,6 +599,8 @@ app.post("/justice-lab/generate-case", requireAuth, async (req, res) => {
       level = "Intermédiaire",
       seed = String(Date.now()),
       lang = "fr",
+      // ✅ prompt utilisateur (guide la génération)
+      prompt = "",
       draft = null,
       templateId = null,
       caseSeed = null,
@@ -583,6 +621,8 @@ app.post("/justice-lab/generate-case", requireAuth, async (req, res) => {
 
     const system = buildJusticeLabGenerateCaseSystemPrompt().trim();
 
+    const userPrompt = safeStr(String(prompt || ""), 2200);
+
     const userFull = `
 PARAMÈTRES:
 - Mode: full
@@ -590,6 +630,9 @@ PARAMÈTRES:
 - Niveau: ${level}
 - Langue: ${lang}
 - Seed: ${metaHints.seed}
+
+CONSINGE UTILISATEUR (si présente) :
+${userPrompt ? userPrompt : "(aucune consigne spécifique)"}
 
 Tu dois retourner EXACTEMENT un JSON au format suivant:
 {
@@ -605,11 +648,10 @@ Tu dois retourner EXACTEMENT un JSON au format suivant:
   },
   "qualificationInitiale": string,
   "pieces": [
-    { "id": "P1", "title": string, "type": string, "isLate": boolean, "reliability": number },
-    { "id": "P2", "title": string, "type": string, "isLate": boolean, "reliability": number }
+    { "id": "P1", "title": string, "type": string, "isLate": boolean, "reliability": number }
   ],
-  "audienceSeed": [ string, string ],
-  "risquesProceduraux": [ string, string ],
+  "audienceSeed": [ string ],
+  "risquesProceduraux": [ string ],
   "meta": {
     "templateId": string,
     "seed": string,
@@ -621,12 +663,11 @@ Tu dois retourner EXACTEMENT un JSON au format suivant:
 }
 
 Contraintes:
-- pieces: 5 à 8 pièces (P1..P8), toutes cohérentes avec les faits.
-- Ajoute au moins 1 pièce tardive (isLate=true) et 1 pièce “contestable” (reliability plus faible).
-- resume: 5 à 10 lignes, très clair, contexte RDC.
-- audienceSeed: 6 à 10 “points de débat” courts (1 phrase chacun).
+- pieces: 5 à 8 pièces (P1..P8), cohérentes.
+- Ajoute au moins 1 pièce tardive (isLate=true) et 1 pièce contestable (reliability faible).
+- resume: 5 à 10 lignes, contexte RDC.
+- audienceSeed: 6 à 10 points.
 - risquesProceduraux: 4 à 7 risques.
-- meta.*: remplis au mieux (city/tribunal/chambre si possible).
 - Ne mentionne pas d'articles numérotés.
 `.trim();
 
@@ -638,16 +679,18 @@ PARAMÈTRES:
 - Langue: ${lang}
 - Seed: ${metaHints.seed}
 
-Voici un DRAFT (déjà jouable). Tu dois l'enrichir sans casser la structure.
+CONSINGE UTILISATEUR (si présente) :
+${userPrompt ? userPrompt : "(aucune consigne spécifique)"}
+
 DRAFT:
 ${safeStr(JSON.stringify(draft || {}, null, 2), 9000)}
 
 Règles:
-- Retourne EXACTEMENT un JSON qui ressemble à caseData complet.
-- Conserve les IDs des pièces déjà présentes (P1..), tu peux ajouter P6..P8 si besoin.
-- Améliore : résumé, audienceSeed, risques, qualité des pièces (titres/types), parties, qualificationInitiale.
+- Retourne EXACTEMENT un JSON.
+- Conserve les IDs des pièces déjà présentes.
+- Améliore résumé, audienceSeed, risques, pièces, parties, qualificationInitiale.
 - Ne mets pas d'articles numérotés.
-- Ne change pas caseId si déjà présent.
+- Ne change pas caseId si présent.
 `.trim();
 
     const completion = await openai.chat.completions.create({
@@ -667,8 +710,7 @@ Règles:
     try {
       parsed = JSON.parse(raw);
     } catch {
-      // fallback: si enrich => draft, sinon objet minimal
-      const fallback = safeMode === "enrich" ? (draft || {}) : {};
+      const fallback = safeMode === "enrich" ? draft || {} : {};
       const caseData = sanitizeCaseData(fallback, {
         domaine,
         niveau: level,
@@ -677,12 +719,7 @@ Règles:
       return res.json({ caseData });
     }
 
-    // Injecter meta hints si manquants + sanitization
-    const fallbackBase =
-      safeMode === "enrich"
-        ? (draft && typeof draft === "object" ? draft : {})
-        : {};
-
+    const fallbackBase = safeMode === "enrich" ? (draft && typeof draft === "object" ? draft : {}) : {};
     const sanitized = sanitizeCaseData(parsed, {
       ...fallbackBase,
       domaine,
@@ -690,7 +727,6 @@ Règles:
       meta: { ...metaHints, generatedAt: new Date().toISOString() },
     });
 
-    // S’assurer meta
     sanitized.meta = {
       ...(sanitized.meta || {}),
       templateId: sanitized.meta?.templateId || metaHints.templateId || "AI_FULL",
@@ -701,11 +737,10 @@ Règles:
       generatedAt: sanitized.meta?.generatedAt || new Date().toISOString(),
     };
 
-    // Retour compatible front: {caseData}
     return res.json({ caseData: sanitized });
   } catch (e) {
     console.error("❌ /justice-lab/generate-case error:", e);
-    const fallback = req.body?.mode === "enrich" ? (req.body?.draft || {}) : {};
+    const fallback = req.body?.mode === "enrich" ? req.body?.draft || {} : {};
     const caseData = sanitizeCaseData(fallback, {
       domaine: req.body?.domaine || "Pénal",
       niveau: req.body?.level || "Intermédiaire",
@@ -716,24 +751,47 @@ Règles:
 });
 
 /* =========================================================
-   ✅ JUSTICE LAB — AUDIENCE IA (ULTRA PRO)
-   POST /justice-lab/audience
-   Body accepté: { caseData, run } OU { caseData, runData }
+   JUSTICE LAB — AUDIENCE IA
 ========================================================= */
 app.post("/justice-lab/audience", requireAuth, async (req, res) => {
   try {
-    const { caseData } = req.body || {};
-    const run = req.body?.run || req.body?.runData; // compat
+    // ✅ Compat: accepte {caseData, run} OU {caseData, runData} OU payload léger
+    let caseData = req.body?.caseData || null;
+    let run = req.body?.run || req.body?.runData || null;
 
-    if (!caseData || !run) {
-      return res.status(400).json({ error: "caseData et run (ou runData) sont requis." });
+    if (!caseData) {
+      // payload léger (fallback) — évite 400 et permet au front de récupérer une audience
+      const b = req.body || {};
+      caseData = {
+        caseId: b.caseId || b.case_id || "DOSSIER",
+        domaine: b.domaine || b.matiere || "RDC",
+        niveau: b.niveau || b.difficulty || "Intermédiaire",
+        titre: b.titre || b.title || "Audience simulée",
+        resume: b.resume || b.facts || b.brief || "",
+        parties: b.parties || {},
+        pieces: Array.isArray(b.pieces) ? b.pieces : [],
+        audienceSeed: Array.isArray(b.audienceSeed) ? b.audienceSeed : [],
+      };
+    }
+
+    if (!run) {
+      const b = req.body || {};
+      run = {
+        eventCard: b.eventCard || null,
+        answers: {
+          role: b.role || "Juge",
+          qualification: b.qualification || "",
+          procedureChoice: b.procedureChoice || null,
+          procedureJustification: b.procedureJustification || "",
+          city: b.city || b.ville || "RDC",
+          court: b.court || b.juridiction || "Tribunal (simulation)",
+        },
+      };
     }
 
     const role = normalizeRole(run?.answers?.role || "Juge");
-
     const piecesCatalog = buildPiecesCatalog(caseData, 12);
 
-    // Petites aides pour ancrer l'IA dans des pièces réelles
     const pieceIds = piecesCatalog.map((p) => p.id);
     const latePieceIds = piecesCatalog.filter((p) => p.isLate).map((p) => p.id);
 
@@ -746,13 +804,10 @@ app.post("/justice-lab/audience", requireAuth, async (req, res) => {
         resume: safeStr(caseData.resume || caseData.brief, 1500),
         roleJoueur: role,
         ville: run?.answers?.city || run?.answers?.ville || "RDC",
-        juridiction:
-          run?.answers?.court ||
-          run?.answers?.juridiction ||
-          "Tribunal (simulation)",
+        juridiction: run?.answers?.court || run?.answers?.juridiction || "Tribunal (simulation)",
       },
       parties: caseData.parties,
-      piecesCatalog, // IMPORTANT : l'IA doit référencer ces IDs
+      piecesCatalog,
       pieceIds,
       latePieceIds,
       audienceSeed: Array.isArray(caseData.audienceSeed) ? caseData.audienceSeed.slice(0, 12) : [],
@@ -764,37 +819,64 @@ app.post("/justice-lab/audience", requireAuth, async (req, res) => {
       },
     };
 
+        const audienceStyle = String(req.body?.audienceStyle || req.body?.data?.audienceStyle || "STANDARD").toUpperCase();
+    const ultraPro = audienceStyle === "ULTRA_PRO";
+
+    const minTurns = clamp(
+      Number(req.body?.minTurns || (ultraPro ? 55 : 40)),
+      18,
+      120
+    );
+    const minObjections = clamp(
+      Number(req.body?.minObjections || (ultraPro ? 10 : 8)),
+      2,
+      25
+    );
+    const includeIncidents = req.body?.includeIncidents !== false; // default true
+    const includePiecesLinks = req.body?.includePiecesLinks !== false; // default true
+
     const system = `
-Tu es un "Moteur d'audience judiciaire" (RDC) pour un jeu pédagogique de magistrature.
-Objectif : produire une audience TRÈS réaliste, professionnelle, détaillée, mais rythmée et agréable.
+Tu es un "Moteur d'audience judiciaire" (RDC) pour un jeu de FORMATION CONTINUE (magistrats, parquet, avocats, greffe).
+Objectif : produire une audience TRÈS réaliste, professionnelle, pratico-pratique, cohérente avec un dossier RDC.
 
-Règles strictes :
-- Tu retournes UNIQUEMENT un JSON valide (aucun texte autour).
-- Le style doit ressembler à une vraie audience: appel de la cause, police d'audience, contradictoire, relances, demandes de précision, rythme.
-- Pas d'articles inventés (pas de numéros d'articles). Tu peux dire "selon les règles de procédure" ou "au regard du contradictoire".
-- IMPORTANT : tu dois référencer les pièces UNIQUEMENT via les IDs fournis dans piecesCatalog (ex: "P3"), jamais inventer d'autres IDs.
-- "options" doit être EXACTEMENT ["Accueillir","Rejeter","Demander précision"].
-- Les objections doivent être exploitables par un moteur de jeu :
-    objection.bestChoiceByRole = { "Juge": "...", "Procureur":"...", "Avocat":"..." }
-    objection.effects = { onAccueillir, onRejeter, onDemander }
-    Chaque effect peut contenir:
-      - excludePieceIds: [IDs existants]
-      - admitLatePieceIds: [IDs existants]
-      - addTask: { type:"instruction"|"production"|"delai"|"renvoi", label, detail }
-      - clarification: { label, detail }
-      - why: string
-      - risk: { dueProcessBonus:number, appealRiskPenalty:number }
+STYLE: formel, vocabulaire judiciaire RDC, phrases courtes, rythme d'audience.
 
-Qualité / Fun :
-- Ajoute 1 "moment d'audience" léger (ex: tension contrôlée, une contradiction qui ressort, une relance vive du juge), sans caricature.
-- Le juge doit "piloter" : rappeler l'ordre, cadrer, reformuler, imposer le contradictoire.
+PARAMÈTRES:
+- audienceStyle: ${audienceStyle}
+- minTurns: ${minTurns} (obligatoire)
+- minObjections: ${minObjections} (obligatoire)
+- includeIncidents: ${includeIncidents}
+- includePiecesLinks: ${includePiecesLinks}
+
+RÈGLES STRICTES (NON NÉGOCIABLES) :
+1) Tu retournes UNIQUEMENT un JSON valide (aucun texte autour).
+2) Pas d'articles numérotés inventés. Utilise des principes: contradictoire, droits de la défense, compétence, recevabilité, motivation.
+3) Tu dois référencer les pièces UNIQUEMENT via les IDs dans piecesCatalog (ex: "P3").
+4) turns.length >= minTurns ; objections.length >= minObjections.
+5) Chaque objection:
+   - options EXACTES: ["Accueillir","Rejeter","Demander précision"]
+   - bestChoiceByRole.Juge doit être une des 3 options
+   - doit référencer au moins 1 pièce via pieceIds (dans statement et/ou dans effects)
+   - effects doit contenir onAccueillir/onRejeter/onDemander avec au minimum excludePieceIds/admitLatePieceIds (tableaux) + why (texte court).
+6) Si includeIncidents=true => au moins 2 incidents procéduraux (tardiveté, compétence, nullité, renvoi, communication de pièces, témoin absent, jonction/disjonction…).
+7) Progression pédagogique: le juge pose des questions, recadre, protège le contradictoire, tranche les incidents, mène au fond, conclut et met en délibéré.
+8) Tu dois mentionner explicitement au moins 6 pièces dans les turns (si le dossier en contient moins, mentionne toutes).
+
+SPÉCIAL "ULTRA_PRO":
+- Si audienceStyle = ULTRA_PRO, phases OBLIGATOIRES = 5 :
+  1) OUVERTURE (police d'audience, appel de la cause, vérification comparution/citations)
+  2) INCIDENTS (exceptions/renvoi/communication pièces)
+  3) FOND (débat factuel + discussion de pièces + questions du siège)
+  4) CONCLUSIONS (positions finales / réquisitions / plaidoiries)
+  5) CLOTURE (clôture des débats + mise en délibéré + annonce date)
+- Chaque phase doit être clairement identifiable dans phases[] et utilisée dans turns[].phase.
 `.trim();
 
     const user = `
 INPUT:
 ${JSON.stringify(payload, null, 2)}
 
-FORMAT JSON EXACT attendu :
+FORMAT JSON attendu (retourne EXACTEMENT ce JSON, sans texte autour) :
 {
   "scene": {
     "court": string,
@@ -802,36 +884,41 @@ FORMAT JSON EXACT attendu :
     "city": string,
     "date": "YYYY-MM-DD",
     "formation": string,
-    "roles": { "juge": string, "procureur": string, "avocat": string, "greffier": string },
+    "roles": { "juge": string, "procureur": string, "avocatDefense": string, "avocatPartieCivile": string, "greffier": string },
     "vibe": string
   },
   "phases": [
-    { "id": "OPENING"|"DEBATE"|"OBJECTIONS"|"CLOSING", "title": string, "objective": string }
+    { "id": string, "title": string, "objective": string }
   ],
   "turns": [
-    { "speaker": "Greffier"|"Juge"|"Procureur"|"Avocat", "text": string, "phase": "OPENING"|"DEBATE"|"OBJECTIONS"|"CLOSING" }
+    {
+      "speaker": "Greffier"|"Juge"|"Procureur"|"Avocat Défense"|"Avocat Partie civile",
+      "text": string,
+      "phase": string,
+      "pieceRefs": [ "P1", "P2" ]
+    }
   ],
   "objections": [
     {
       "id": "OBJ1",
-      "by": "Procureur"|"Avocat",
+      "by": "Procureur"|"Avocat Défense"|"Avocat Partie civile",
       "title": string,
       "statement": string,
       "options": ["Accueillir","Rejeter","Demander précision"],
-      "bestChoiceByRole": { "Juge": "Accueillir"|"Rejeter"|"Demander précision", "Procureur": "...", "Avocat": "..." },
+      "bestChoiceByRole": { "Juge": "Accueillir"|"Rejeter"|"Demander précision", "Procureur": string, "Avocat Défense": string, "Avocat Partie civile": string },
       "effects": {
-        "onAccueillir": { "excludePieceIds": [string], "admitLatePieceIds": [string], "addTask": { "type": string, "label": string, "detail": string }, "clarification": { "label": string, "detail": string }, "why": string, "risk": { "dueProcessBonus": number, "appealRiskPenalty": number } },
-        "onRejeter":    { "excludePieceIds": [string], "admitLatePieceIds": [string], "addTask": { "type": string, "label": string, "detail": string }, "clarification": { "label": string, "detail": string }, "why": string, "risk": { "dueProcessBonus": number, "appealRiskPenalty": number } },
-        "onDemander":   { "excludePieceIds": [string], "admitLatePieceIds": [string], "addTask": { "type": string, "label": string, "detail": string }, "clarification": { "label": string, "detail": string }, "why": string, "risk": { "dueProcessBonus": number, "appealRiskPenalty": number } }
+        "onAccueillir": { "excludePieceIds": [string], "admitLatePieceIds": [string], "why": string },
+        "onRejeter": { "excludePieceIds": [string], "admitLatePieceIds": [string], "why": string },
+        "onDemander": { "excludePieceIds": [string], "admitLatePieceIds": [string], "why": string, "clarification": { "label": string, "detail": string } }
       }
     }
   ]
 }
 
-Contraintes de volume:
-- turns : 10 à 16 (court mais vivant, 1 à 3 phrases par turn).
-- objections : 3 à 5 (variées: recevabilité, contradictoire, tardiveté, authenticité, renvoi, compétence selon le cas).
-- Au moins 1 objection doit viser une pièce: soit tardive, soit contestée, en utilisant les IDs réels.
+NOTES:
+- pieceRefs est optionnel mais recommandé si includePiecesLinks=true.
+- excludePieceIds/admitLatePieceIds doivent utiliser uniquement les IDs présents dans piecesCatalog.
+- Les phases Ultra Pro attendues : OUVERTURE, INCIDENTS, FOND, CONCLUSIONS, CLOTURE.
 `.trim();
 
     const completion = await openai.chat.completions.create({
@@ -841,7 +928,7 @@ Contraintes de volume:
         { role: "user", content: user },
       ],
       temperature: Number(process.env.JUSTICE_LAB_AUDIENCE_TEMPERATURE || 0.5),
-      max_tokens: Number(process.env.JUSTICE_LAB_AUDIENCE_MAX_TOKENS || 1400),
+      max_tokens: Number(process.env.JUSTICE_LAB_AUDIENCE_MAX_TOKENS || 2600),
       response_format: { type: "json_object" },
     });
 
@@ -850,7 +937,7 @@ Contraintes de volume:
     let data;
     try {
       data = JSON.parse(raw);
-    } catch (_e) {
+    } catch {
       return res.json(fallbackAudienceFromTemplates(caseData, role));
     }
 
@@ -858,132 +945,35 @@ Contraintes de volume:
       return res.json(fallbackAudienceFromTemplates(caseData, role));
     }
 
-    // Sanitization + compat moteur
-    const safeScene = {
-      court: safeStr(data?.scene?.court || payload.meta.juridiction, 180),
-      chamber: safeStr(data?.scene?.chamber || "Chambre (simulation)", 180),
-      city: safeStr(data?.scene?.city || payload.meta.ville, 80),
-      date: safeStr(data?.scene?.date || new Date().toISOString().slice(0, 10), 10),
-      formation: safeStr(data?.scene?.formation || "Siège", 80),
-      roles: {
-        juge: safeStr(data?.scene?.roles?.juge || "Le Tribunal", 80),
-        procureur: safeStr(data?.scene?.roles?.procureur || "Ministère public", 80),
-        avocat: safeStr(data?.scene?.roles?.avocat || "Défense", 80),
-        greffier: safeStr(data?.scene?.roles?.greffier || "Greffe", 80),
-      },
-      vibe: safeStr(data?.scene?.vibe || "Audience rythmée et professionnelle.", 160),
-    };
+    // ✅ Validation minimale (qualité Ultra Pro)
+    const turnsLen = data.turns.length;
+    const objectionsLen = data.objections.length;
 
-    const safePhases = Array.isArray(data?.phases) && data.phases.length
-      ? data.phases.slice(0, 6).map((p) => ({
-          id: String(p?.id || "DEBATE"),
-          title: safeStr(p?.title || "Phase", 80),
-          objective: safeStr(p?.objective || "", 200),
-        }))
-      : [
-          { id: "OPENING", title: "Ouverture", objective: "Installer le contradictoire et cadrer l'audience." },
-          { id: "DEBATE", title: "Débat", objective: "Clarifier les faits/procédure." },
-          { id: "OBJECTIONS", title: "Incidents", objective: "Trancher les objections et statuer sur les pièces." },
-          { id: "CLOSING", title: "Clôture", objective: "Mise en état: renvoi, calendrier ou délibéré." },
-        ];
-
-    const turns = data.turns.slice(0, 18).map((t) => ({
-      speaker: String(t?.speaker || "Juge"),
-      text: safeStr(t?.text || "", 650),
-      phase: String(t?.phase || "DEBATE"),
-    }));
-
-    // Filtre de sécurité: ne garder que des IDs de pièces connues
-    const allowedPieceIds = new Set(pieceIds);
-
-    function cleanEffect(eff) {
-      if (!eff || typeof eff !== "object") return null;
-      const excludePieceIds = Array.isArray(eff.excludePieceIds)
-        ? eff.excludePieceIds.map(String).filter((id) => allowedPieceIds.has(id)).slice(0, 6)
-        : [];
-      const admitLatePieceIds = Array.isArray(eff.admitLatePieceIds)
-        ? eff.admitLatePieceIds.map(String).filter((id) => allowedPieceIds.has(id)).slice(0, 6)
-        : [];
-
-      const addTask =
-        eff.addTask && typeof eff.addTask === "object"
-          ? {
-              type: String(eff.addTask.type || "instruction"),
-              label: safeStr(eff.addTask.label || "Mesure", 120),
-              detail: safeStr(eff.addTask.detail || "", 260),
-            }
-          : null;
-
-      const clarification =
-        eff.clarification && typeof eff.clarification === "object"
-          ? {
-              label: safeStr(eff.clarification.label || "Clarification", 120),
-              detail: safeStr(eff.clarification.detail || "", 260),
-            }
-          : null;
-
-      const risk =
-        eff.risk && typeof eff.risk === "object"
-          ? {
-              dueProcessBonus: Number.isFinite(Number(eff.risk.dueProcessBonus)) ? Number(eff.risk.dueProcessBonus) : 0,
-              appealRiskPenalty: Number.isFinite(Number(eff.risk.appealRiskPenalty)) ? Number(eff.risk.appealRiskPenalty) : 0,
-            }
-          : { dueProcessBonus: 0, appealRiskPenalty: 0 };
-
-      return {
-        excludePieceIds,
-        admitLatePieceIds,
-        ...(addTask ? { addTask } : {}),
-        ...(clarification ? { clarification } : {}),
-        why: safeStr(eff.why || "", 220),
-        risk,
-      };
+    if (turnsLen < minTurns || objectionsLen < minObjections) {
+      res.setHeader("X-JusticeLab-Audience-Fallback", "true");
+      return res.json(fallbackAudienceFromTemplates(caseData, role));
     }
 
-    const objections = data.objections.slice(0, 6).map((o, idx) => {
-      const id = String(o?.id || `OBJ${idx + 1}`);
-      const by = String(o?.by || "Avocat");
-      const title = safeStr(o?.title || "Objection", 160);
-      const statement = safeStr(o?.statement || "", 900);
+    if (!Array.isArray(data?.phases) || data.phases.length < 2) {
+      res.setHeader("X-JusticeLab-Audience-Fallback", "true");
+      return res.json(fallbackAudienceFromTemplates(caseData, role));
+    }
 
-      const bestChoiceByRole = {
-        Juge: ["Accueillir", "Rejeter", "Demander précision"].includes(o?.bestChoiceByRole?.Juge)
-          ? o.bestChoiceByRole.Juge
-          : "Demander précision",
-        Procureur: ["Accueillir", "Rejeter", "Demander précision"].includes(o?.bestChoiceByRole?.Procureur)
-          ? o.bestChoiceByRole.Procureur
-          : "Rejeter",
-        Avocat: ["Accueillir", "Rejeter", "Demander précision"].includes(o?.bestChoiceByRole?.Avocat)
-          ? o.bestChoiceByRole.Avocat
-          : "Accueillir",
-      };
-
-      const effects = o?.effects || {};
-      const onAccueillir = cleanEffect(effects.onAccueillir) || { risk: { dueProcessBonus: 1, appealRiskPenalty: 0 } };
-      const onRejeter = cleanEffect(effects.onRejeter) || { risk: { dueProcessBonus: 0, appealRiskPenalty: 1 } };
-      const onDemander =
-        cleanEffect(effects.onDemander) || {
-          clarification: { label: "Clarification", detail: "La Cour exige des précisions avant de statuer." },
-          risk: { dueProcessBonus: 2, appealRiskPenalty: 0 },
-        };
-
-      return {
-        id,
-        by,
-        title,
-        statement,
-        options: ["Accueillir", "Rejeter", "Demander précision"],
-        bestChoiceByRole,
-        effects: { onAccueillir, onRejeter, onDemander },
-      };
-    });
-
+    if (ultraPro) {
+      const reqPhaseIds = ["OUVERTURE", "INCIDENTS", "FOND", "CONCLUSIONS", "CLOTURE"];
+      const got = new Set(data.phases.map((p) => String(p?.id || "").toUpperCase()));
+      const missing = reqPhaseIds.filter((id) => !got.has(id));
+      if (missing.length) {
+        res.setHeader("X-JusticeLab-Audience-Fallback", "true");
+        return res.json(fallbackAudienceFromTemplates(caseData, role));
+      }
+    }
     return res.json({
-      scene: safeScene,
-      phases: safePhases,
+      scene: data.scene,
+      phases: data.phases,
       piecesCatalog,
-      turns,
-      objections,
+      turns: data.turns,
+      objections: data.objections,
     });
   } catch (e) {
     console.error("❌ /justice-lab/audience error:", e);
@@ -999,18 +989,117 @@ Contraintes de volume:
 });
 
 /* =========================================================
-   ✅ JUSTICE LAB — SCORING IA (JSON strict)
-   POST /justice-lab/score
-   Body: { caseData: {...}, runData: {...} }
+   ✅ NEW — IA JUGE (solo multi-rôles)
+   - Si l'utilisateur joue Procureur / Avocat, l'IA tranche comme Juge
+========================================================= */
+app.post("/justice-lab/ai-judge", requireAuth, async (req, res) => {
+  try {
+    const { caseData, runData, objection, recommendation, playerSuggestion } = req.body || {};
+    const rec = recommendation || playerSuggestion || null;
+    if (!caseData || !runData || !objection) {
+      return res.status(400).json({ error: "caseData, runData et objection sont requis." });
+    }
+
+    // choix de secours : si bestChoiceByRole.Juge existe
+    const fallbackChoice = objection?.bestChoiceByRole?.Juge || "Demander précision";
+
+    const payload = {
+      caseId: caseData.caseId,
+      domaine: caseData.domaine,
+      niveau: caseData.niveau,
+      titre: caseData.titre || caseData.title,
+      resume: safeStr(caseData.resume || caseData.brief, 1200),
+      parties: caseData.parties || {},
+      pieces: Array.isArray(caseData.pieces) ? caseData.pieces.slice(0, 10) : [],
+      roleJoueur: normalizeRole(runData?.answers?.role || "Juge"),
+      objection: {
+        id: safeStr(objection.id, 40),
+        by: safeStr(objection.by, 30),
+        title: safeStr(objection.title, 160),
+        statement: safeStr(objection.statement, 1200),
+        options: Array.isArray(objection.options) ? objection.options.slice(0, 3) : ["Accueillir", "Rejeter", "Demander précision"],
+      },
+      recommendation: rec
+        ? {
+            byRole: safeStr(rec.byRole || rec.role || "", 20),
+            choice: safeStr(rec.choice || rec.decision || "", 40),
+            reasoning: safeStr(rec.reasoning || rec.reason || "", 1200),
+          }
+        : null,
+    };
+
+    const system = `
+Tu es un JUGE (RDC) dans une audience simulée de formation continue.
+Ta mission: trancher une objection de manière professionnelle en respectant:
+- contradictoire,
+- droits de la défense,
+- recevabilité,
+- proportionnalité,
+- bonne police d'audience.
+
+Contraintes:
+- Tu retournes UNIQUEMENT un JSON valide.
+- decision doit être exactement: "Accueillir" ou "Rejeter" ou "Demander précision"
+- Pas d'articles numérotés inventés.
+- Justification courte et actionnable.
+
+Format:
+{
+  "decision": "Accueillir"|"Rejeter"|"Demander précision",
+  "reason": string
+}
+`.trim();
+
+    const user = `INPUT:\n${JSON.stringify(payload, null, 2)}`;
+
+    const completion = await openai.chat.completions.create({
+      model: process.env.JUSTICE_LAB_JUDGE_MODEL || process.env.JUSTICE_LAB_MODEL || "gpt-4o-mini",
+      messages: [
+        { role: "system", content: system },
+        { role: "user", content: user },
+      ],
+      temperature: Number(process.env.JUSTICE_LAB_JUDGE_TEMPERATURE || 0.2),
+      max_tokens: Number(process.env.JUSTICE_LAB_JUDGE_MAX_TOKENS || 220),
+      response_format: { type: "json_object" },
+    });
+
+    const raw = completion.choices?.[0]?.message?.content || "{}";
+    let out = null;
+    try {
+      out = JSON.parse(raw);
+    } catch {
+      out = null;
+    }
+
+    const decision = String(out?.decision || "").trim();
+    const ok = ["Accueillir", "Rejeter", "Demander précision"].includes(decision);
+
+    if (!ok) {
+      return res.json({ choice: fallbackChoice, reasoning: "Décision IA fallback (format/validation).", decision: fallbackChoice, reason: "Décision IA fallback (format/validation)." });
+    }
+
+    return res.json({
+      // ✅ compat front: attend parfois {choice, reasoning}
+      choice: decision,
+      reasoning: safeStr(out?.reason || "Décision motivée (IA).", 380),
+      // ✅ clés historiques
+      decision,
+      reason: safeStr(out?.reason || "Décision motivée (IA).", 380),
+    });
+  } catch (e) {
+    console.warn("⚠️ /justice-lab/ai-judge fallback:", e?.message);
+    return res.json({ choice: "Demander précision", reasoning: "IA indisponible, décision prudente.", decision: "Demander précision", reason: "IA indisponible, décision prudente." });
+  }
+});
+
+/* =========================================================
+   JUSTICE LAB — SCORING IA
 ========================================================= */
 app.post("/justice-lab/score", requireAuth, async (req, res) => {
   const t0 = Date.now();
   try {
     const { caseData, runData } = req.body || {};
-
-    if (!caseData || !runData) {
-      return res.status(400).json({ error: "caseData et runData sont requis." });
-    }
+    if (!caseData || !runData) return res.status(400).json({ error: "caseData et runData sont requis." });
 
     const payload = {
       caseId: caseData.caseId,
@@ -1047,17 +1136,9 @@ Retourne STRICTEMENT un JSON au format suivant :
   "feedback": [string],
   "recommendedNext": [string]
 }
-
-Rappels :
-- scores 0..100
-- "audience" = gestion des objections, contradictoire, tenue des débats
-- criticalErrors uniquement les erreurs graves
-- feedback = recommandations actionnables
-- recommendedNext = 3 exercices/cas
 `.trim();
 
     const tA0 = Date.now();
-
     const completion = await openai.chat.completions.create({
       model: process.env.JUSTICE_LAB_MODEL || "gpt-4o-mini",
       messages: [
@@ -1068,55 +1149,34 @@ Rappels :
       max_tokens: Number(process.env.JUSTICE_LAB_MAX_TOKENS || 900),
       response_format: { type: "json_object" },
     });
-
     const openaiMs = Date.now() - tA0;
 
     const raw = completion.choices?.[0]?.message?.content || "{}";
-
     let result;
     try {
       result = JSON.parse(raw);
-    } catch (_e) {
-      return res.status(500).json({
-        error: "Réponse IA non-JSON (invalide).",
-        raw: raw.slice(0, 1200),
-      });
+    } catch {
+      return res.status(500).json({ error: "Réponse IA non-JSON (invalide).", raw: raw.slice(0, 1200) });
     }
 
-    if (
-      typeof result?.scoreGlobal !== "number" ||
-      !result?.scores ||
-      typeof result?.scores?.qualification !== "number"
-    ) {
-      return res.status(500).json({
-        error: "Réponse IA invalide (structure).",
-        raw: result,
-      });
+    if (typeof result?.scoreGlobal !== "number" || !result?.scores || typeof result?.scores?.qualification !== "number") {
+      return res.status(500).json({ error: "Réponse IA invalide (structure).", raw: result });
     }
-
-    if (typeof result?.scores?.audience !== "number") {
-      result.scores.audience = 0;
-    }
+    if (typeof result?.scores?.audience !== "number") result.scores.audience = 0;
 
     const totalMs = Date.now() - t0;
     res.setHeader("X-JusticeLab-Time-Ms", String(totalMs));
     res.setHeader("X-JusticeLab-Breakdown", JSON.stringify({ openaiMs, totalMs }));
-
     return res.json(result);
   } catch (error) {
     const totalMs = Date.now() - t0;
     console.error("❌ Erreur /justice-lab/score :", error);
-    return res.status(500).json({
-      error: "Erreur serveur Justice Lab.",
-      detail: error?.message,
-      totalMs,
-    });
+    return res.status(500).json({ error: "Erreur serveur Justice Lab.", detail: error?.message, totalMs });
   }
 });
 
 /* =========================================================
-   ✅ JUSTICE LAB — APPEAL IA (V4)
-   POST /justice-lab/appeal
+   JUSTICE LAB — APPEAL IA
 ========================================================= */
 app.post("/justice-lab/appeal", requireAuth, async (req, res) => {
   const t0 = Date.now();
@@ -1124,9 +1184,7 @@ app.post("/justice-lab/appeal", requireAuth, async (req, res) => {
     const { caseData, scored } = req.body || {};
     const run = req.body?.run || req.body?.runData;
 
-    if (!caseData || !run) {
-      return res.status(400).json({ error: "caseData et run (ou runData) sont requis." });
-    }
+    if (!caseData || !run) return res.status(400).json({ error: "caseData et run (ou runData) sont requis." });
 
     const role = normalizeRole(run?.answers?.role || "Juge");
 
@@ -1157,19 +1215,11 @@ Retourne STRICTEMENT ce JSON:
   "dispositif": string,
   "recommendations": [string]
 }
-
-Contraintes:
-- grounds: 3 à 6 points, concis.
-- dispositif: court, style juridiction.
-- recommendations: 3 à 6 recommandations actionnables.
 `.trim();
 
     const tA0 = Date.now();
     const completion = await openai.chat.completions.create({
-      model:
-        process.env.JUSTICE_LAB_APPEAL_MODEL ||
-        process.env.JUSTICE_LAB_MODEL ||
-        "gpt-4o-mini",
+      model: process.env.JUSTICE_LAB_APPEAL_MODEL || process.env.JUSTICE_LAB_MODEL || "gpt-4o-mini",
       messages: [
         { role: "system", content: buildJusticeLabAppealSystemPrompt().trim() },
         { role: "user", content: userPrompt },
@@ -1184,7 +1234,7 @@ Contraintes:
     let result;
     try {
       result = JSON.parse(raw);
-    } catch (_e) {
+    } catch {
       result = null;
     }
 
@@ -1195,10 +1245,7 @@ Contraintes:
       const fallback = fallbackAppealFromScored(scored || {});
       const totalMs = Date.now() - t0;
       res.setHeader("X-JusticeLab-Appeal-Time-Ms", String(totalMs));
-      res.setHeader(
-        "X-JusticeLab-Appeal-Breakdown",
-        JSON.stringify({ openaiMs: 0, totalMs, fallback: true })
-      );
+      res.setHeader("X-JusticeLab-Appeal-Breakdown", JSON.stringify({ openaiMs: 0, totalMs, fallback: true }));
       return res.json(fallback);
     }
 
@@ -1215,10 +1262,7 @@ Contraintes:
 
     const totalMs = Date.now() - t0;
     res.setHeader("X-JusticeLab-Appeal-Time-Ms", String(totalMs));
-    res.setHeader(
-      "X-JusticeLab-Appeal-Breakdown",
-      JSON.stringify({ openaiMs, totalMs })
-    );
+    res.setHeader("X-JusticeLab-Appeal-Breakdown", JSON.stringify({ openaiMs, totalMs }));
 
     return res.json({ decision, grounds, dispositif, recommendations });
   } catch (error) {
@@ -1229,8 +1273,7 @@ Contraintes:
 });
 
 /* =========================================================
-   ✅ JUSTICE LAB — INSTANT FEEDBACK IA (HYBRIDE)
-   POST /justice-lab/instant-feedback
+   JUSTICE LAB — INSTANT FEEDBACK IA
 ========================================================= */
 app.post("/justice-lab/instant-feedback", requireAuth, async (req, res) => {
   const t0 = Date.now();
@@ -1238,9 +1281,7 @@ app.post("/justice-lab/instant-feedback", requireAuth, async (req, res) => {
     const { caseData, runData, objection, userDecision } = req.body || {};
 
     if (!caseData || !runData || !objection || !userDecision) {
-      return res.status(400).json({
-        error: "caseData, runData, objection et userDecision sont requis.",
-      });
+      return res.status(400).json({ error: "caseData, runData, objection et userDecision sont requis." });
     }
 
     const role = normalizeRole(runData?.answers?.role || "Juge");
@@ -1257,9 +1298,7 @@ app.post("/justice-lab/instant-feedback", requireAuth, async (req, res) => {
         by: safeStr(objection.by, 30),
         title: safeStr(objection.title, 160),
         statement: safeStr(objection.statement, 1200),
-        options: Array.isArray(objection.options)
-          ? objection.options.slice(0, 3)
-          : ["Accueillir", "Rejeter", "Demander précision"],
+        options: Array.isArray(objection.options) ? objection.options.slice(0, 3) : ["Accueillir", "Rejeter", "Demander précision"],
       },
       userDecision: {
         choice: safeStr(userDecision.choice, 40),
@@ -1268,9 +1307,7 @@ app.post("/justice-lab/instant-feedback", requireAuth, async (req, res) => {
       procedureChoice: runData?.answers?.procedureChoice || null,
       procedureJustification: safeStr(runData?.answers?.procedureJustification, 900),
       qualification: safeStr(runData?.answers?.qualification, 900),
-      lastAudit: Array.isArray(runData?.state?.auditLog)
-        ? runData.state.auditLog.slice(-3)
-        : [],
+      lastAudit: Array.isArray(runData?.state?.auditLog) ? runData.state.auditLog.slice(-3) : [],
     };
 
     const system = `
@@ -1294,17 +1331,11 @@ Format EXACT:
 }
 `.trim();
 
-    const user = `
-INPUT:
-${JSON.stringify(payload, null, 2)}
-`.trim();
+    const user = `INPUT:\n${JSON.stringify(payload, null, 2)}`;
 
     const completion = await withTimeout(
       openai.chat.completions.create({
-        model:
-          process.env.JUSTICE_LAB_INSTANT_MODEL ||
-          process.env.JUSTICE_LAB_MODEL ||
-          "gpt-4o-mini",
+        model: process.env.JUSTICE_LAB_INSTANT_MODEL || process.env.JUSTICE_LAB_MODEL || "gpt-4o-mini",
         messages: [
           { role: "system", content: system },
           { role: "user", content: user },
@@ -1318,11 +1349,10 @@ ${JSON.stringify(payload, null, 2)}
     );
 
     const raw = completion.choices?.[0]?.message?.content || "{}";
-
     let out;
     try {
       out = JSON.parse(raw);
-    } catch (_e) {
+    } catch {
       out = null;
     }
 
@@ -1338,10 +1368,8 @@ ${JSON.stringify(payload, null, 2)}
         verdict: "RISQUE",
         riskLevel: "Moyen",
         headline: "Analyse IA indisponible (fallback)",
-        explanation:
-          "Le format IA est inexploitable ou incomplet. Le feedback instant offline reste la référence.",
-        suggestion:
-          "Motive (contradictoire/recevabilité) et précise l’impact sur les pièces et les droits de la défense.",
+        explanation: "Le format IA est inexploitable ou incomplet.",
+        suggestion: "Motive (contradictoire/recevabilité) et précise l’impact sur les pièces et les droits de la défense.",
       });
     }
 
@@ -1365,34 +1393,29 @@ ${JSON.stringify(payload, null, 2)}
       verdict: "RISQUE",
       riskLevel: "Moyen",
       headline: "IA indisponible (fallback)",
-      explanation:
-        "Le service IA n’a pas répondu à temps. Le jeu continue en mode hybride: feedback instant offline prioritaire.",
-      suggestion:
-        "Justifie brièvement (contradictoire, régularité, recevabilité) et précise l’impact sur les pièces/actes.",
+      explanation: "Le service IA n’a pas répondu à temps.",
+      suggestion: "Justifie brièvement (contradictoire, régularité, recevabilité) et précise l’impact sur les pièces/actes.",
     });
   }
 });
 
-
-
-
-
 /* =========================================================
-   ✅ JusticeLab Rooms (V4) — Persistantes + Lobby + Rôles uniques
-   - MongoDB si dispo (sinon fallback mémoire)
-   - Rôles uniques
-   - Créateur seul peut démarrer
-   - Actions signées par participantId
-
-   Endpoints REST (compat + fallback si Socket.IO indispo):
-     POST /justice-lab/rooms/create   { caseId, displayName, role, aiRole }
+   ✅ NEW — ROOMS CO-OP 2–3 joueurs (Render-friendly, polling)
+   Endpoints attendus par JusticeLabPlay.jsx :
+     POST /justice-lab/rooms/create   { caseId, displayName, role }
      POST /justice-lab/rooms/join     { roomId, caseId, displayName, role }
      GET  /justice-lab/rooms/:roomId?participantId=...
      POST /justice-lab/rooms/action   { roomId, participantId, action:{type,payload} }
+   + Compat anciens endpoints :
+     GET  /justice-lab/rooms/state/:roomId
+     POST /justice-lab/rooms/suggest
+     POST /justice-lab/rooms/judge-decision
 ========================================================= */
 
 const ROOMS_TTL_MS = Number(process.env.JUSTICE_LAB_ROOMS_TTL_MS || 6 * 60 * 60 * 1000); // 6h
-const ROOMS_MAX_PLAYERS = Number(process.env.JUSTICE_LAB_ROOMS_MAX_PLAYERS || 5); // V4: jusqu'à 5 (Juge/Greffier/Procureur/2 avocats)
+const ROOMS_MAX_PLAYERS = Number(process.env.JUSTICE_LAB_ROOMS_MAX_PLAYERS || 3);
+
+const rooms = new Map(); // roomId -> room
 
 function nowMs() {
   return Date.now();
@@ -1401,21 +1424,34 @@ function nowIso() {
   return new Date().toISOString();
 }
 function randCode(len = 6) {
-  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // sans 0/O/I/1
   let s = "";
   for (let i = 0; i < len; i++) s += chars[Math.floor(Math.random() * chars.length)];
   return s;
 }
 function makeRoomId() {
+  // format simple (copiable)
   return `JL-${randCode(6)}`;
 }
 function makeParticipantId() {
   return `p_${nowMs().toString(36)}_${Math.random().toString(16).slice(2)}`;
 }
+function cleanupRooms() {
+  const t = nowMs();
+  for (const [id, r] of rooms.entries()) {
+    if (!r) {
+      rooms.delete(id);
+      continue;
+    }
+    const exp = Number(r.expiresAt || 0);
+    if (exp && exp <= t) rooms.delete(id);
+  }
+}
+setInterval(cleanupRooms, 60 * 1000).unref?.();
 
-// Roles V4 (inclut 2 avocats)
 function ensureRoleValid(role) {
   const r = normalizeRole(role || "");
+  // compat legacy "Avocat"
   const rr = r === "Avocat" ? "Avocat Défense" : r;
   if (!["Juge", "Procureur", "Greffier", "Avocat Défense", "Avocat Partie civile"].includes(rr)) {
     return "ROLE_INVALID";
@@ -1432,147 +1468,72 @@ function scrubRoomForClient(room) {
     createdAt: room.createdAt,
     updatedAt: room.updatedAt,
     expiresAt: room.expiresAt,
+    meta: room.meta || {},
     caseId: room.caseId || null,
-    meta: {
-      ...(room.meta || {}),
-      // ne pas exposer tout snapshot interne si trop gros
-    },
     players: players.map((p) => ({
       participantId: p.participantId,
       displayName: p.displayName,
       role: p.role,
-      isHost: Boolean(p.isHost),
-      ready: Boolean(p.ready),
       joinedAt: p.joinedAt,
-      lastSeenAt: p.lastSeenAt,
-      connected: p.connected !== false,
+      isHost: Boolean(p.isHost),
+      lastSeenAt: p.lastSeenAt || null,
     })),
     snapshot: room.snapshot || null,
-    suggestions: Array.isArray(room.suggestions) ? room.suggestions.slice(0, 50) : [],
-    decisions: Array.isArray(room.decisions) ? room.decisions.slice(0, 50) : [],
+    suggestions: Array.isArray(room.suggestions) ? room.suggestions.slice(0, 60) : [],
+    decisions: Array.isArray(room.decisions) ? room.decisions.slice(0, 120) : [],
   };
 }
 
-function roleTaken(room, role) {
-  const players = Array.isArray(room?.players) ? room.players : [];
-  return players.some((p) => String(p?.role) === String(role));
-}
-
-function getParticipant(room, participantId) {
-  const players = Array.isArray(room?.players) ? room.players : [];
-  return players.find((p) => String(p?.participantId) === String(participantId));
-}
-
-// --------- Mongo persistence (optionnel) ---------
-let JusticeLabRoomModel = null;
-try {
-  if (mongoose?.models?.JusticeLabRoom) {
-    JusticeLabRoomModel = mongoose.models.JusticeLabRoom;
-  } else {
-    const RoomSchema = new mongoose.Schema(
-      {
-        roomId: { type: String, unique: true, index: true },
-        version: { type: Number, default: 0 },
-        createdAt: { type: String },
-        updatedAt: { type: String },
-        expiresAt: { type: Number, index: true },
-        caseId: { type: String },
-        meta: { type: Object, default: {} },
-        players: { type: Array, default: [] },
-        snapshot: { type: Object, default: null },
-        suggestions: { type: Array, default: [] },
-        decisions: { type: Array, default: [] },
-      },
-      { minimize: false }
-    );
-    // TTL
-    RoomSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
-    JusticeLabRoomModel = mongoose.model("JusticeLabRoom", RoomSchema);
-  }
-} catch (e) {
-  JusticeLabRoomModel = null;
-}
-
-const roomsMem = new Map(); // fallback mémoire
-
-async function roomSave(room) {
-  if (!room) return;
-  roomsMem.set(room.roomId, room);
-  if (!JusticeLabRoomModel || !process.env.MONGODB_URI) return;
-  try {
-    await JusticeLabRoomModel.updateOne(
-      { roomId: room.roomId },
-      { $set: room },
-      { upsert: true }
-    );
-  } catch (e) {
-    // fallback silence
-  }
-}
-
-async function roomLoad(roomId) {
-  const id = String(roomId || "").trim().toUpperCase();
-  if (!id) return null;
-  // mémoire d'abord
-  const inMem = roomsMem.get(id);
-  if (inMem && Number(inMem.expiresAt || 0) > nowMs()) return inMem;
-  if (!JusticeLabRoomModel || !process.env.MONGODB_URI) return inMem || null;
-  try {
-    const doc = await JusticeLabRoomModel.findOne({ roomId: id }).lean();
-    if (!doc) return null;
-    if (Number(doc.expiresAt || 0) <= nowMs()) return null;
-    roomsMem.set(id, doc);
-    return doc;
-  } catch {
-    return inMem || null;
-  }
-}
-
-async function roomDelete(roomId) {
-  roomsMem.delete(roomId);
-  if (!JusticeLabRoomModel || !process.env.MONGODB_URI) return;
-  try {
-    await JusticeLabRoomModel.deleteOne({ roomId });
-  } catch {}
-}
-
-function cleanupRoomsMem() {
-  const t = nowMs();
-  for (const [id, r] of roomsMem.entries()) {
-    if (!r) roomsMem.delete(id);
-    else if (Number(r.expiresAt || 0) <= t) roomsMem.delete(id);
-  }
-}
-setInterval(cleanupRoomsMem, 60_000).unref?.();
-
-async function getRoomOr404(roomId) {
-  const room = await roomLoad(roomId);
+function getRoomOr404(roomId) {
+  cleanupRooms();
+  const rid = String(roomId || "").trim().toUpperCase();
+  const room = rooms.get(rid);
   if (!room) return null;
+  room.expiresAt = nowMs() + ROOMS_TTL_MS;
   return room;
 }
 
-function emitRoomUpdate(room) {
-  try {
-    if (!room?.roomId) return;
-    io.to(room.roomId).emit("jl:room:update", scrubRoomForClient(room));
-  } catch {}
+function roleTaken(room, role) {
+  const players = Array.isArray(room.players) ? room.players : [];
+  const wanted = String(role);
+  // rôle réservé par l'IA (si activée)
+  const aiRole = String(room?.meta?.aiRole || "").trim();
+  if (aiRole && wanted === aiRole) return true;
+  return players.some((p) => String(p.role) === wanted);
 }
 
-function emitRoomToast(roomId, message, level = "info") {
-  try {
-    io.to(roomId).emit("jl:toast", { level, message, ts: nowIso() });
-  } catch {}
+function getParticipant(room, participantId) {
+  const pid = String(participantId || "").trim();
+  const players = Array.isArray(room.players) ? room.players : [];
+  return players.find((p) => p.participantId === pid) || null;
 }
 
-// --------- REST endpoints (fallback) ---------
+/**
+ * POST /justice-lab/rooms/create
+ * body: { caseId, displayName, role }
+ */
 app.post("/justice-lab/rooms/create", requireAuth, async (req, res) => {
   try {
+    cleanupRooms();
+
     const caseId = safeStr(req.body?.caseId || "", 80);
-    const displayName = safeStr(req.body?.displayName || "Créateur", 50) || "Créateur";
-    const r = ensureRoleValid(req.body?.role || "Greffier");
+    const displayName = safeStr(req.body?.displayName || "Joueur", 50) || "Joueur";
+
+    // ✅ IA : par défaut, le juge est l'IA (modifiable par le créateur)
+    const aiRoleIn = safeStr(req.body?.aiRole || "Juge", 40);
+    const aiRoleNorm =
+      String(aiRoleIn || "").trim().toLowerCase() === "aucun" || String(aiRoleIn || "").trim() === ""
+        ? null
+        : ensureRoleValid(aiRoleIn);
+    if (aiRoleNorm === "ROLE_INVALID") return res.status(400).json({ error: "aiRole invalide." });
+
+    const r = ensureRoleValid(req.body?.role || (aiRoleNorm === "Juge" ? "Procureur" : "Juge"));
     if (r === "ROLE_INVALID") return res.status(400).json({ error: "Role invalide." });
 
-    const aiRoleNorm = ensureRoleValid(req.body?.aiRole || "Juge");
+    if (aiRoleNorm && r === aiRoleNorm) {
+      return res.status(409).json({ error: `Rôle réservé à l'IA: ${aiRoleNorm}` });
+    }
+
     const roomId = makeRoomId();
     const participantId = makeParticipantId();
 
@@ -1585,10 +1546,8 @@ app.post("/justice-lab/rooms/create", requireAuth, async (req, res) => {
       expiresAt: nowMs() + ROOMS_TTL_MS,
       caseId: caseId || null,
       meta: {
-        title: safeStr(req.body?.title || "Procès co-op", 140),
-        aiRole: aiRoleNorm === "ROLE_INVALID" ? "Juge" : aiRoleNorm,
-        started: false,
-        startedAt: null,
+        title: safeStr(req.body?.title || "Audience co-op", 140),
+        aiRole: aiRoleNorm, // ex: "Juge" par défaut
       },
       players: [
         {
@@ -1596,18 +1555,16 @@ app.post("/justice-lab/rooms/create", requireAuth, async (req, res) => {
           displayName,
           role: r,
           isHost: true,
-          ready: false,
           joinedAt: createdAt,
           lastSeenAt: createdAt,
-          connected: true,
         },
       ],
-      snapshot: null,
+      snapshot: null, // host pousse l'état via /rooms/action
       suggestions: [],
       decisions: [],
     };
 
-    await roomSave(room);
+    rooms.set(roomId, room);
     return res.json({ roomId, participantId, version: room.version, snapshot: room.snapshot });
   } catch (e) {
     console.error("❌ /justice-lab/rooms/create:", e);
@@ -1615,17 +1572,20 @@ app.post("/justice-lab/rooms/create", requireAuth, async (req, res) => {
   }
 });
 
-
+/**
+ * POST /justice-lab/rooms/join
+ * body: { roomId, caseId, displayName, role }
+ */
 app.post("/justice-lab/rooms/join", requireAuth, async (req, res) => {
   try {
     const roomId = String(req.body?.roomId || "").trim().toUpperCase();
     if (!roomId) return res.status(400).json({ error: "roomId requis." });
 
-    const room = await getRoomOr404(roomId);
+    const room = getRoomOr404(roomId);
     if (!room) return res.status(404).json({ error: "Room introuvable/expirée." });
 
     const displayName = safeStr(req.body?.displayName || "Joueur", 50) || "Joueur";
-    const r = ensureRoleValid(req.body?.role || "Avocat Défense");
+    const r = ensureRoleValid(req.body?.role || "Avocat");
     if (r === "ROLE_INVALID") return res.status(400).json({ error: "Role invalide." });
 
     const joinCaseId = safeStr(req.body?.caseId || "", 80);
@@ -1636,30 +1596,24 @@ app.post("/justice-lab/rooms/join", requireAuth, async (req, res) => {
     const players = Array.isArray(room.players) ? room.players : [];
     if (players.length >= ROOMS_MAX_PLAYERS) return res.status(409).json({ error: "ROOM_FULL" });
 
-    if (roleTaken(room, r)) return res.status(409).json({ error: `ROLE_TAKEN:${r}` });
+    if (roleTaken(room, r)) return res.status(409).json({ error: `Rôle déjà occupé: ${r}` });
 
     const participantId = makeParticipantId();
     const t = nowIso();
 
-    room.players = players;
     room.players.push({
       participantId,
       displayName,
       role: r,
       isHost: false,
-      ready: false,
       joinedAt: t,
       lastSeenAt: t,
-      connected: true,
     });
 
     room.updatedAt = t;
     room.expiresAt = nowMs() + ROOMS_TTL_MS;
-    room.version = Number(room.version || 0) + 1;
 
-    await roomSave(room);
-    emitRoomUpdate(room);
-    emitRoomToast(room.roomId, `${displayName} a rejoint la salle.`, "info");
+    rooms.set(room.roomId, room);
     return res.json({ roomId: room.roomId, participantId, version: room.version || 0, snapshot: room.snapshot || null });
   } catch (e) {
     console.error("❌ /justice-lab/rooms/join:", e);
@@ -1667,10 +1621,14 @@ app.post("/justice-lab/rooms/join", requireAuth, async (req, res) => {
   }
 });
 
+/**
+ * GET /justice-lab/rooms/:roomId?participantId=...
+ * Le front poll. Si participantId présent, on "ping" présence.
+ */
 app.get("/justice-lab/rooms/:roomId", requireAuth, async (req, res) => {
   try {
     const roomId = String(req.params?.roomId || "").trim().toUpperCase();
-    const room = await getRoomOr404(roomId);
+    const room = getRoomOr404(roomId);
     if (!room) return res.status(404).json({ error: "Room introuvable/expirée." });
 
     const participantId = String(req.query?.participantId || "").trim();
@@ -1678,13 +1636,12 @@ app.get("/justice-lab/rooms/:roomId", requireAuth, async (req, res) => {
       const me = getParticipant(room, participantId);
       if (me) {
         me.lastSeenAt = nowIso();
-        me.connected = true;
         room.updatedAt = me.lastSeenAt;
       }
     }
 
     room.expiresAt = nowMs() + ROOMS_TTL_MS;
-    await roomSave(room);
+    rooms.set(room.roomId, room);
     return res.json(scrubRoomForClient(room));
   } catch (e) {
     console.error("❌ /justice-lab/rooms/:roomId:", e);
@@ -1692,12 +1649,22 @@ app.get("/justice-lab/rooms/:roomId", requireAuth, async (req, res) => {
   }
 });
 
+/**
+ * POST /justice-lab/rooms/action
+ * body: { roomId, participantId, action: { type, payload } }
+ *
+ * type supportés (on accepte plusieurs alias pour compat) :
+ * - SNAPSHOT / SYNC_SNAPSHOT : payload { snapshot } (host only) -> version++
+ * - SUGGESTION             : payload { objectionId, decision, reasoning } (MP/Avocat)
+ * - JUDGE_DECISION         : payload { objectionId, decision, reasoning, effects? } (Juge) -> decisions[]
+ * - PING                   : keepalive
+ */
 app.post("/justice-lab/rooms/action", requireAuth, async (req, res) => {
   try {
     const { roomId, participantId, action } = req.body || {};
     if (!roomId) return res.status(400).json({ error: "roomId requis." });
 
-    const room = await getRoomOr404(roomId);
+    const room = getRoomOr404(roomId);
     if (!room) return res.status(404).json({ error: "Room introuvable/expirée." });
 
     const me = participantId ? getParticipant(room, participantId) : null;
@@ -1707,301 +1674,204 @@ app.post("/justice-lab/rooms/action", requireAuth, async (req, res) => {
     const payload = action?.payload || {};
     const t = nowIso();
 
-    if (me) {
-      me.lastSeenAt = t;
-      me.connected = true;
-    }
+    if (me) me.lastSeenAt = t;
     room.updatedAt = t;
     room.expiresAt = nowMs() + ROOMS_TTL_MS;
 
     if (!type || type === "PING") {
-      await roomSave(room);
+      rooms.set(room.roomId, room);
       return res.json({ ok: true, version: Number(room.version || 0) });
     }
 
-    // Host-only start
-    if (type === "START") {
-      if (!me?.isHost) return res.status(403).json({ error: "HOST_ONLY" });
-      room.meta = room.meta || {};
-      room.meta.started = true;
-      room.meta.startedAt = t;
-      room.version = Number(room.version || 0) + 1;
-      await roomSave(room);
-      emitRoomUpdate(room);
-      emitRoomToast(room.roomId, "Audience démarrée par le créateur.", "success");
-      return res.json({ ok: true, version: room.version });
-    }
-
-    // Ready toggle
-    if (type === "READY") {
-      if (!me) return res.status(403).json({ error: "PARTICIPANT_NOT_FOUND" });
-      me.ready = Boolean(payload?.ready);
-      room.version = Number(room.version || 0) + 1;
-      await roomSave(room);
-      emitRoomUpdate(room);
-      return res.json({ ok: true, version: room.version });
-    }
-
-    // Snapshot: host only
+    // --- snapshot sync (host) ---
     if (type === "SNAPSHOT" || type === "SYNC_SNAPSHOT") {
       if (!me?.isHost) return res.status(403).json({ error: "HOST_ONLY" });
-      room.snapshot = payload?.snapshot || payload || null;
+      const snap = payload?.snapshot || action?.snapshot;
+      if (!snap || typeof snap !== "object") return res.status(400).json({ error: "SNAPSHOT_REQUIRED" });
+
+      room.snapshot = snap;
       room.version = Number(room.version || 0) + 1;
-      await roomSave(room);
-      emitRoomUpdate(room);
+
+      rooms.set(room.roomId, room);
       return res.json({ ok: true, version: room.version });
     }
 
-    // Suggestions by non-judge roles
+    // --- suggestion (Procureur/Avocat) ---
     if (type === "SUGGESTION") {
-      if (!me) return res.status(403).json({ error: "PARTICIPANT_NOT_FOUND" });
+            const sugIn = payload?.suggestion && typeof payload.suggestion === "object" ? payload.suggestion : payload;
+      const legacySug = action?.suggestion && typeof action.suggestion === "object" ? action.suggestion : null;
+      const src = legacySug || sugIn || {};
+
+const sug = {
+        id: `SUG_${Date.now()}_${Math.random().toString(16).slice(2)}`,
+        ts: t,
+        role: me?.role || safeStr(src?.role || src?.byRole || "", 20),
+        participantId: me?.participantId || null,
+        displayName: me?.displayName || safeStr(src?.displayName || "", 60),
+        objectionId: safeStr(src?.objectionId || "", 40),
+        decision: safeStr(src?.decision || src?.choice || "", 40),
+        reasoning: safeStr(src?.reasoning || src?.reason || "", 1400),
+      };
+
+
+
       room.suggestions = Array.isArray(room.suggestions) ? room.suggestions : [];
-      room.suggestions.unshift({ ...payload, ts: t, by: me.displayName, role: me.role });
-      room.suggestions = room.suggestions.slice(0, 80);
-      room.version = Number(room.version || 0) + 1;
-      await roomSave(room);
-      emitRoomUpdate(room);
-      return res.json({ ok: true, version: room.version });
+      room.suggestions.unshift(sug);
+      room.suggestions = room.suggestions.slice(0, 60);
+
+      rooms.set(room.roomId, room);
+      return res.json({ ok: true, version: Number(room.version || 0), suggestion: sug });
     }
 
-    // Judge decisions (human judge only)
+    // --- judge decision (Juge) ---
     if (type === "JUDGE_DECISION") {
-      if (!me) return res.status(403).json({ error: "PARTICIPANT_NOT_FOUND" });
-      if (me.role !== "Juge") return res.status(403).json({ error: "JUDGE_ONLY" });
+      const aiRole = String(room?.meta?.aiRole || "").trim();
+      const asAI = Boolean(payload?.asAI || action?.asAI || payload?.by === "AI" || payload?.by === "IA");
+
+      // ✅ Si le juge est l'IA, on autorise l'host à soumettre la décision "au nom" de l'IA.
+      const allowedAsHumanJudge = me?.role === "Juge";
+      const allowedAsAIJudge = aiRole === "Juge" && me?.isHost && asAI;
+
+      if (!allowedAsHumanJudge && !allowedAsAIJudge) {
+        return res.status(403).json({ error: "JUDGE_ONLY" });
+      }
+
+      const d = safeStr(payload?.decision || "", 40);
+      if (!["Accueillir", "Rejeter", "Demander précision"].includes(d)) {
+        return res.status(400).json({ error: "Decision invalide." });
+      }
+
+      const dec = {
+        id: `DEC_${Date.now()}_${Math.random().toString(16).slice(2)}`,
+        ts: t,
+        objectionId: safeStr(payload?.objectionId || "", 40),
+        decision: d,
+        reasoning: safeStr(payload?.reasoning || "", 1400),
+        effects: payload?.effects && typeof payload.effects === "object" ? payload.effects : null,
+        by: allowedAsAIJudge ? "IA" : (me?.role || "Juge"),
+      };
+
       room.decisions = Array.isArray(room.decisions) ? room.decisions : [];
-      room.decisions.unshift({ ...payload, ts: t, by: me.displayName, role: me.role });
-      room.decisions = room.decisions.slice(0, 80);
+      room.decisions.push(dec);
+
       room.version = Number(room.version || 0) + 1;
-      await roomSave(room);
-      emitRoomUpdate(room);
-      return res.json({ ok: true, version: room.version });
+      rooms.set(room.roomId, room);
+      return res.json({ ok: true, version: room.version, decision: dec });
     }
 
-    await roomSave(room);
-    return res.json({ ok: true, version: Number(room.version || 0) });
+    return res.status(400).json({ error: "ACTION_UNKNOWN" });
   } catch (e) {
     console.error("❌ /justice-lab/rooms/action:", e);
     return res.status(500).json({ error: "Erreur action room." });
   }
 });
 
-/* =========================================================
-   ✅ JusticeLab V4 — Socket.IO Lobby temps réel
-   Events:
-     - jl:join  { roomId, participantId }
-     - jl:ready { roomId, participantId, ready:boolean }
-     - jl:start { roomId, participantId }
-     - jl:action { roomId, participantId, action:{type,payload} }
-   Server emits:
-     - jl:room:update (scrubbed room)
-     - jl:toast (messages)
-========================================================= */
+/* -------------------------
+   ✅ COMPAT : anciens endpoints
+   ------------------------- */
 
-io.on("connection", (socket) => {
-  socket.on("jl:join", async (payload = {}) => {
-    try {
-      const roomId = String(payload?.roomId || "").trim().toUpperCase();
-      const participantId = String(payload?.participantId || "").trim();
-      if (!roomId || !participantId) return;
-      const room = await getRoomOr404(roomId);
-      if (!room) {
-        socket.emit("jl:toast", { level: "error", message: "Salle introuvable/expirée.", ts: nowIso() });
-        return;
-      }
-      const me = getParticipant(room, participantId);
-      if (!me) {
-        socket.emit("jl:toast", { level: "error", message: "Participant non reconnu.", ts: nowIso() });
-        return;
-      }
-      socket.join(roomId);
-      socket.data = { roomId, participantId };
-
-      me.lastSeenAt = nowIso();
-      room.updatedAt = me.lastSeenAt;
-      room.expiresAt = nowMs() + ROOMS_TTL_MS;
-      await roomSave(room);
-
-      // Push initial state
-      socket.emit("jl:room:update", scrubRoomForClient(room));
-      emitRoomToast(roomId, `${me.displayName} a rejoint le lobby.`, "info");
-      emitRoomUpdate(room);
-    } catch (e) {
-      socket.emit("jl:toast", { level: "error", message: "Erreur join realtime.", ts: nowIso() });
-    }
-  });
-
-  socket.on("jl:ready", async (payload = {}) => {
-    try {
-      const roomId = String(payload?.roomId || socket.data?.roomId || "").trim().toUpperCase();
-      const participantId = String(payload?.participantId || socket.data?.participantId || "").trim();
-      const ready = Boolean(payload?.ready);
-      if (!roomId || !participantId) return;
-      const room = await getRoomOr404(roomId);
-      if (!room) return;
-      const me = getParticipant(room, participantId);
-      if (!me) return;
-      me.ready = ready;
-      me.lastSeenAt = nowIso();
-      room.updatedAt = me.lastSeenAt;
-      room.expiresAt = nowMs() + ROOMS_TTL_MS;
-      await roomSave(room);
-      emitRoomUpdate(room);
-    } catch {}
-  });
-
-  socket.on("jl:start", async (payload = {}) => {
-    try {
-      const roomId = String(payload?.roomId || socket.data?.roomId || "").trim().toUpperCase();
-      const participantId = String(payload?.participantId || socket.data?.participantId || "").trim();
-      if (!roomId || !participantId) return;
-      const room = await getRoomOr404(roomId);
-      if (!room) return;
-      const me = getParticipant(room, participantId);
-      if (!me || !me.isHost) {
-        socket.emit("jl:toast", { level: "error", message: "Seul le créateur peut démarrer.", ts: nowIso() });
-        return;
-      }
-
-      const players = Array.isArray(room.players) ? room.players : [];
-      const readyCount = players.filter((x) => x?.ready).length;
-      // host must be ready too
-            // Démarrage : au moins 2 joueurs, et (option) tout le monde prêt
-      if (players.length < 2) {
-        socket.emit("jl:toast", { level: "warning", message: "Attends au moins 1 autre participant.", ts: nowIso() });
-        return;
-      }
-      const everyoneReady = players.every((x) => x?.ready === true);
-      if (!everyoneReady) {
-        socket.emit("jl:toast", { level: "warning", message: "Tous les participants ne sont pas prêts.", ts: nowIso() });
-        return;
-      }
-
-      room.meta = room.meta || {};
-      room.meta.started = true;
-      room.meta.startedAt = nowIso();
-      room.version = Number(room.version || 0) + 1;
-      room.updatedAt = room.meta.startedAt;
-      room.expiresAt = nowMs() + ROOMS_TTL_MS;
-      await roomSave(room);
-
-      emitRoomToast(roomId, "Audience démarrée par le créateur.", "success");
-      emitRoomUpdate(room);    } catch {}
-  });
-
-  socket.on("jl:action", async (payload = {}) => {
-    try {
-      const roomId = String(payload?.roomId || socket.data?.roomId || "").trim().toUpperCase();
-      const participantId = String(payload?.participantId || socket.data?.participantId || "").trim();
-      const action = payload?.action || {};
-      if (!roomId || !participantId) return;
-      const room = await getRoomOr404(roomId);
-      if (!room) return;
-      const me = getParticipant(room, participantId);
-      if (!me) return;
-
-      // Hard rule: each user can only act for their own role
-      action.payload = action.payload || {};
-      if (action.payload.role && String(action.payload.role) !== String(me.role)) {
-        socket.emit("jl:toast", { level: "error", message: "Action refusée: rôle non autorisé.", ts: nowIso() });
-        return;
-      }
-      action.payload.role = me.role;
-
-      // Reuse REST logic by calling the same code path (minimal):
-      const type = String(action?.type || "").trim().toUpperCase();
-      const t = nowIso();
-      me.lastSeenAt = t;
-      room.updatedAt = t;
-      room.expiresAt = nowMs() + ROOMS_TTL_MS;
-
-      if (!type || type === "PING") {
-        await roomSave(room);
-        emitRoomUpdate(room);
-        return;
-      }
-
-      if (type === "SNAPSHOT" || type === "SYNC_SNAPSHOT") {
-        if (!me.isHost) {
-          socket.emit("jl:toast", { level: "error", message: "Seul l'hôte peut synchroniser l'état.", ts: nowIso() });
-          return;
-        }
-        room.snapshot = action.payload?.snapshot || null;
-        room.version = Number(room.version || 0) + 1;
-        await roomSave(room);
-        emitRoomUpdate(room);
-        return;
-      }
-
-      if (type === "CHAT" || type === "UTTERANCE") {
-        room.timeline = Array.isArray(room.timeline) ? room.timeline : [];
-        const msg = {
-          id: `m_${Date.now().toString(36)}_${Math.random().toString(16).slice(2)}`,
-          ts: t,
-          by: me.displayName,
-          role: me.role,
-          text: String(action.payload?.text || "").slice(0, 1200),
-        };
-        room.timeline.unshift(msg);
-        room.timeline = room.timeline.slice(0, 120);
-        room.version = Number(room.version || 0) + 1;
-        await roomSave(room);
-        emitRoomUpdate(room);
-        return;
-      }
-
-      // suggestions/decisions handled by existing arrays
-      if (type === "SUGGESTION") {
-        room.suggestions = Array.isArray(room.suggestions) ? room.suggestions : [];
-        room.suggestions.unshift({ ...action.payload, ts: t, by: me.displayName, role: me.role });
-        room.suggestions = room.suggestions.slice(0, 80);
-        room.version = Number(room.version || 0) + 1;
-        await roomSave(room);
-        emitRoomUpdate(room);
-        return;
-      }
-
-      if (type === "JUDGE_DECISION") {
-        if (me.role !== "Juge") {
-          socket.emit("jl:toast", { level: "error", message: "Seul le juge peut trancher.", ts: nowIso() });
-          return;
-        }
-        room.decisions = Array.isArray(room.decisions) ? room.decisions : [];
-        room.decisions.unshift({ ...action.payload, ts: t, by: me.displayName, role: me.role });
-        room.decisions = room.decisions.slice(0, 80);
-        room.version = Number(room.version || 0) + 1;
-        await roomSave(room);
-        emitRoomUpdate(room);
-        return;
-      }
-    } catch (e) {
-      socket.emit("jl:toast", { level: "error", message: "Erreur action realtime.", ts: nowIso() });
-    }
-  });
-
-
-  socket.on("disconnect", async () => {
-    try {
-      const roomId = String(socket.data?.roomId || "").trim().toUpperCase();
-      const participantId = String(socket.data?.participantId || "").trim();
-      if (!roomId || !participantId) return;
-      const room = await getRoomOr404(roomId);
-      if (!room) return;
-      const me = getParticipant(room, participantId);
-      if (me) {
-        me.lastSeenAt = nowIso();
-        me.connected = false;
-      }
-      room.updatedAt = nowIso();
-      room.expiresAt = nowMs() + ROOMS_TTL_MS;
-      await roomSave(room);
-      emitRoomUpdate(room);
-    } catch {}
-  });
+/**
+ * GET /justice-lab/rooms/state/:roomId
+ * (ancien) -> renvoie { room }
+ */
+app.get("/justice-lab/rooms/state/:roomId", requireAuth, async (req, res) => {
+  try {
+    const roomId = String(req.params?.roomId || "").trim().toUpperCase();
+    const room = getRoomOr404(roomId);
+    if (!room) return res.status(404).json({ error: "Room introuvable/expirée." });
+    return res.json({ room: scrubRoomForClient(room) });
+  } catch (e) {
+    return res.status(500).json({ error: "Erreur state room." });
+  }
 });
+
+/**
+ * POST /justice-lab/rooms/suggest
+ * (ancien) body: { roomId, userId, role, objectionId, choice, reasoning }
+ */
+app.post("/justice-lab/rooms/suggest", requireAuth, async (req, res) => {
+  try {
+    const { roomId, role, objectionId, choice, reasoning } = req.body || {};
+    if (!roomId || !role || !objectionId || !choice) {
+      return res.status(400).json({ error: "roomId, role, objectionId, choice requis." });
+    }
+
+    const room = getRoomOr404(roomId);
+    if (!room) return res.status(404).json({ error: "Room introuvable/expirée." });
+
+    const sug = {
+      id: `SUG_${Date.now()}_${Math.random().toString(16).slice(2)}`,
+      ts: nowIso(),
+      role: normalizeRole(role),
+      participantId: null,
+      displayName: safeStr(req.body?.userName || role, 60),
+      objectionId: safeStr(objectionId, 40),
+      decision: safeStr(choice, 40),
+      reasoning: safeStr(reasoning || "", 1400),
+    };
+
+    room.suggestions = Array.isArray(room.suggestions) ? room.suggestions : [];
+    room.suggestions.unshift(sug);
+    room.suggestions = room.suggestions.slice(0, 60);
+
+    room.updatedAt = nowIso();
+    room.expiresAt = nowMs() + ROOMS_TTL_MS;
+
+    rooms.set(room.roomId, room);
+    return res.json({ ok: true, suggestion: sug, room: scrubRoomForClient(room) });
+  } catch (e) {
+    console.error("❌ /justice-lab/rooms/suggest:", e);
+    return res.status(500).json({ error: "Erreur suggest." });
+  }
+});
+
+/**
+ * POST /justice-lab/rooms/judge-decision
+ * (ancien) body: { roomId, userId, objectionId, decision, reasoning, effects? }
+ */
+app.post("/justice-lab/rooms/judge-decision", requireAuth, async (req, res) => {
+  try {
+    const { roomId, objectionId, decision, reasoning, effects } = req.body || {};
+    if (!roomId || !objectionId || !decision) {
+      return res.status(400).json({ error: "roomId, objectionId, decision requis." });
+    }
+
+    const room = getRoomOr404(roomId);
+    if (!room) return res.status(404).json({ error: "Room introuvable/expirée." });
+
+    const d = safeStr(decision, 40);
+    if (!["Accueillir", "Rejeter", "Demander précision"].includes(d)) {
+      return res.status(400).json({ error: "Decision invalide." });
+    }
+
+    const dec = {
+      id: `DEC_${Date.now()}_${Math.random().toString(16).slice(2)}`,
+      ts: nowIso(),
+      objectionId: safeStr(objectionId, 40),
+      decision: d,
+      reasoning: safeStr(reasoning || "", 1400),
+      effects: effects && typeof effects === "object" ? effects : null,
+    };
+
+    room.decisions = Array.isArray(room.decisions) ? room.decisions : [];
+    room.decisions.push(dec);
+
+    room.updatedAt = nowIso();
+    room.expiresAt = nowMs() + ROOMS_TTL_MS;
+    room.version = Number(room.version || 0) + 1;
+
+    rooms.set(room.roomId, room);
+    return res.json({ ok: true, decision: dec, room: scrubRoomForClient(room) });
+  } catch (e) {
+    console.error("❌ /justice-lab/rooms/judge-decision:", e);
+    return res.status(500).json({ error: "Erreur judge-decision." });
+  }
+});
+
 /* =======================
    START SERVER
 ======================= */
 const port = process.env.PORT || 3000;
-server.listen(port, () => {
-  console.log(`🚀 DroitGPT API + Socket.IO démarrée sur le port ${port}`);
+app.listen(port, () => {
+  console.log(`🚀 DroitGPT API démarrée sur le port ${port}`);
 });
