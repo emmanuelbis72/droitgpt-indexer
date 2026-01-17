@@ -34,6 +34,15 @@ config({ path: path.join(__dirname, ".env") });
 
 const app = express();
 
+// ----------------------------
+// Healthcheck (fast, no-auth)
+// ----------------------------
+app.get("/health", (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  res.json({ ok: true, service: "droitgpt-indexer", ts: new Date().toISOString() });
+});
+
+
 /* =======================
    Keep-alive agents (latence réseau ↓)
 ======================= */
