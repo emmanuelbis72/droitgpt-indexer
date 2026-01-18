@@ -268,6 +268,9 @@ function normalizeRole(role) {
 
   // Avocats (2 côtés)
   if (r.includes("avoc")) {
+    // civil (demandeur / défendeur)
+    if (r.includes('demandeur') || r.includes('requérant') || r.includes('requerant')) return 'Avocat Demandeur';
+    if (r.includes('defendeur') || r.includes('défendeur') || r.includes('intimé') || r.includes('intime')) return 'Avocat Défendeur';
     const isDefense =
       r.includes("def") ||
       r.includes("déf") ||
@@ -1440,29 +1443,12 @@ function cleanupRooms() {
 setInterval(cleanupRooms, 60 * 1000).unref?.();
 
 function ensureRoleValid(role) {
-  const raw = String(role || "").trim();
-
-  // ✅ Rôles autorisés (inclut avocats par partie)
-  const ALLOWED = [
-    "Juge",
-    "Procureur",
-    "Greffier",
-    // pénal
-    "Avocat Défense",
-    "Avocat Partie civile",
-    // civil (2 parties)
-    "Avocat Demandeur",
-    "Avocat Défendeur",
-  ];
-
-  // Si le rôle est déjà conforme à l'un des rôles autorisés
-  if (ALLOWED.includes(raw)) return raw;
-
-  // Normalisation (compat) : "Avocat" / variantes -> Défense par défaut
-  const norm = normalizeRole(raw || "");
-  const rr = norm === "Avocat" ? "Avocat Défense" : norm;
-
-  if (!ALLOWED.includes(rr)) return "ROLE_INVALID";
+  const r = normalizeRole(role || "");
+  // compat legacy "Avocat"
+  const rr = r === "Avocat" ? "Avocat Défense" : r;
+  if (!["Juge", "Procureur", "Greffier", "Avocat Demandeur", "Avocat Défendeur", "Avocat Défense", "Avocat Partie civile"].includes(rr)) {
+    return "ROLE_INVALID";
+  }
   return rr;
 }
 
