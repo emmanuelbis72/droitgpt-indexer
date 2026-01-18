@@ -15,6 +15,13 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// ✅ Healthcheck (fast, no auth)
+app.get("/health", (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  res.status(200).json({ ok: true, service: "droitgpt-voice-service", ts: new Date().toISOString() });
+});
+
+
 const upload = multer({ storage: multer.memoryStorage() });
 
 // ⚙️ OpenAI
