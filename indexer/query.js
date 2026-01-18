@@ -34,15 +34,6 @@ config({ path: path.join(__dirname, ".env") });
 
 const app = express();
 
-// ----------------------------
-// Healthcheck (fast, no-auth)
-// ----------------------------
-app.get("/health", (req, res) => {
-  res.setHeader("Cache-Control", "no-store");
-  res.json({ ok: true, service: "droitgpt-indexer", ts: new Date().toISOString() });
-});
-
-
 /* =======================
    Keep-alive agents (latence réseau ↓)
 ======================= */
@@ -608,8 +599,6 @@ app.post("/justice-lab/generate-case", requireAuth, async (req, res) => {
       level = "Intermédiaire",
       seed = String(Date.now()),
       lang = "fr",
-      // ✅ prompt utilisateur (guide la génération)
-      prompt = "",
       draft = null,
       templateId = null,
       caseSeed = null,
@@ -630,8 +619,6 @@ app.post("/justice-lab/generate-case", requireAuth, async (req, res) => {
 
     const system = buildJusticeLabGenerateCaseSystemPrompt().trim();
 
-    const userPrompt = safeStr(String(prompt || ""), 2200);
-
     const userFull = `
 PARAMÈTRES:
 - Mode: full
@@ -639,9 +626,6 @@ PARAMÈTRES:
 - Niveau: ${level}
 - Langue: ${lang}
 - Seed: ${metaHints.seed}
-
-CONSINGE UTILISATEUR (si présente) :
-${userPrompt ? userPrompt : "(aucune consigne spécifique)"}
 
 Tu dois retourner EXACTEMENT un JSON au format suivant:
 {
@@ -687,9 +671,6 @@ PARAMÈTRES:
 - Niveau: ${level}
 - Langue: ${lang}
 - Seed: ${metaHints.seed}
-
-CONSINGE UTILISATEUR (si présente) :
-${userPrompt ? userPrompt : "(aucune consigne spécifique)"}
 
 DRAFT:
 ${safeStr(JSON.stringify(draft || {}, null, 2), 9000)}
@@ -1459,12 +1440,29 @@ function cleanupRooms() {
 setInterval(cleanupRooms, 60 * 1000).unref?.();
 
 function ensureRoleValid(role) {
-  const r = normalizeRole(role || "");
-  // compat legacy "Avocat"
-  const rr = r === "Avocat" ? "Avocat Défense" : r;
-  if (!["Juge", "Procureur", "Greffier", "Avocat Défense", "Avocat Partie civile"].includes(rr)) {
-    return "ROLE_INVALID";
-  }
+  const raw = String(role || "").trim();
+
+  // ✅ Rôles autorisés (inclut avocats par partie)
+  const ALLOWED = [
+    "Juge",
+    "Procureur",
+    "Greffier",
+    // pénal
+    "Avocat Défense",
+    "Avocat Partie civile",
+    // civil (2 parties)
+    "Avocat Demandeur",
+    "Avocat Défendeur",
+  ];
+
+  // Si le rôle est déjà conforme à l'un des rôles autorisés
+  if (ALLOWED.includes(raw)) return raw;
+
+  // Normalisation (compat) : "Avocat" / variantes -> Défense par défaut
+  const norm = normalizeRole(raw || "");
+  const rr = norm === "Avocat" ? "Avocat Défense" : norm;
+
+  if (!ALLOWED.includes(rr)) return "ROLE_INVALID";
   return rr;
 }
 
