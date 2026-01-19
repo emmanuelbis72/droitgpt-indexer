@@ -261,6 +261,33 @@ function safeStr(s, max = 8000) {
   return String(s || "").slice(0, max);
 }
 
+// Summary helper: clamp to N sentences (default: 6)
+// Keeps punctuation. Works for French/English.
+function clampToNSentences(text, n = 6) {
+  const t = String(text || "").replace(/\s+/g, " ").trim();
+  if (!t) return "";
+
+  const sentences = [];
+  let cur = "";
+  for (let i = 0; i < t.length; i++) {
+    const ch = t[i];
+    cur += ch;
+    if (ch === "." || ch === "!" || ch === "?") {
+      const s = cur.trim();
+      if (s) sentences.push(s);
+      cur = "";
+      if (sentences.length >= n) break;
+    }
+  }
+  // If we did not reach n sentence endings, keep what we have
+  if (sentences.length == 0) {
+    // No punctuation -> split by line breaks as fallback
+    const lines = t.split(/\n+/).map((x) => x.trim()).filter(Boolean);
+    return lines.slice(0, n).join(" ");
+  }
+  return sentences.join(" ").trim();
+}
+
 function normalizeRole(role) {
   const r = String(role || "").toLowerCase();
   if (r.includes("proc")) return "Procureur";
@@ -661,7 +688,7 @@ Tu dois retourner EXACTEMENT un JSON au format suivant:
 Contraintes:
 - pieces: 5 à 8 pièces (P1..P8), cohérentes.
 - Ajoute au moins 1 pièce tardive (isLate=true) et 1 pièce contestable (reliability faible).
-- resume: 5 à 10 lignes, contexte RDC.
+- resume: exactement 6 phrases realistes, contexte RDC.
 - audienceSeed: 6 à 10 points.
 - risquesProceduraux: 4 à 7 risques.
 - Ne mentionne pas d'articles numérotés.
@@ -709,6 +736,7 @@ Règles:
         niveau: level,
         meta: { ...metaHints, generatedAt: new Date().toISOString() },
       });
+      caseData.resume = clampToNSentences(caseData.resume, 6);
       return res.json({ caseData });
     }
 
@@ -719,6 +747,9 @@ Règles:
       niveau: level,
       meta: { ...metaHints, generatedAt: new Date().toISOString() },
     });
+
+    // Enforce resume length: 6 sentences max (stable format)
+    sanitized.resume = clampToNSentences(sanitized.resume, 6);
 
     sanitized.meta = {
       ...(sanitized.meta || {}),
@@ -739,6 +770,7 @@ Règles:
       niveau: req.body?.level || "Intermédiaire",
       meta: { generatedAt: new Date().toISOString() },
     });
+    caseData.resume = clampToNSentences(caseData.resume, 6);
     return res.status(200).json({ caseData, warning: "fallback" });
   }
 });
