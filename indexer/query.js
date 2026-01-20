@@ -324,6 +324,7 @@ function buildPiecesCatalog(caseData, max = 12) {
 function sanitizeCaseData(input, fallback = {}) {
   const cd = input && typeof input === "object" ? input : {};
   const out = {
+    id: safeStr(cd.id || cd.caseId || fallback.id || fallback.caseId || `JL-${Date.now()}`, 60),
     caseId: safeStr(cd.caseId || cd.id || fallback.caseId || `JL-${Date.now()}`, 60),
     domaine: safeStr(cd.domaine || fallback.domaine || "Pénal", 40),
     niveau: safeStr(cd.niveau || fallback.niveau || "Intermédiaire", 24),
