@@ -261,33 +261,6 @@ function safeStr(s, max = 8000) {
   return String(s || "").slice(0, max);
 }
 
-// Summary helper: clamp to N sentences (default: 6)
-// Keeps punctuation. Works for French/English.
-function clampToNSentences(text, n = 6) {
-  const t = String(text || "").replace(/\s+/g, " ").trim();
-  if (!t) return "";
-
-  const sentences = [];
-  let cur = "";
-  for (let i = 0; i < t.length; i++) {
-    const ch = t[i];
-    cur += ch;
-    if (ch === "." || ch === "!" || ch === "?") {
-      const s = cur.trim();
-      if (s) sentences.push(s);
-      cur = "";
-      if (sentences.length >= n) break;
-    }
-  }
-  // If we did not reach n sentence endings, keep what we have
-  if (sentences.length == 0) {
-    // No punctuation -> split by line breaks as fallback
-    const lines = t.split(/\n+/).map((x) => x.trim()).filter(Boolean);
-    return lines.slice(0, n).join(" ");
-  }
-  return sentences.join(" ").trim();
-}
-
 function normalizeRole(role) {
   const r = String(role || "").toLowerCase();
   if (r.includes("proc")) return "Procureur";
@@ -379,6 +352,18 @@ function sanitizeCaseData(input, fallback = {}) {
       : Array.isArray(fallback.risquesProceduraux)
       ? fallback.risquesProceduraux
       : [],
+    // ✅ Conservé pour la simulation (incidents/objections)
+    objectionTemplates: Array.isArray(cd.objectionTemplates)
+      ? cd.objectionTemplates.slice(0, 60)
+      : Array.isArray(fallback.objectionTemplates)
+      ? fallback.objectionTemplates
+      : [],
+    // ✅ Conservé pour le déroulé (appel → comparution → incidents → débats → plaidoiries/réquisitions → délibéré)
+    eventsDeck: Array.isArray(cd.eventsDeck)
+      ? cd.eventsDeck.slice(0, 80)
+      : Array.isArray(fallback.eventsDeck)
+      ? fallback.eventsDeck
+      : [],
     meta: cd.meta && typeof cd.meta === "object" ? cd.meta : fallback.meta || {},
   };
 
@@ -387,6 +372,37 @@ function sanitizeCaseData(input, fallback = {}) {
   if (!out.parties.defendeur && cd.parties?.defendeur) out.parties.defendeur = cd.parties.defendeur;
 
   return out;
+}
+
+// ✅ Force un résumé en EXACTEMENT 6 phrases (utile pour import PDF/DOCX)
+function enforceSixSentences(text) {
+  const raw = String(text || "").replace(/\s+/g, " ").trim();
+  if (!raw) return "";
+
+  // Découpe simple par ponctuation de fin de phrase
+  const parts = raw
+    .split(/(?<=[\.!\?])\s+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  if (parts.length === 6) return parts.join(" ");
+  if (parts.length > 6) return parts.slice(0, 6).join(" ");
+
+  // Pas assez de phrases: on complète sans inventer trop de détails
+  const filler = [
+    "Les pièces versées au dossier seront discutées contradictoirement.",
+    "Chaque partie soutient sa version des faits et la Cour encadre les débats.",
+    "La procédure doit respecter le contradictoire et les droits de la défense.",
+    "La Cour examinera la recevabilité, la force probante des pièces et les demandes.",
+    "L'audience se déroulera en phases (incidents, débats, plaidoiries/réquisitions, délibéré).",
+    "La décision sera motivée au regard des éléments produits et des observations des parties.",
+  ];
+  const out = [...parts];
+  for (const f of filler) {
+    if (out.length >= 6) break;
+    out.push(f);
+  }
+  return out.slice(0, 6).join(" ");
 }
 
 /* =======================
@@ -626,9 +642,13 @@ app.post("/justice-lab/generate-case", requireAuth, async (req, res) => {
     const {
       mode = "full",
       domaine = "Pénal",
+      domain = null,
       level = "Intermédiaire",
       seed = String(Date.now()),
       lang = "fr",
+      // ✅ Import dossier réel (PDF/DOCX) -> texte extrait par analyse-service
+      documentText = null,
+      filename = null,
       draft = null,
       templateId = null,
       caseSeed = null,
@@ -637,7 +657,12 @@ app.post("/justice-lab/generate-case", requireAuth, async (req, res) => {
       chambre = null,
     } = req.body || {};
 
-    const safeMode = String(mode || "full").toLowerCase() === "enrich" ? "enrich" : "full";
+    const modeLower = String(mode || "full").toLowerCase();
+    const isFromDocument = modeLower === "from_document" || modeLower === "document" || modeLower === "import";
+    const safeMode = modeLower === "enrich" ? "enrich" : isFromDocument ? "from_document" : "full";
+
+    // ✅ compat: "domain" (slug) ou "domaine" (label)
+    const domaineLabel = safeStr(domaine || domain || "Pénal", 40);
 
     const metaHints = {
       templateId: templateId ? safeStr(templateId, 80) : undefined,
@@ -652,7 +677,7 @@ app.post("/justice-lab/generate-case", requireAuth, async (req, res) => {
     const userFull = `
 PARAMÈTRES:
 - Mode: full
-- Domaine: ${domaine}
+- Domaine: ${domaineLabel}
 - Niveau: ${level}
 - Langue: ${lang}
 - Seed: ${metaHints.seed}
@@ -688,9 +713,39 @@ Tu dois retourner EXACTEMENT un JSON au format suivant:
 Contraintes:
 - pieces: 5 à 8 pièces (P1..P8), cohérentes.
 - Ajoute au moins 1 pièce tardive (isLate=true) et 1 pièce contestable (reliability faible).
-- resume: exactement 6 phrases realistes, contexte RDC.
+- resume: 5 à 10 lignes, contexte RDC.
 - audienceSeed: 6 à 10 points.
 - risquesProceduraux: 4 à 7 risques.
+- Ne mentionne pas d'articles numérotés.
+`.trim();
+
+    const userFromDocument = `
+PARAMÈTRES:
+- Mode: from_document
+- Domaine: ${domaineLabel}
+- Niveau: ${level}
+- Langue: ${lang}
+- Seed: ${metaHints.seed}
+- Fichier: ${safeStr(filename || "document", 140)}
+
+TEXTE DU DOSSIER (extrait):
+"""
+${safeStr(String(documentText || ""), 12000)}
+"""
+
+Objectif:
+- Génère un dossier JusticeLab UNIQUE en te basant STRICTEMENT sur le texte ci-dessus.
+- Adapte les noms, dates et lieux au contexte RDC si le texte est ambigu, sans contredire le texte.
+
+Règles impératives:
+- Retourne EXACTEMENT un JSON au format attendu.
+- resume: EXACTEMENT 6 phrases (pas de puces, pas de sauts de ligne).
+- pieces: 5 à 8 pièces cohérentes avec le texte.
+- audienceSeed: 6 à 10 points.
+- risquesProceduraux: 4 à 7.
+- Ajoute objectionTemplates: AU MOINS 5 objections pour chaque rôle (Procureur, Avocat Demandeur, Avocat Défendeur) => minimum 15.
+  Chaque objection doit avoir: {id, by, title, statement, options, bestChoiceByRole, effects}.
+- Ajoute eventsDeck: déroulé réaliste (appel de cause → comparution → incidents → débats → plaidoiries/réquisitions → mise en délibéré).
 - Ne mentionne pas d'articles numérotés.
 `.trim();
 
@@ -717,7 +772,10 @@ Règles:
       model: process.env.JUSTICE_LAB_CASE_MODEL || process.env.JUSTICE_LAB_MODEL || "gpt-4o-mini",
       messages: [
         { role: "system", content: system },
-        { role: "user", content: safeMode === "enrich" ? userEnrich : userFull },
+        {
+          role: "user",
+          content: safeMode === "enrich" ? userEnrich : safeMode === "from_document" ? userFromDocument : userFull,
+        },
       ],
       temperature: Number(process.env.JUSTICE_LAB_CASE_TEMPERATURE || 0.6),
       max_tokens: Number(process.env.JUSTICE_LAB_CASE_MAX_TOKENS || 1400),
@@ -736,29 +794,35 @@ Règles:
         niveau: level,
         meta: { ...metaHints, generatedAt: new Date().toISOString() },
       });
-      caseData.resume = clampToNSentences(caseData.resume, 6);
       return res.json({ caseData });
     }
 
     const fallbackBase = safeMode === "enrich" ? (draft && typeof draft === "object" ? draft : {}) : {};
     const sanitized = sanitizeCaseData(parsed, {
       ...fallbackBase,
-      domaine,
+      domaine: domaineLabel,
       niveau: level,
       meta: { ...metaHints, generatedAt: new Date().toISOString() },
     });
 
-    // Enforce resume length: 6 sentences max (stable format)
-    sanitized.resume = clampToNSentences(sanitized.resume, 6);
+    // ✅ Résumé EXACTEMENT 6 phrases si import dossier réel
+    if (safeMode === "from_document") {
+      sanitized.resume = enforceSixSentences(sanitized.resume);
+    }
 
     sanitized.meta = {
       ...(sanitized.meta || {}),
-      templateId: sanitized.meta?.templateId || metaHints.templateId || "AI_FULL",
+      templateId:
+        sanitized.meta?.templateId ||
+        metaHints.templateId ||
+        (safeMode === "from_document" ? "AI_IMPORT" : "AI_FULL"),
       seed: sanitized.meta?.seed || metaHints.seed,
       city: sanitized.meta?.city || metaHints.city || "RDC",
       tribunal: sanitized.meta?.tribunal || metaHints.tribunal || "Juridiction (simulation)",
       chambre: sanitized.meta?.chambre || metaHints.chambre || "Chambre (simulation)",
       generatedAt: sanitized.meta?.generatedAt || new Date().toISOString(),
+      source: sanitized.meta?.source || (safeMode === "from_document" ? "import" : "ai"),
+      filename: safeMode === "from_document" ? safeStr(filename || "document", 200) : sanitized.meta?.filename,
     };
 
     return res.json({ caseData: sanitized });
@@ -770,7 +834,6 @@ Règles:
       niveau: req.body?.level || "Intermédiaire",
       meta: { generatedAt: new Date().toISOString() },
     });
-    caseData.resume = clampToNSentences(caseData.resume, 6);
     return res.status(200).json({ caseData, warning: "fallback" });
   }
 });

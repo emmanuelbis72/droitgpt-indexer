@@ -474,6 +474,51 @@ async function extractTextFromUpload(openai, filePath, originalName, body) {
 module.exports = function (openai) {
   const router = express.Router();
 
+
+  // POST /extract -> extraction seule (PDF/DOCX) pour JusticeLab import dossier
+  router.post("/extract", upload.single("file"), async (req, res) => {
+    if (!req.file) return res.status(400).json({ error: "Aucun fichier envoyé." });
+
+    const filePath = req.file.path;
+    const originalName = req.file.originalname || "document";
+    const ext = path.extname(originalName).toLowerCase();
+
+    try {
+      let text = "";
+
+      if (ext === ".pdf") {
+        text = await extractTextFromPdf(filePath);
+      } else if (ext === ".docx") {
+        const result = await mammoth.extractRawText({ path: filePath });
+        text = result.value || "";
+      } else {
+        return res.status(400).json({ error: "Format non supporté. PDF ou DOCX requis." });
+      }
+
+      text = cleanExtractedText(text);
+      if (!text || text.length < 50) {
+        return res.status(400).json({ error: "Texte trop court ou vide après extraction." });
+      }
+
+      const MAX_CHARS = Number(process.env.EXTRACT_MAX_CHARS || 60000);
+      const truncated = text.length > MAX_CHARS;
+      const documentText = truncated ? text.slice(0, MAX_CHARS) : text;
+
+      return res.json({
+        documentText,
+        filename: originalName,
+        ext,
+        truncated,
+        meta: { maxChars: MAX_CHARS, length: text.length },
+      });
+    } catch (err) {
+      console.error("❌ Erreur extraction /extract :", err?.message || err);
+      return res.status(500).json({ error: "Erreur extraction", details: err?.message || "Inconnue" });
+    } finally {
+      try { if (fs.existsSync(filePath)) fs.unlinkSync(filePath); } catch {}
+    }
+  });
+
   // POST /
   router.post("/", upload.single("file"), async (req, res) => {
     if (!req.file) return res.status(400).json({ error: "Aucun fichier envoyé." });
