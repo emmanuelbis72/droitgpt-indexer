@@ -762,7 +762,7 @@ Règles:
 
     sanitized.meta = {
       ...(sanitized.meta || {}),
-      templateId: sanitized.meta?.templateId || metaHints.templateId || "AI_FULL",
+      templateId: sanitized.meta?.templateId || metaHints.templateId || (safeMode === "from_document" ? "AI_DOC" : "AI_FULL"),
       seed: sanitized.meta?.seed || metaHints.seed,
       city: sanitized.meta?.city || metaHints.city || "RDC",
       tribunal: sanitized.meta?.tribunal || metaHints.tribunal || "Juridiction (simulation)",
@@ -787,7 +787,7 @@ app.post("/justice-lab/generate-case", requireAuth, justiceLabGenerateCaseHandle
 app.post("/justice-lab/generate-case-from-document", requireAuth, (req, res) => {
   req.body = { ...(req.body || {}), mode: "from_document" };
   return justiceLabGenerateCaseHandler(req, res);
-
+});
 
 // ✅ COMPAT FRONT (ancienne route): /justicelab/import-case
 app.post("/justicelab/import-case", requireAuth, (req, res) => {
@@ -802,7 +802,6 @@ app.post("/justicelab/import-case", requireAuth, (req, res) => {
     lang: b.lang || "fr",
   };
   return justiceLabGenerateCaseHandler(req, res);
-});
 });
 
 /* =========================================================
