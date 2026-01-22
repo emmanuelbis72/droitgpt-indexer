@@ -324,7 +324,6 @@ function buildPiecesCatalog(caseData, max = 12) {
 function sanitizeCaseData(input, fallback = {}) {
   const cd = input && typeof input === "object" ? input : {};
   const out = {
-    id: safeStr(cd.id || cd.caseId || fallback.id || fallback.caseId || `JL-${Date.now()}`, 60),
     caseId: safeStr(cd.caseId || cd.id || fallback.caseId || `JL-${Date.now()}`, 60),
     domaine: safeStr(cd.domaine || fallback.domaine || "Pénal", 40),
     niveau: safeStr(cd.niveau || fallback.niveau || "Intermédiaire", 24),
@@ -353,57 +352,15 @@ function sanitizeCaseData(input, fallback = {}) {
       : Array.isArray(fallback.risquesProceduraux)
       ? fallback.risquesProceduraux
       : [],
-    // ✅ Conservé pour la simulation (incidents/objections)
-    objectionTemplates: Array.isArray(cd.objectionTemplates)
-      ? cd.objectionTemplates.slice(0, 60)
-      : Array.isArray(fallback.objectionTemplates)
-      ? fallback.objectionTemplates
-      : [],
-    // ✅ Conservé pour le déroulé (appel → comparution → incidents → débats → plaidoiries/réquisitions → délibéré)
-    eventsDeck: Array.isArray(cd.eventsDeck)
-      ? cd.eventsDeck.slice(0, 80)
-      : Array.isArray(fallback.eventsDeck)
-      ? fallback.eventsDeck
-      : [],
     meta: cd.meta && typeof cd.meta === "object" ? cd.meta : fallback.meta || {},
   };
 
   if (!out.parties || typeof out.parties !== "object") out.parties = {};
   if (!out.parties.demandeur && cd.parties?.demandeur) out.parties.demandeur = cd.parties.demandeur;
   if (!out.parties.defendeur && cd.parties?.defendeur) out.parties.defendeur = cd.parties.defendeur;
+  out.id = out.caseId;
 
   return out;
-}
-
-// ✅ Force un résumé en EXACTEMENT 6 phrases (utile pour import PDF/DOCX)
-function enforceSixSentences(text) {
-  const raw = String(text || "").replace(/\s+/g, " ").trim();
-  if (!raw) return "";
-
-  // Découpe simple par ponctuation de fin de phrase
-  const parts = raw
-    .split(/(?<=[\.!\?])\s+/)
-    .map((s) => s.trim())
-    .filter(Boolean);
-
-  if (parts.length === 6) return parts.join(" ");
-  if (parts.length > 6) return parts.slice(0, 6).join(" ");
-
-  // Pas assez de phrases: on complète sans inventer trop de détails
-  const filler = [
-    "Les pièces versées au dossier seront discutées contradictoirement.",
-    "Chaque partie soutient sa version des faits et la Cour encadre les débats.",
-    "La procédure doit respecter le contradictoire et les droits de la défense.",
-    "La Cour examinera la recevabilité, la force probante des pièces et les demandes.",
-    "L'audience se déroulera en phases (incidents, débats, plaidoiries/réquisitions, délibéré).",
-    "La décision sera motivée au regard des éléments produits et des observations des parties.",
-  ];
-  const out = [...parts];
-  for (const f of filler) {
-    if (out.length >= 6) break;
-    out.push(f);
-  }
-  return out.slice(0, 6).join(" ");
 }
 
 /* =======================
@@ -638,18 +595,14 @@ app.post("/ask", async (req, res) => {
 /* =========================================================
    JUSTICE LAB — GÉNÉRATION DOSSIER
 ========================================================= */
-app.post("/justice-lab/generate-case", requireAuth, async (req, res) => {
+async function justiceLabGenerateCaseHandler(req, res) {
   try {
     const {
       mode = "full",
       domaine = "Pénal",
-      domain = null,
       level = "Intermédiaire",
       seed = String(Date.now()),
       lang = "fr",
-      // ✅ Import dossier réel (PDF/DOCX) -> texte extrait par analyse-service
-      documentText = null,
-      filename = null,
       draft = null,
       templateId = null,
       caseSeed = null,
@@ -658,12 +611,7 @@ app.post("/justice-lab/generate-case", requireAuth, async (req, res) => {
       chambre = null,
     } = req.body || {};
 
-    const modeLower = String(mode || "full").toLowerCase();
-    const isFromDocument = modeLower === "from_document" || modeLower === "document" || modeLower === "import";
-    const safeMode = modeLower === "enrich" ? "enrich" : isFromDocument ? "from_document" : "full";
-
-    // ✅ compat: "domain" (slug) ou "domaine" (label)
-    const domaineLabel = safeStr(domaine || domain || "Pénal", 40);
+    const safeMode = String(mode || "full").toLowerCase() === "enrich" ? "enrich" : "full";
 
     const metaHints = {
       templateId: templateId ? safeStr(templateId, 80) : undefined,
@@ -678,7 +626,7 @@ app.post("/justice-lab/generate-case", requireAuth, async (req, res) => {
     const userFull = `
 PARAMÈTRES:
 - Mode: full
-- Domaine: ${domaineLabel}
+- Domaine: ${domaine}
 - Niveau: ${level}
 - Langue: ${lang}
 - Seed: ${metaHints.seed}
@@ -720,36 +668,6 @@ Contraintes:
 - Ne mentionne pas d'articles numérotés.
 `.trim();
 
-    const userFromDocument = `
-PARAMÈTRES:
-- Mode: from_document
-- Domaine: ${domaineLabel}
-- Niveau: ${level}
-- Langue: ${lang}
-- Seed: ${metaHints.seed}
-- Fichier: ${safeStr(filename || "document", 140)}
-
-TEXTE DU DOSSIER (extrait):
-"""
-${safeStr(String(documentText || ""), 12000)}
-"""
-
-Objectif:
-- Génère un dossier JusticeLab UNIQUE en te basant STRICTEMENT sur le texte ci-dessus.
-- Adapte les noms, dates et lieux au contexte RDC si le texte est ambigu, sans contredire le texte.
-
-Règles impératives:
-- Retourne EXACTEMENT un JSON au format attendu.
-- resume: EXACTEMENT 6 phrases (pas de puces, pas de sauts de ligne).
-- pieces: 5 à 8 pièces cohérentes avec le texte.
-- audienceSeed: 6 à 10 points.
-- risquesProceduraux: 4 à 7.
-- Ajoute objectionTemplates: AU MOINS 5 objections pour chaque rôle (Procureur, Avocat Demandeur, Avocat Défendeur) => minimum 15.
-  Chaque objection doit avoir: {id, by, title, statement, options, bestChoiceByRole, effects}.
-- Ajoute eventsDeck: déroulé réaliste (appel de cause → comparution → incidents → débats → plaidoiries/réquisitions → mise en délibéré).
-- Ne mentionne pas d'articles numérotés.
-`.trim();
-
     const userEnrich = `
 PARAMÈTRES:
 - Mode: enrich
@@ -773,10 +691,7 @@ Règles:
       model: process.env.JUSTICE_LAB_CASE_MODEL || process.env.JUSTICE_LAB_MODEL || "gpt-4o-mini",
       messages: [
         { role: "system", content: system },
-        {
-          role: "user",
-          content: safeMode === "enrich" ? userEnrich : safeMode === "from_document" ? userFromDocument : userFull,
-        },
+        { role: "user", content: safeMode === "enrich" ? userEnrich : userFull },
       ],
       temperature: Number(process.env.JUSTICE_LAB_CASE_TEMPERATURE || 0.6),
       max_tokens: Number(process.env.JUSTICE_LAB_CASE_MAX_TOKENS || 1400),
@@ -801,29 +716,19 @@ Règles:
     const fallbackBase = safeMode === "enrich" ? (draft && typeof draft === "object" ? draft : {}) : {};
     const sanitized = sanitizeCaseData(parsed, {
       ...fallbackBase,
-      domaine: domaineLabel,
+      domaine,
       niveau: level,
       meta: { ...metaHints, generatedAt: new Date().toISOString() },
     });
 
-    // ✅ Résumé EXACTEMENT 6 phrases si import dossier réel
-    if (safeMode === "from_document") {
-      sanitized.resume = enforceSixSentences(sanitized.resume);
-    }
-
     sanitized.meta = {
       ...(sanitized.meta || {}),
-      templateId:
-        sanitized.meta?.templateId ||
-        metaHints.templateId ||
-        (safeMode === "from_document" ? "AI_IMPORT" : "AI_FULL"),
+      templateId: sanitized.meta?.templateId || metaHints.templateId || "AI_FULL",
       seed: sanitized.meta?.seed || metaHints.seed,
       city: sanitized.meta?.city || metaHints.city || "RDC",
       tribunal: sanitized.meta?.tribunal || metaHints.tribunal || "Juridiction (simulation)",
       chambre: sanitized.meta?.chambre || metaHints.chambre || "Chambre (simulation)",
       generatedAt: sanitized.meta?.generatedAt || new Date().toISOString(),
-      source: sanitized.meta?.source || (safeMode === "from_document" ? "import" : "ai"),
-      filename: safeMode === "from_document" ? safeStr(filename || "document", 200) : sanitized.meta?.filename,
     };
 
     return res.json({ caseData: sanitized });
@@ -837,6 +742,12 @@ Règles:
     });
     return res.status(200).json({ caseData, warning: "fallback" });
   }
+}
+
+app.post("/justice-lab/generate-case", requireAuth, justiceLabGenerateCaseHandler);
+app.post("/justice-lab/generate-case-from-document", requireAuth, (req, res) => {
+  req.body = { ...(req.body || {}), mode: "from_document" };
+  return justiceLabGenerateCaseHandler(req, res);
 });
 
 /* =========================================================

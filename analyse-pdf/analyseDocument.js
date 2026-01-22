@@ -1,11 +1,12 @@
 // analyseDocument.js
 // ✅ Analyse PDF/DOCX + OCR images (+ prétraitement + correction IA contrôlée)
-// ✅ Texte extrait COMPLET (non tronqué) + nettoyage caractères illisibles
+// ✅ Texte extrait COMPLET (non tronqué par défaut) + nettoyage caractères illisibles
 // ✅ Analyse sur TOUT le texte via chunking + merge final
 // ✅ Pool parallélisé + timeout par chunk + stratégie auto (2 longs, 3 courts)
 // ✅ Timeout global (3 min) + mode dégradé (fusion partielle si timeout)
 // ✅ POST /text pour analyser un texte déjà extrait côté frontend
-// ✅ skipAnalysis=1 pour faire uniquement OCR (puis analyse globale ensuite)
+// ✅ skipAnalysis=1 pour faire uniquement extraction/OCR
+// ✅ Aliases compatibles: /extract ET /analyse-document/extract
 
 const express = require("express");
 const multer = require("multer");
@@ -295,14 +296,13 @@ ${JSON.stringify(all).slice(0, 30000)}
 }
 
 function autoConcurrency(chunksCount) {
-  return chunksCount <= 6 ? 3 : 2; // courts=3, longs=2
+  return chunksCount <= 6 ? 3 : 2;
 }
 
 async function analyseFullText(openai, fullTextRaw) {
   const fullText = cleanExtractedText(fullTextRaw);
-  const minLen = 50;
 
-  if (!fullText || fullText.trim().length < minLen) {
+  if (!fullText || fullText.trim().length < 50) {
     const err = new Error("Texte trop court/illisible après extraction/OCR.");
     err.code = "TEXT_TOO_SHORT";
     throw err;
@@ -331,8 +331,7 @@ async function analyseFullText(openai, fullTextRaw) {
     }
     try {
       const p = analyseChunk(openai, chunk, i, chunks.length);
-      const out = await withTimeout(p, CHUNK_TIMEOUT_MS, `chunk ${i + 1}/${chunks.length}`);
-      return out;
+      return await withTimeout(p, CHUNK_TIMEOUT_MS, `chunk ${i + 1}/${chunks.length}`);
     } catch (e) {
       return {
         faits: [],
@@ -474,9 +473,8 @@ async function extractTextFromUpload(openai, filePath, originalName, body) {
 module.exports = function (openai) {
   const router = express.Router();
 
-
-  // POST /extract -> extraction seule (PDF/DOCX) pour JusticeLab import dossier
-  router.post("/extract", upload.single("file"), async (req, res) => {
+  // Handler extraction brute (JusticeLab import)
+  async function handleExtract(req, res) {
     if (!req.file) return res.status(400).json({ error: "Aucun fichier envoyé." });
 
     const filePath = req.file.path;
@@ -500,26 +498,34 @@ module.exports = function (openai) {
         return res.status(400).json({ error: "Texte trop court ou vide après extraction." });
       }
 
-      const MAX_CHARS = Number(process.env.EXTRACT_MAX_CHARS || 60000);
-      const truncated = text.length > MAX_CHARS;
+      // Par défaut: pas de troncature. Si besoin: EXTRACT_MAX_CHARS > 0
+      const MAX_CHARS = Number(process.env.EXTRACT_MAX_CHARS || 0);
+      const truncated = MAX_CHARS > 0 && text.length > MAX_CHARS;
       const documentText = truncated ? text.slice(0, MAX_CHARS) : text;
 
       return res.json({
-        documentText,
+        documentText, // ✅ attendu par JusticeLab
         filename: originalName,
         ext,
         truncated,
-        meta: { maxChars: MAX_CHARS, length: text.length },
+        chars: documentText.length,
+        meta: truncated ? { maxChars: MAX_CHARS, length: text.length } : { length: text.length },
       });
     } catch (err) {
       console.error("❌ Erreur extraction /extract :", err?.message || err);
       return res.status(500).json({ error: "Erreur extraction", details: err?.message || "Inconnue" });
     } finally {
-      try { if (fs.existsSync(filePath)) fs.unlinkSync(filePath); } catch {}
+      try {
+        if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+      } catch {}
     }
-  });
+  }
 
-  // POST /
+  // ✅ Routes compatibles
+  router.post("/extract", upload.single("file"), handleExtract);
+  router.post("/analyse-document/extract", upload.single("file"), handleExtract);
+
+  // POST / -> extraction + (option) analyse
   router.post("/", upload.single("file"), async (req, res) => {
     if (!req.file) return res.status(400).json({ error: "Aucun fichier envoyé." });
 
@@ -576,7 +582,7 @@ module.exports = function (openai) {
       if (err?.code === "TEXT_TOO_SHORT") {
         return res.status(500).json({
           error: "Erreur analyse",
-          details: "Texte trop court/illisible après extraction/OCR. Conseil: meilleure lumière, zoom, page à plat.",
+          details: "Texte trop court/illisible après extraction/OCR.",
         });
       }
 
@@ -598,7 +604,7 @@ module.exports = function (openai) {
     }
   });
 
-  // POST /text  -> analyse globale d'un texte déjà OCR/extrait
+  // POST /text -> analyse globale d'un texte déjà extrait/OCR
   router.post("/text", express.json({ limit: process.env.ANALYSE_TEXT_JSON_LIMIT || "2mb" }), async (req, res) => {
     try {
       const text = cleanExtractedText(req.body?.text || "");
@@ -611,10 +617,7 @@ module.exports = function (openai) {
       });
     } catch (err) {
       if (err?.code === "TEXT_TOO_SHORT") {
-        return res.status(500).json({
-          error: "Erreur analyse",
-          details: "Texte trop court/illisible après extraction/OCR. Conseil: meilleure lumière, zoom, page à plat.",
-        });
+        return res.status(500).json({ error: "Erreur analyse", details: "Texte trop court/illisible." });
       }
       console.error("❌ Erreur analyse /text :", err?.message || err);
       return res.status(500).json({ error: "Erreur analyse", details: err?.message || "Inconnue" });
