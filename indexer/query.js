@@ -598,7 +598,7 @@ app.post("/ask", async (req, res) => {
 async function justiceLabGenerateCaseHandler(req, res) {
   try {
     const {
-      mode = "full",
+mode = "full",
       domaine = "Pénal",
       level = "Intermédiaire",
       seed = String(Date.now()),
@@ -609,9 +609,17 @@ async function justiceLabGenerateCaseHandler(req, res) {
       city = null,
       tribunal = null,
       chambre = null,
+
+      // ✅ Import document (PDF/DOCX) : texte extrait
+      documentText = null,
+      documentTitle = null,
     } = req.body || {};
 
-    const safeMode = String(mode || "full").toLowerCase() === "enrich" ? "enrich" : "full";
+    const modeLower = String(mode || "full").toLowerCase();
+    const safeMode =
+      modeLower === "enrich" ? "enrich" :
+      modeLower === "from_document" ? "from_document" :
+      "full";
 
     const metaHints = {
       templateId: templateId ? safeStr(templateId, 80) : undefined,
@@ -668,6 +676,37 @@ Contraintes:
 - Ne mentionne pas d'articles numérotés.
 `.trim();
 
+    const docTextClamped = typeof documentText === "string" ? clampDocForPrompt(documentText) : "";
+    const docTitleSafe = safeStr(documentTitle || "Document importé", 140);
+
+    const userFromDoc = `
+MODE: from_document (IMPORTANT)
+- Le document ci-dessous est la SOURCE PRIORITAIRE.
+- Le dossier généré doit refléter fidèlement les faits, parties, dates, montants et pièces décrits dans le document.
+- Ne pas inventer d'éléments non présents. Si une info manque : "Non précisé".
+- Ne pas citer d'articles numérotés.
+
+PARAMÈTRES:
+- Domaine (indicatif): ${domaine}
+- Niveau: ${level}
+- Langue: ${lang}
+- Seed: ${metaHints.seed}
+- DocumentTitle: ${docTitleSafe}
+
+DOCUMENT:
+--- DÉBUT DOCUMENT ---
+${docTextClamped}
+--- FIN DOCUMENT ---
+
+Retourne UNIQUEMENT un JSON caseData valide (même structure que le mode full).
+Contraintes:
+- pieces: 5 à 8 pièces (P1..P8) si possible, basées sur le document.
+- resume: 5 à 10 lignes basées sur le document.
+- audienceSeed: 6 à 10 points basés sur le document.
+- risquesProceduraux: 4 à 7 risques adaptés au document.
+`.trim();
+
+
     const userEnrich = `
 PARAMÈTRES:
 - Mode: enrich
@@ -691,7 +730,7 @@ Règles:
       model: process.env.JUSTICE_LAB_CASE_MODEL || process.env.JUSTICE_LAB_MODEL || "gpt-4o-mini",
       messages: [
         { role: "system", content: system },
-        { role: "user", content: safeMode === "enrich" ? userEnrich : userFull },
+        { role: "user", content: safeMode === "enrich" ? userEnrich : safeMode === "from_document" ? userFromDoc : userFull },
       ],
       temperature: Number(process.env.JUSTICE_LAB_CASE_TEMPERATURE || 0.6),
       max_tokens: Number(process.env.JUSTICE_LAB_CASE_MAX_TOKENS || 1400),
@@ -748,6 +787,22 @@ app.post("/justice-lab/generate-case", requireAuth, justiceLabGenerateCaseHandle
 app.post("/justice-lab/generate-case-from-document", requireAuth, (req, res) => {
   req.body = { ...(req.body || {}), mode: "from_document" };
   return justiceLabGenerateCaseHandler(req, res);
+
+
+// ✅ COMPAT FRONT (ancienne route): /justicelab/import-case
+app.post("/justicelab/import-case", requireAuth, (req, res) => {
+  const b = req.body || {};
+  req.body = {
+    ...b,
+    mode: "from_document",
+    documentText: b.documentText || b.text || b.content || null,
+    documentTitle: b.documentTitle || b.title || b.filename || null,
+    domaine: b.domaine || b.domain || b.matiere || "Pénal",
+    level: b.level || b.niveau || "Intermédiaire",
+    lang: b.lang || "fr",
+  };
+  return justiceLabGenerateCaseHandler(req, res);
+});
 });
 
 /* =========================================================
