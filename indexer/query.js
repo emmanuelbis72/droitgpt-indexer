@@ -1506,6 +1506,39 @@ const ROOMS_MAX_PLAYERS = Number(process.env.JUSTICE_LAB_ROOMS_MAX_PLAYERS || 3)
 
 const rooms = new Map(); // roomId -> room
 
+// ----------------------------
+// JusticeLab Multiplayer - Lock + Shared State helpers
+// ----------------------------
+function normalizePhase(p) {
+  const s = String(p || "").trim().toUpperCase();
+  // accept legacy phase labels
+  if (!s) return "";
+  if (s.includes("AUDIENCE")) return "AUDIENCE";
+  if (s.includes("DECISION")) return "DECISION";
+  if (s.includes("APPEL") || s.includes("APPEAL")) return "APPEAL";
+  if (s.includes("PROC")) return "PROCEDURE";
+  if (s.includes("FIN")) return "FINISHED";
+  return s;
+}
+function getSnapshotPhase(snapshot) {
+  return normalizePhase(snapshot?.state?.phase || snapshot?.phase || snapshot?.meta?.phase);
+}
+function phaseRank(phase) {
+  const p = normalizePhase(phase);
+  return ({ PROCEDURE: 1, AUDIENCE: 2, DECISION: 3, APPEAL: 4, FINISHED: 5 }[p] || 0);
+}
+function isRoleAllowedForAction(role, type) {
+  const r = String(role || "").trim();
+  const t = String(type || "").trim().toUpperCase();
+  if (t === "SUGGESTION") return ["Procureur", "Avocat Demandeur", "Avocat Défendeur"].includes(r);
+  if (t === "JUDGE_DECISION") return r === "Juge";
+  // host-only actions handled elsewhere
+  return true;
+}
+function cloneJson(obj) {
+  try { return JSON.parse(JSON.stringify(obj)); } catch { return obj; }
+}
+
 function nowMs() {
   return Date.now();
 }
@@ -1570,6 +1603,7 @@ function scrubRoomForClient(room) {
     snapshot: room.snapshot || null,
     suggestions: Array.isArray(room.suggestions) ? room.suggestions.slice(0, 60) : [],
     decisions: Array.isArray(room.decisions) ? room.decisions.slice(0, 120) : [],
+    drafts: room.drafts || {},
   };
 }
 
@@ -1679,6 +1713,7 @@ app.post("/justice-lab/rooms/create", requireAuth, async (req, res) => {
       snapshot: null, // host pousse l'état via /rooms/action
       suggestions: [],
       decisions: [],
+      drafts: {},
     };
 
     rooms.set(roomId, room);
@@ -1857,6 +1892,13 @@ app.post("/justice-lab/rooms/action", requireAuth, async (req, res) => {
       const snap = payload?.snapshot || action?.snapshot;
       if (!snap || typeof snap !== "object") return res.status(400).json({ error: "SNAPSHOT_REQUIRED" });
 
+      // 🔒 Phase lock: prevent going backwards (authoritative state should be monotonic)
+      const prevPhase = getSnapshotPhase(room.snapshot);
+      const nextPhase = getSnapshotPhase(snap);
+      if (prevPhase && nextPhase && phaseRank(nextPhase) < phaseRank(prevPhase)) {
+        return res.status(409).json({ error: "PHASE_REGRESSION_LOCKED", prevPhase, nextPhase });
+      }
+
       room.snapshot = snap;
       room.version = Number(room.version || 0) + 1;
 
@@ -1866,6 +1908,14 @@ app.post("/justice-lab/rooms/action", requireAuth, async (req, res) => {
 
     // --- suggestion (Procureur/Avocat) ---
     if (type === "SUGGESTION") {
+      // 🔒 Strict lock: role + phase
+      if (!me?.role || !isRoleAllowedForAction(me.role, "SUGGESTION")) {
+        return res.status(403).json({ error: "ROLE_LOCKED_SUGGESTION" });
+      }
+      const phase = getSnapshotPhase(room.snapshot);
+      if (phase && phase !== "AUDIENCE") {
+        return res.status(409).json({ error: "PHASE_LOCKED", phase, expected: "AUDIENCE" });
+      }
             const sugIn = payload?.suggestion && typeof payload.suggestion === "object" ? payload.suggestion : payload;
       const legacySug = action?.suggestion && typeof action.suggestion === "object" ? action.suggestion : null;
       const src = legacySug || sugIn || {};
@@ -1887,8 +1937,54 @@ const sug = {
       room.suggestions.unshift(sug);
       room.suggestions = room.suggestions.slice(0, 60);
 
+      // ✅ Single shared state: also persist inside snapshot (so clients can rehydrate from snapshot alone)
+      if (room.snapshot && typeof room.snapshot === "object") {
+        const snap2 = cloneJson(room.snapshot);
+        snap2.state = snap2.state && typeof snap2.state === "object" ? snap2.state : {};
+        snap2.state.multiplayer = snap2.state.multiplayer && typeof snap2.state.multiplayer === "object" ? snap2.state.multiplayer : {};
+        snap2.state.multiplayer.suggestions = Array.isArray(snap2.state.multiplayer.suggestions) ? snap2.state.multiplayer.suggestions : [];
+        snap2.state.multiplayer.suggestions.unshift(sug);
+        snap2.state.multiplayer.suggestions = snap2.state.multiplayer.suggestions.slice(0, 60);
+        room.snapshot = snap2;
+      }
+
+      room.version = Number(room.version || 0) + 1;
       rooms.set(room.roomId, room);
-      return res.json({ ok: true, version: Number(room.version || 0), suggestion: sug });
+      return res.json({ ok: true, version: room.version, suggestion: sug });
+    }
+
+    // --- autosync drafts (all roles, but locked by role+phase) ---
+    if (type === "DRAFT_UPDATE" || type === "DRAFT") {
+      if (!me?.role) return res.status(403).json({ error: "ROLE_REQUIRED" });
+      const phase = getSnapshotPhase(room.snapshot);
+      // drafts mainly for AUDIENCE (objections + plaidoiries)
+      if (phase && phase !== "AUDIENCE") {
+        return res.status(409).json({ error: "PHASE_LOCKED", phase, expected: "AUDIENCE" });
+      }
+      const src = payload && typeof payload === "object" ? payload : {};
+      const objectionId = safeStr(src?.objectionId || "", 60);
+      if (!objectionId) return res.status(400).json({ error: "OBJECTION_ID_REQUIRED" });
+
+      room.drafts = room.drafts && typeof room.drafts === "object" ? room.drafts : {};
+      const pid = me?.participantId || participantId || "anon";
+      const base = room.drafts[pid] && typeof room.drafts[pid] === "object" ? room.drafts[pid] : {};
+      base.role = me?.role;
+      base.displayName = me?.displayName || base.displayName || "";
+      base.updatedAt = t;
+      base.objections = base.objections && typeof base.objections === "object" ? base.objections : {};
+      const prev = base.objections[objectionId] && typeof base.objections[objectionId] === "object" ? base.objections[objectionId] : {};
+      base.objections[objectionId] = {
+        ...prev,
+        objectionId,
+        decision: safeStr(src?.decision || prev.decision || "", 40),
+        reasoning: safeStr(src?.reasoning || prev.reasoning || "", 1400),
+        ts: t,
+      };
+
+      room.drafts[pid] = base;
+      room.version = Number(room.version || 0) + 1;
+      rooms.set(room.roomId, room);
+      return res.json({ ok: true, version: room.version, draft: room.drafts[pid].objections[objectionId] });
     }
 
     // --- judge decision (Juge) ---
@@ -1902,6 +1998,12 @@ const sug = {
 
       if (!allowedAsHumanJudge && !allowedAsAIJudge) {
         return res.status(403).json({ error: "JUDGE_ONLY" });
+      }
+
+      // 🔒 Strict phase lock
+      const phase = getSnapshotPhase(room.snapshot);
+      if (phase && phase !== "AUDIENCE") {
+        return res.status(409).json({ error: "PHASE_LOCKED", phase, expected: "AUDIENCE" });
       }
 
       const d = safeStr(payload?.decision || "", 40);
@@ -1921,6 +2023,16 @@ const sug = {
 
       room.decisions = Array.isArray(room.decisions) ? room.decisions : [];
       room.decisions.push(dec);
+
+      // ✅ Single shared state: persist decision in snapshot
+      if (room.snapshot && typeof room.snapshot === "object") {
+        const snap2 = cloneJson(room.snapshot);
+        snap2.state = snap2.state && typeof snap2.state === "object" ? snap2.state : {};
+        snap2.state.multiplayer = snap2.state.multiplayer && typeof snap2.state.multiplayer === "object" ? snap2.state.multiplayer : {};
+        snap2.state.multiplayer.decisions = Array.isArray(snap2.state.multiplayer.decisions) ? snap2.state.multiplayer.decisions : [];
+        snap2.state.multiplayer.decisions.push(dec);
+        room.snapshot = snap2;
+      }
 
       room.version = Number(room.version || 0) + 1;
       rooms.set(room.roomId, room);
@@ -1942,6 +2054,33 @@ const sug = {
  * GET /justice-lab/rooms/state/:roomId
  * (ancien) -> renvoie { room }
  */
+
+// Lightweight sync endpoint (clients can poll by version)
+app.get("/justice-lab/rooms/sync/:roomId", requireAuth, (req, res) => {
+  const roomId = String(req.params.roomId || "").trim();
+  const room = getRoomOr404(roomId);
+  if (!room) return res.status(404).json({ error: "Room introuvable/expirée." });
+
+  const since = Number(req.query.since || 0);
+  const version = Number(room.version || 0);
+  if (since && version && version <= since) {
+    return res.json({ ok: true, version, changed: false });
+  }
+  return res.json({
+    ok: true,
+    changed: true,
+    version,
+    snapshot: room.snapshot || null,
+    suggestions: room.suggestions || [],
+    decisions: room.decisions || [],
+    participants: room.participants || [],
+    status: room.status || "WAITING",
+    meta: room.meta || {},
+    updatedAt: room.updatedAt,
+    expiresAt: room.expiresAt,
+  });
+});
+
 app.get("/justice-lab/rooms/state/:roomId", requireAuth, async (req, res) => {
   try {
     const roomId = String(req.params?.roomId || "").trim().toUpperCase();
