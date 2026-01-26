@@ -654,6 +654,7 @@ app.post("/justice-lab/generate-case", requireAuth, async (req, res) => {
       // ✅ Import dossier réel (PDF/DOCX) -> texte extrait par analyse-service
       documentText = null,
       filename = null,
+      documentTitleHint = null,
       draft = null,
       templateId = null,
       caseSeed = null,
@@ -725,10 +726,7 @@ Contraintes:
 - resume: 5 à 10 lignes, contexte RDC.
 - audienceSeed: 6 à 10 points.
 - risquesProceduraux: 4 à 7 risques.
-- Ne mentionne pas d'articles numérotés.
-`.trim();
-
-    const userFromDocument = `
+- Ne mentionne pas d'artconst userFromDocument = `
 PARAMÈTRES:
 - Mode: from_document
 - Domaine: ${domaineLabel}
@@ -736,28 +734,26 @@ PARAMÈTRES:
 - Langue: ${lang}
 - Seed: ${metaHints.seed}
 - Fichier: ${safeStr(filename || "document", 140)}
- - Titre_suggéré: ${safeStr(String(req.body?.suggestedTitle || ""), 160)}
+Titre suggéré (si cohérent avec le texte): ${safeStr(documentTitleHint || "", 140)}
 
 TEXTE DU DOSSIER (extrait):
 """
-${safeStr(String(documentText || ""), 2600)}
+${safeStr(String(documentText || ""), 12000)}
 """
 
 Objectif:
 - Génère un dossier JusticeLab UNIQUE en te basant STRICTEMENT sur le texte ci-dessus.
 - Adapte les noms, dates et lieux au contexte RDC si le texte est ambigu, sans contredire le texte.
 
-Priorité (important):
-- Le champ "titre" doit reprendre le Titre_suggéré si celui-ci est pertinent (ex: nom du dossier / objet du document).
-- Le champ "resume" doit refléter le contenu du texte, pas un scénario générique.
-
 Règles impératives:
 - Retourne EXACTEMENT un JSON au format attendu.
-- resume: 4 à 6 phrases (pas de puces, pas de sauts de ligne).
+- resume: EXACTEMENT 6 phrases (pas de puces, pas de sauts de ligne).
 - pieces: 5 à 8 pièces cohérentes avec le texte.
 - audienceSeed: 6 à 10 points.
 - risquesProceduraux: 4 à 7.
-- NE génère PAS "objectionTemplates" ni "eventsDeck" (ils seront produits dynamiquement pendant la simulation).
+- Ajoute objectionTemplates: AU MOINS 5 objections pour chaque rôle (Procureur, Avocat Demandeur, Avocat Défendeur) => minimum 15.
+  Chaque objection doit avoir: {id, by, title, statement, options, bestChoiceByRole, effects}.
+- Ajoute eventsDeck: déroulé réaliste (appel de cause → comparution → incidents → débats → plaidoiries/réquisitions → mise en délibéré).
 - Ne mentionne pas d'articles numérotés.
 `.trim();
 
@@ -790,13 +786,12 @@ Règles:
           content: safeMode === "enrich" ? userEnrich : safeMode === "from_document" ? userFromDocument : userFull,
         },
       ],
-      // ✅ from_document doit être plus rapide et plus stable => température plus basse
-      temperature: safeMode === "from_document" ? 0.35 : Number(process.env.JUSTICE_LAB_CASE_TEMPERATURE || 0.6),
+      temperature: Number(process.env.JUSTICE_LAB_CASE_TEMPERATURE || 0.6),
       max_tokens: (() => {
         const base = Number(process.env.JUSTICE_LAB_CASE_MAX_TOKENS || 0);
         if (base > 0) return base;
-        // ✅ from_document est "léger": pas d'objections/eventsDeck
-        if (safeMode === "from_document") return 1400;
+        // from_document et full demandent plus de tokens (objections + eventsDeck)
+        if (safeMode === "from_document") return 2600;
         if (safeMode === "full") return 2200;
         return 1600;
       })(),
@@ -857,26 +852,9 @@ Règles:
       meta: { ...metaHints, generatedAt: new Date().toISOString() },
     });
 
-    // ✅ Import dossier réel: titre cohérent (priorité au titre suggéré) + résumé non vide
+    // ✅ Résumé EXACTEMENT 6 phrases si import dossier réel
     if (safeMode === "from_document") {
-      const suggested = safeStr(String(req.body?.suggestedTitle || "").trim(), 180);
-
-      // Si le modèle a renvoyé un titre générique, on force le titre suggéré
-      const genericTitles = [
-        "dossier simulé (rdc)",
-        "dossier simulé",
-        "dossier",
-        "affaire",
-        "cas",
-      ];
-      const titreLower = String(sanitized.titre || "").toLowerCase().trim();
-      if (suggested && (!titreLower || genericTitles.includes(titreLower))) {
-        sanitized.titre = suggested;
-      }
-
-      if (!String(sanitized.resume || "").trim()) {
-        sanitized.resume = safeStr(String(documentText || "").replace(/\s+/g, " "), 420);
-      }
+      sanitized.resume = enforceSixSentences(sanitized.resume);
     }
 
     sanitized.meta = {
@@ -1207,7 +1185,7 @@ Format:
 }
 `.trim();
 
-    const user = `INPUT:\n${JSON.stringify(payload, null, 2)}`;
+    const user = `INPUT:\n${JSON.stringify(payload, null, 2)}`;N.stringify(payload, null, 2)}`;
 
     const completion = await openai.chat.completions.create({
       model: process.env.JUSTICE_LAB_JUDGE_MODEL || process.env.JUSTICE_LAB_MODEL || "gpt-4o-mini",
