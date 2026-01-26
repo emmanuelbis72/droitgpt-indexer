@@ -647,13 +647,13 @@ app.post("/justice-lab/generate-case", requireAuth, async (req, res) => {
       level = "Intermédiaire",
       seed = String(Date.now()),
       lang = "fr",
-      // ✅ contenu libre saisi par l'utilisateur (doit influencer le dossier)
-      prompt = "",
+      // ✅ Contenu / contexte demandé côté UI (optionnel)
+      contenu = null,
+      content = null,
+      prompt = null,
       // ✅ Import dossier réel (PDF/DOCX) -> texte extrait par analyse-service
       documentText = null,
       filename = null,
-      // ✅ titre du document (si fourni par le front)
-      documentTitle = null,
       draft = null,
       templateId = null,
       caseSeed = null,
@@ -669,6 +669,8 @@ app.post("/justice-lab/generate-case", requireAuth, async (req, res) => {
     // ✅ compat: "domain" (slug) ou "domaine" (label)
     const domaineLabel = safeStr(domaine || domain || "Pénal", 40);
 
+    const promptContent = safeStr(prompt || contenu || content || "", 6000).trim();
+
     const metaHints = {
       templateId: templateId ? safeStr(templateId, 80) : undefined,
       seed: safeStr(caseSeed || seed, 80),
@@ -679,9 +681,6 @@ app.post("/justice-lab/generate-case", requireAuth, async (req, res) => {
 
     const system = buildJusticeLabGenerateCaseSystemPrompt().trim();
 
-    const promptSafe = safeStr(String(prompt || "").trim(), 2000);
-    const hasPrompt = promptSafe.length > 0;
-
     const userFull = `
 PARAMÈTRES:
 - Mode: full
@@ -689,7 +688,11 @@ PARAMÈTRES:
 - Niveau: ${level}
 - Langue: ${lang}
 - Seed: ${metaHints.seed}
-- Contenu souhaité: ${hasPrompt ? promptSafe : "(non précisé)"}
+- Contenu demandé: ${promptContent ? `"${safeStr(promptContent, 1200)}"` : "(non précisé)"}
+
+Objectif:
+- Génère un dossier JusticeLab UNIQUE.
+- Si "Contenu demandé" est fourni, base le dossier et les pièces principalement sur ce contexte (sans contredire le domaine / niveau).
 
 Tu dois retourner EXACTEMENT un JSON au format suivant:
 {
@@ -735,8 +738,8 @@ PARAMÈTRES:
 - Niveau: ${level}
 - Langue: ${lang}
 - Seed: ${metaHints.seed}
-- Consigne (si fournie): ${hasPrompt ? promptSafe : "(non précisé)"}
 - Fichier: ${safeStr(filename || "document", 140)}
+- Contenu demandé: ${promptContent ? `"${safeStr(promptContent, 1200)}"` : "(non précisé)"}
 
 TEXTE DU DOSSIER (extrait):
 """
@@ -745,6 +748,7 @@ ${safeStr(String(documentText || ""), 12000)}
 
 Objectif:
 - Génère un dossier JusticeLab UNIQUE en te basant STRICTEMENT sur le texte ci-dessus.
+- Si "Contenu demandé" est fourni, utilise-le seulement pour préciser/compléter sans contredire le texte.
 - Adapte les noms, dates et lieux au contexte RDC si le texte est ambigu, sans contredire le texte.
 
 Règles impératives:
@@ -798,13 +802,16 @@ Règles:
     try {
       parsed = JSON.parse(raw);
     } catch {
+      if (safeMode === "from_document") {
+        return res.status(500).json({ error: "Réponse IA invalide (JSON). Réessaie l'import." });
+      }
       const fallback = safeMode === "enrich" ? draft || {} : {};
       const caseData = sanitizeCaseData(fallback, {
-        domaine,
+        domaine: domaineLabel,
         niveau: level,
         meta: { ...metaHints, generatedAt: new Date().toISOString() },
       });
-      return res.json({ caseData });
+      return res.json({ caseData, warning: "fallback" });
     }
 
     const fallbackBase = safeMode === "enrich" ? (draft && typeof draft === "object" ? draft : {}) : {};
@@ -838,6 +845,13 @@ Règles:
     return res.json({ caseData: sanitized });
   } catch (e) {
     console.error("❌ /justice-lab/generate-case error:", e);
+
+    const modeLower = String(req.body?.mode || "full").toLowerCase();
+    const isFromDocument = modeLower === "from_document" || modeLower === "document" || modeLower === "import";
+    if (isFromDocument) {
+      return res.status(500).json({ error: "Erreur IA lors de l'import du dossier. Réessaie." });
+    }
+
     const fallback = req.body?.mode === "enrich" ? req.body?.draft || {} : {};
     const caseData = sanitizeCaseData(fallback, {
       domaine: req.body?.domaine || "Pénal",
