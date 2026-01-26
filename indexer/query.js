@@ -654,6 +654,11 @@ app.post("/justice-lab/generate-case", requireAuth, async (req, res) => {
       // ✅ Import dossier réel (PDF/DOCX) -> texte extrait par analyse-service
       documentText = null,
       filename = null,
+      // ✅ Import optimisé: résumé structuré court (pour réduire tokens/latence)
+      summaryText = null,
+      structuredSummary = null,
+      documentTitleHint = null,
+      resumeHint = null,
       draft = null,
       templateId = null,
       caseSeed = null,
@@ -664,7 +669,8 @@ app.post("/justice-lab/generate-case", requireAuth, async (req, res) => {
 
     const modeLower = String(mode || "full").toLowerCase();
     const isFromDocument = modeLower === "from_document" || modeLower === "document" || modeLower === "import";
-    const safeMode = modeLower === "enrich" ? "enrich" : isFromDocument ? "from_document" : "full";
+    const isFromSummary = modeLower === "from_summary" || modeLower === "summary";
+    const safeMode = modeLower === "enrich" ? "enrich" : isFromSummary ? "from_summary" : isFromDocument ? "from_document" : "full";
 
     // ✅ compat: "domain" (slug) ou "domaine" (label)
     const domaineLabel = safeStr(domaine || domain || "Pénal", 40);
@@ -682,104 +688,118 @@ app.post("/justice-lab/generate-case", requireAuth, async (req, res) => {
 
     const system = buildJusticeLabGenerateCaseSystemPrompt().trim();
 
-    const userFull = [
-  "PARAMÈTRES:",
-  "- Mode: full",
-  `- Domaine: ${domaineLabel}`,
-  `- Niveau: ${level}`,
-  `- Langue: ${lang}`,
-  `- Seed: ${metaHints.seed}`,
-  `- Contenu/Consignes: ${userSelectedContent ? userSelectedContent : "(non spécifié)"}`,
-  "",
-  "Tu dois retourner EXACTEMENT un JSON au format suivant:",
-  "{",
-  '  "caseId": string,',
-  '  "domaine": string,',
-  '  "niveau": string,',
-  '  "titre": string,',
-  '  "resume": string,',
-  '  "parties": {',
-  '    "demandeur": string,',
-  '    "defendeur": string,',
-  '    "ministerePublic": string | null',
-  "  },",
-  '  "qualificationInitiale": string,',
-  '  "pieces": [',
-  '    { "id": "P1", "title": string, "type": string, "isLate": boolean, "reliability": number }',
-  "  ],",
-  '  "audienceSeed": [ string ],',
-  '  "risquesProceduraux": [ string ],',
-  '  "meta": {',
-  '    "templateId": string,',
-  '    "seed": string,',
-  '    "city": string,',
-  '    "tribunal": string,',
-  '    "chambre": string,',
-  '    "generatedAt": string',
-  "  }",
-  "}",
-  "",
-  "Contraintes:",
-  "- pieces: 5 à 8 pièces (P1..P8), cohérentes.",
-  "- Ajoute au moins 1 pièce tardive (isLate=true) et 1 pièce contestable (reliability faible).",
-  "- resume: 5 à 10 lignes, contexte RDC.",
-  "- audienceSeed: 6 à 10 points.",
-  "- risquesProceduraux: 4 à 7 risques.",
-  "- Ne mentionne pas d'articles numérotés.",
-].join("\n");
+    const userFull = `
+PARAMÈTRES:
+- Mode: full
+- Domaine: ${domaineLabel}
+- Niveau: ${level}
+- Langue: ${lang}
+- Seed: ${metaHints.seed}
+- Contenu/Consignes: ${userSelectedContent ? userSelectedContent : "(non spécifié)"}
 
-const userFromDocument = [
-  "PARAMÈTRES:",
-  "- Mode: from_document",
-  `- Domaine: ${domaineLabel}`,
-  `- Niveau: ${level}`,
-  `- Langue: ${lang}`,
-  `- Seed: ${metaHints.seed}`,
-  `- Fichier: ${safeStr(filename || "document", 140)}`,
-  "",
-  "TEXTE DU DOSSIER (extrait):",
-  safeStr(documentText || "", 18000),
-  "",
-  "Tu dois retourner EXACTEMENT un JSON au format suivant:",
-  "{",
-  '  "caseId": string,',
-  '  "domaine": string,',
-  '  "niveau": string,',
-  '  "titre": string,',
-  '  "resume": string,',
-  '  "parties": {',
-  '    "demandeur": string,',
-  '    "defendeur": string,',
-  '    "ministerePublic": string | null',
-  "  },",
-  '  "qualificationInitiale": string,',
-  '  "pieces": [',
-  '    { "id": "P1", "title": string, "type": string, "isLate": boolean, "reliability": number }',
-  "  ],",
-  '  "audienceSeed": [ string ],',
-  '  "risquesProceduraux": [ string ],',
-  '  "meta": {',
-  '    "templateId": string,',
-  '    "seed": string,',
-  '    "city": string,',
-  '    "tribunal": string,',
-  '    "chambre": string,',
-  '    "generatedAt": string',
-  "  }",
-  "}",
-  "",
-  "Contraintes supplémentaires (from_document):",
-  "- Le dossier doit être LOGIQUE, fidèle au document importé, et en être un résumé structuré.",
-  "- Le titre doit refléter le sujet réel du document (évite les titres génériques).",
-  "- resume: 6 à 12 lignes, clair, contexte RDC si pertinent, basé sur le document.",
-  "- Parties: identifie demandeur/défendeur (ou plaignant/prévenu) à partir du texte si possible.",
-  "- pieces: 5 à 8 pièces cohérentes avec le texte.",
-  "- audienceSeed: 6 à 10 points.",
-  "- risquesProceduraux: 4 à 7.",
-  "- Ajoute objectionTemplates: AU MOINS 5 objections pour chaque rôle (Procureur, Avocat Demandeur, Avocat Défendeur) => minimum 15. Chaque objection doit avoir: {id, by, title, statement, options, bestChoiceByRole, effects}.",
-  "- Ajoute eventsDeck: déroulé réaliste (appel de cause → comparution → incidents → débats → plaidoiries/réquisitions → mise en délibéré).",
-  "- Ne mentionne pas d'articles numérotés.",
-].join("\n");    const userEnrich = `
+Tu dois retourner EXACTEMENT un JSON au format suivant:
+{
+  "caseId": string,
+  "domaine": string,
+  "niveau": string,
+  "titre": string,
+  "resume": string,
+  "parties": {
+    "demandeur": string,
+    "defendeur": string,
+    "ministerePublic": string | null
+  },
+  "qualificationInitiale": string,
+  "pieces": [
+    { "id": "P1", "title": string, "type": string, "isLate": boolean, "reliability": number }
+  ],
+  "audienceSeed": [ string ],
+  "risquesProceduraux": [ string ],
+  "meta": {
+    "templateId": string,
+    "seed": string,
+    "city": string,
+    "tribunal": string,
+    "chambre": string,
+    "generatedAt": string
+  }
+}
+
+Contraintes:
+- pieces: 5 à 8 pièces (P1..P8), cohérentes.
+- Ajoute au moins 1 pièce tardive (isLate=true) et 1 pièce contestable (reliability faible).
+- resume: 5 à 10 lignes, contexte RDC.
+- audienceSeed: 6 à 10 points.
+- risquesProceduraux: 4 à 7 risques.
+- Ne mentionne pas d'articles numérotés.
+`.trim();
+
+    const userFromDocument = `
+PARAMÈTRES:
+- Mode: from_document
+- Domaine: ${domaineLabel}
+- Niveau: ${level}
+- Langue: ${lang}
+- Seed: ${metaHints.seed}
+- Fichier: ${safeStr(filename || "document", 140)}
+
+TEXTE DU DOSSIER (extrait):
+"""
+${safeStr(String(documentText || ""), 12000)}
+"""
+
+Objectif:
+- Génère un dossier JusticeLab UNIQUE en te basant STRICTEMENT sur le texte ci-dessus.
+- Adapte les noms, dates et lieux au contexte RDC si le texte est ambigu, sans contredire le texte.
+
+Règles impératives:
+- Retourne EXACTEMENT un JSON au format attendu.
+- resume: EXACTEMENT 6 phrases (pas de puces, pas de sauts de ligne).
+- pieces: 5 à 8 pièces cohérentes avec le texte.
+- audienceSeed: 6 à 10 points.
+- risquesProceduraux: 4 à 7.
+- Ajoute objectionTemplates: AU MOINS 5 objections pour chaque rôle (Procureur, Avocat Demandeur, Avocat Défendeur) => minimum 15.
+  Chaque objection doit avoir: {id, by, title, statement, options, bestChoiceByRole, effects}.
+- Ajoute eventsDeck: déroulé réaliste (appel de cause → comparution → incidents → débats → plaidoiries/réquisitions → mise en délibéré).
+- Ne mentionne pas d'articles numérotés.
+`.trim();
+
+    const userFromSummary = `
+PARAMÈTRES:
+- Mode: from_summary
+- Domaine: ${domaineLabel}
+- Niveau: ${level}
+- Langue: ${lang}
+- Seed: ${metaHints.seed}
+- Fichier: ${safeStr(filename || "document", 140)}
+
+TITRE PROPOSÉ (si pertinent): ${safeStr(documentTitleHint || "", 160)}
+RÉSUMÉ PROPOSÉ (si pertinent): ${safeStr(resumeHint || "", 800)}
+
+RÉSUMÉ STRUCTURÉ (source):
+${safeStr(
+  structuredSummary ? JSON.stringify(structuredSummary, null, 2) : String(summaryText || ""),
+  4200
+)}
+
+Objectif:
+- Génère un dossier JusticeLab UNIQUE et LOGIQUE, basé STRICTEMENT sur le résumé structuré ci-dessus (qui vient du document importé).
+- Le titre du dossier doit reprendre le TITRE PROPOSÉ s'il est non vide et cohérent.
+- Le résumé du dossier doit être un résumé fidèle du document (pas générique).
+
+Règles impératives:
+- Retourne EXACTEMENT un JSON au format attendu.
+- titre: 1 phrase courte, fidèle, non marketing.
+- resume: EXACTEMENT 6 phrases (pas de puces, pas de sauts de ligne).
+- pieces: 5 à 7 pièces cohérentes avec le résumé.
+- audienceSeed: 6 à 8 points.
+- risquesProceduraux: 4 à 6.
+- objectionTemplates: 3 objections par rôle (Procureur, Avocat Demandeur, Avocat Défendeur) => minimum 9.
+- eventsDeck: 6 à 8 événements réalistes.
+- Ne mentionne pas d'articles numérotés.
+`.trim();
+
+    const userEnrich = `
 PARAMÈTRES:
 - Mode: enrich
 - Domaine: ${domaine}
@@ -805,7 +825,14 @@ Règles:
         { role: "system", content: system },
         {
           role: "user",
-          content: safeMode === "enrich" ? userEnrich : safeMode === "from_document" ? userFromDocument : userFull,
+          content:
+            safeMode === "enrich"
+              ? userEnrich
+              : safeMode === "from_document"
+                ? userFromDocument
+                : safeMode === "from_summary"
+                  ? userFromSummary
+                  : userFull,
         },
       ],
       temperature: Number(process.env.JUSTICE_LAB_CASE_TEMPERATURE || 0.6),
@@ -814,6 +841,7 @@ Règles:
         if (base > 0) return base;
         // from_document et full demandent plus de tokens (objections + eventsDeck)
         if (safeMode === "from_document") return 2600;
+        if (safeMode === "from_summary") return 1600;
         if (safeMode === "full") return 2200;
         return 1600;
       })(),
@@ -874,9 +902,19 @@ Règles:
       meta: { ...metaHints, generatedAt: new Date().toISOString() },
     });
 
-    // ✅ Résumé EXACTEMENT 6 phrases si import dossier réel
-    if (safeMode === "from_document") {
-      sanitized.resume = enforceSixSentences(sanitized.resume);
+    // ✅ Résumé EXACTEMENT 6 phrases si import dossier réel (texte complet ou résumé)
+    if (safeMode === "from_document" || safeMode === "from_summary") {
+      // Si on a un résumé proposé par l'analyse-service, on le privilégie (plus fidèle au doc)
+      if (typeof resumeHint === "string" && resumeHint.trim().length > 30) {
+        sanitized.resume = enforceSixSentences(resumeHint.trim());
+      } else {
+        sanitized.resume = enforceSixSentences(sanitized.resume);
+      }
+    }
+
+    // ✅ Titre: si l'analyse-service a déjà trouvé un titre cohérent, on l'impose (stabilité UX)
+    if (safeMode === "from_summary" && typeof documentTitleHint === "string" && documentTitleHint.trim().length > 6) {
+      sanitized.titre = documentTitleHint.trim().slice(0, 140);
     }
 
     sanitized.meta = {
@@ -884,14 +922,17 @@ Règles:
       templateId:
         sanitized.meta?.templateId ||
         metaHints.templateId ||
-        (safeMode === "from_document" ? "AI_IMPORT" : "AI_FULL"),
+        (safeMode === "from_document" ? "AI_IMPORT" : safeMode === "from_summary" ? "AI_IMPORT_SUMMARY" : "AI_FULL"),
       seed: sanitized.meta?.seed || metaHints.seed,
       city: sanitized.meta?.city || metaHints.city || "RDC",
       tribunal: sanitized.meta?.tribunal || metaHints.tribunal || "Juridiction (simulation)",
       chambre: sanitized.meta?.chambre || metaHints.chambre || "Chambre (simulation)",
       generatedAt: sanitized.meta?.generatedAt || new Date().toISOString(),
-      source: sanitized.meta?.source || (safeMode === "from_document" ? "import" : "ai"),
-      filename: safeMode === "from_document" ? safeStr(filename || "document", 200) : sanitized.meta?.filename,
+      source: sanitized.meta?.source || (safeMode === "from_document" || safeMode === "from_summary" ? "import" : "ai"),
+      filename:
+        safeMode === "from_document" || safeMode === "from_summary"
+          ? safeStr(filename || "document", 200)
+          : sanitized.meta?.filename,
     };
 
     return res.json({ caseData: sanitized });
