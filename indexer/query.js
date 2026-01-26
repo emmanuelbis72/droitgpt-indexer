@@ -654,7 +654,6 @@ app.post("/justice-lab/generate-case", requireAuth, async (req, res) => {
       // ✅ Import dossier réel (PDF/DOCX) -> texte extrait par analyse-service
       documentText = null,
       filename = null,
-      documentTitleHint = null,
       draft = null,
       templateId = null,
       caseSeed = null,
@@ -683,81 +682,104 @@ app.post("/justice-lab/generate-case", requireAuth, async (req, res) => {
 
     const system = buildJusticeLabGenerateCaseSystemPrompt().trim();
 
-    const userFull = `
-PARAMÈTRES:
-- Mode: full
-- Domaine: ${domaineLabel}
-- Niveau: ${level}
-- Langue: ${lang}
-- Seed: ${metaHints.seed}
-- Contenu/Consignes: ${userSelectedContent ? userSelectedContent : "(non spécifié)"}
+    const userFull = [
+  "PARAMÈTRES:",
+  "- Mode: full",
+  `- Domaine: ${domaineLabel}`,
+  `- Niveau: ${level}`,
+  `- Langue: ${lang}`,
+  `- Seed: ${metaHints.seed}`,
+  `- Contenu/Consignes: ${userSelectedContent ? userSelectedContent : "(non spécifié)"}`,
+  "",
+  "Tu dois retourner EXACTEMENT un JSON au format suivant:",
+  "{",
+  '  "caseId": string,',
+  '  "domaine": string,',
+  '  "niveau": string,',
+  '  "titre": string,',
+  '  "resume": string,',
+  '  "parties": {',
+  '    "demandeur": string,',
+  '    "defendeur": string,',
+  '    "ministerePublic": string | null',
+  "  },",
+  '  "qualificationInitiale": string,',
+  '  "pieces": [',
+  '    { "id": "P1", "title": string, "type": string, "isLate": boolean, "reliability": number }',
+  "  ],",
+  '  "audienceSeed": [ string ],',
+  '  "risquesProceduraux": [ string ],',
+  '  "meta": {',
+  '    "templateId": string,',
+  '    "seed": string,',
+  '    "city": string,',
+  '    "tribunal": string,',
+  '    "chambre": string,',
+  '    "generatedAt": string',
+  "  }",
+  "}",
+  "",
+  "Contraintes:",
+  "- pieces: 5 à 8 pièces (P1..P8), cohérentes.",
+  "- Ajoute au moins 1 pièce tardive (isLate=true) et 1 pièce contestable (reliability faible).",
+  "- resume: 5 à 10 lignes, contexte RDC.",
+  "- audienceSeed: 6 à 10 points.",
+  "- risquesProceduraux: 4 à 7 risques.",
+  "- Ne mentionne pas d'articles numérotés.",
+].join("\n");
 
-Tu dois retourner EXACTEMENT un JSON au format suivant:
-{
-  "caseId": string,
-  "domaine": string,
-  "niveau": string,
-  "titre": string,
-  "resume": string,
-  "parties": {
-    "demandeur": string,
-    "defendeur": string,
-    "ministerePublic": string | null
-  },
-  "qualificationInitiale": string,
-  "pieces": [
-    { "id": "P1", "title": string, "type": string, "isLate": boolean, "reliability": number }
-  ],
-  "audienceSeed": [ string ],
-  "risquesProceduraux": [ string ],
-  "meta": {
-    "templateId": string,
-    "seed": string,
-    "city": string,
-    "tribunal": string,
-    "chambre": string,
-    "generatedAt": string
-  }
-}
-
-Contraintes:
-- pieces: 5 à 8 pièces (P1..P8), cohérentes.
-- Ajoute au moins 1 pièce tardive (isLate=true) et 1 pièce contestable (reliability faible).
-- resume: 5 à 10 lignes, contexte RDC.
-- audienceSeed: 6 à 10 points.
-- risquesProceduraux: 4 à 7 risques.
-- Ne mentionne pas d'artconst userFromDocument = `
-PARAMÈTRES:
-- Mode: from_document
-- Domaine: ${domaineLabel}
-- Niveau: ${level}
-- Langue: ${lang}
-- Seed: ${metaHints.seed}
-- Fichier: ${safeStr(filename || "document", 140)}
-Titre suggéré (si cohérent avec le texte): ${safeStr(documentTitleHint || "", 140)}
-
-TEXTE DU DOSSIER (extrait):
-"""
-${safeStr(String(documentText || ""), 12000)}
-"""
-
-Objectif:
-- Génère un dossier JusticeLab UNIQUE en te basant STRICTEMENT sur le texte ci-dessus.
-- Adapte les noms, dates et lieux au contexte RDC si le texte est ambigu, sans contredire le texte.
-
-Règles impératives:
-- Retourne EXACTEMENT un JSON au format attendu.
-- resume: EXACTEMENT 6 phrases (pas de puces, pas de sauts de ligne).
-- pieces: 5 à 8 pièces cohérentes avec le texte.
-- audienceSeed: 6 à 10 points.
-- risquesProceduraux: 4 à 7.
-- Ajoute objectionTemplates: AU MOINS 5 objections pour chaque rôle (Procureur, Avocat Demandeur, Avocat Défendeur) => minimum 15.
-  Chaque objection doit avoir: {id, by, title, statement, options, bestChoiceByRole, effects}.
-- Ajoute eventsDeck: déroulé réaliste (appel de cause → comparution → incidents → débats → plaidoiries/réquisitions → mise en délibéré).
-- Ne mentionne pas d'articles numérotés.
-`.trim();
-
-    const userEnrich = `
+const userFromDocument = [
+  "PARAMÈTRES:",
+  "- Mode: from_document",
+  `- Domaine: ${domaineLabel}`,
+  `- Niveau: ${level}`,
+  `- Langue: ${lang}`,
+  `- Seed: ${metaHints.seed}`,
+  `- Fichier: ${safeStr(filename || "document", 140)}`,
+  "",
+  "TEXTE DU DOSSIER (extrait):",
+  safeStr(documentText || "", 18000),
+  "",
+  "Tu dois retourner EXACTEMENT un JSON au format suivant:",
+  "{",
+  '  "caseId": string,',
+  '  "domaine": string,',
+  '  "niveau": string,',
+  '  "titre": string,',
+  '  "resume": string,',
+  '  "parties": {',
+  '    "demandeur": string,',
+  '    "defendeur": string,',
+  '    "ministerePublic": string | null',
+  "  },",
+  '  "qualificationInitiale": string,',
+  '  "pieces": [',
+  '    { "id": "P1", "title": string, "type": string, "isLate": boolean, "reliability": number }',
+  "  ],",
+  '  "audienceSeed": [ string ],',
+  '  "risquesProceduraux": [ string ],',
+  '  "meta": {',
+  '    "templateId": string,',
+  '    "seed": string,',
+  '    "city": string,',
+  '    "tribunal": string,',
+  '    "chambre": string,',
+  '    "generatedAt": string',
+  "  }",
+  "}",
+  "",
+  "Contraintes supplémentaires (from_document):",
+  "- Le dossier doit être LOGIQUE, fidèle au document importé, et en être un résumé structuré.",
+  "- Le titre doit refléter le sujet réel du document (évite les titres génériques).",
+  "- resume: 6 à 12 lignes, clair, contexte RDC si pertinent, basé sur le document.",
+  "- Parties: identifie demandeur/défendeur (ou plaignant/prévenu) à partir du texte si possible.",
+  "- pieces: 5 à 8 pièces cohérentes avec le texte.",
+  "- audienceSeed: 6 à 10 points.",
+  "- risquesProceduraux: 4 à 7.",
+  "- Ajoute objectionTemplates: AU MOINS 5 objections pour chaque rôle (Procureur, Avocat Demandeur, Avocat Défendeur) => minimum 15. Chaque objection doit avoir: {id, by, title, statement, options, bestChoiceByRole, effects}.",
+  "- Ajoute eventsDeck: déroulé réaliste (appel de cause → comparution → incidents → débats → plaidoiries/réquisitions → mise en délibéré).",
+  "- Ne mentionne pas d'articles numérotés.",
+].join("\n");    const userEnrich = `
 PARAMÈTRES:
 - Mode: enrich
 - Domaine: ${domaine}
@@ -1185,7 +1207,7 @@ Format:
 }
 `.trim();
 
-    const user = `INPUT:\n${JSON.stringify(payload, null, 2)}`;N.stringify(payload, null, 2)}`;
+    const user = `INPUT:\n${JSON.stringify(payload, null, 2)}`;
 
     const completion = await openai.chat.completions.create({
       model: process.env.JUSTICE_LAB_JUDGE_MODEL || process.env.JUSTICE_LAB_MODEL || "gpt-4o-mini",
