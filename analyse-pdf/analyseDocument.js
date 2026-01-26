@@ -6,7 +6,8 @@
 // ✅ Timeout global (3 min) + mode dégradé (fusion partielle si timeout)
 // ✅ POST /text pour analyser un texte déjà extrait côté frontend
 // ✅ skipAnalysis=1 pour faire uniquement extraction/OCR
-// ✅ Aliases compatibles: /extract ET /analyse-document/extract
+// ✅ Endpoints JusticeLab: /extract + alias /analyse-document/extract
+// ✅ Healthcheck: GET /health
 
 const express = require("express");
 const multer = require("multer");
@@ -17,13 +18,35 @@ const pdfParse = require("pdf-parse");
 const Tesseract = require("tesseract.js");
 const sharp = require("sharp");
 
-const upload = multer({ dest: "uploads/" });
+/* -----------------------------
+   Upload config
+------------------------------*/
+const UPLOAD_DIR = process.env.UPLOAD_DIR || "uploads";
+
+// Assure le dossier uploads
+try {
+  if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+} catch (e) {
+  console.error("❌ Impossible de créer le dossier uploads:", e?.message || e);
+}
+
+const upload = multer({
+  dest: UPLOAD_DIR,
+  limits: {
+    fileSize: Number(process.env.MAX_UPLOAD_BYTES || 25 * 1024 * 1024), // 25MB par défaut
+  },
+});
 
 /* -----------------------------
    Utils
 ------------------------------*/
 function clamp(n, min, max) {
   return Math.max(min, Math.min(max, n));
+}
+
+function safeStr(s, max = 8000) {
+  const t = String(s || "");
+  return t.length > max ? t.slice(0, max) : t;
 }
 
 function cleanExtractedText(input) {
@@ -39,6 +62,12 @@ function cleanExtractedText(input) {
 
 function isImageExt(ext) {
   return [".jpg", ".jpeg", ".png", ".webp", ".tif", ".tiff", ".bmp"].includes(ext);
+}
+
+function safeUnlink(p) {
+  try {
+    if (p && fs.existsSync(p)) fs.unlinkSync(p);
+  } catch {}
 }
 
 /* -----------------------------
@@ -74,6 +103,7 @@ function computeConfidencePercent(text, tessConf) {
 async function ocrImage(filePath, lang, psm = 6) {
   const { data } = await Tesseract.recognize(filePath, lang, {
     logger: () => {},
+    // Tesseract.js supporte la config tesseract via "tessedit_pageseg_mode" dans la pratique
     tessedit_pageseg_mode: String(psm),
     user_defined_dpi: "300",
     preserve_interword_spaces: "1",
@@ -377,7 +407,7 @@ async function analyseFullText(openai, fullTextRaw) {
 }
 
 /* -----------------------------
-   Extraction depuis upload
+   Extraction depuis upload (pdf/docx/image)
 ------------------------------*/
 async function extractTextFromUpload(openai, filePath, originalName, body) {
   const ext = path.extname(originalName).toLowerCase();
@@ -473,6 +503,11 @@ async function extractTextFromUpload(openai, filePath, originalName, body) {
 module.exports = function (openai) {
   const router = express.Router();
 
+  // ✅ Healthcheck
+  router.get("/health", (req, res) => {
+    return res.json({ ok: true, service: "analyse", ts: new Date().toISOString() });
+  });
+
   // Handler extraction brute (JusticeLab import)
   async function handleExtract(req, res) {
     if (!req.file) return res.status(400).json({ error: "Aucun fichier envoyé." });
@@ -515,13 +550,11 @@ module.exports = function (openai) {
       console.error("❌ Erreur extraction /extract :", err?.message || err);
       return res.status(500).json({ error: "Erreur extraction", details: err?.message || "Inconnue" });
     } finally {
-      try {
-        if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-      } catch {}
+      safeUnlink(filePath);
     }
   }
 
-  // ✅ Routes compatibles
+  // ✅ Routes extraction compatibles
   router.post("/extract", upload.single("file"), handleExtract);
   router.post("/analyse-document/extract", upload.single("file"), handleExtract);
 
@@ -589,17 +622,9 @@ module.exports = function (openai) {
       console.error("❌ Erreur analyse :", err?.message || err);
       return res.status(500).json({ error: "Erreur analyse", details: err?.message || "Inconnue" });
     } finally {
+      safeUnlink(filePath);
       try {
-        if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-      } catch {}
-      try {
-        if (Array.isArray(tempPaths) && tempPaths.length) {
-          tempPaths.forEach((p) => {
-            try {
-              if (p && fs.existsSync(p)) fs.unlinkSync(p);
-            } catch {}
-          });
-        }
+        if (Array.isArray(tempPaths) && tempPaths.length) tempPaths.forEach((p) => safeUnlink(p));
       } catch {}
     }
   });
