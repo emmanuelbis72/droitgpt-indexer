@@ -556,9 +556,6 @@ module.exports = function (openai) {
 
   // ✅ Routes extraction compatibles
   router.post("/extract", upload.single("file"), handleExtract);
-  
-  // ✅ Alias (frontend historique): /analyse/extract
-  router.post("/analyse/extract", upload.single("file"), handleExtract);
 router.post("/analyse-document/extract", upload.single("file"), handleExtract);
 
   // POST / -> extraction + (option) analyse
