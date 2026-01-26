@@ -37,6 +37,11 @@ function cleanExtractedText(input) {
   return t.trim();
 }
 
+
+function safeUpper(v) {
+  return String(v || "").toUpperCase();
+}
+
 function isImageExt(ext) {
   return [".jpg", ".jpeg", ".png", ".webp", ".tif", ".tiff", ".bmp"].includes(ext);
 }
@@ -467,116 +472,109 @@ async function extractTextFromUpload(openai, filePath, originalName, body) {
   };
 }
 
+
+/* -----------------------------
+   Résumé structuré court (pour JusticeLab import léger)
+------------------------------*/
+function filenameToTitle(filename) {
+  const base = String(filename || "").split(/[\\/]/).pop() || "Document";
+  return base.replace(/\.[^.]+$/, "").trim() || "Document";
+}
+
+async function summarizeForJusticeLab(openai, fullText, filename) {
+  const text = cleanExtractedText(fullText);
+  const fallbackTitle = filenameToTitle(filename);
+
+  // Charge réduite: tête + queue du texte
+  const MAX_SRC = Number(process.env.SUMMARY_MAX_SRC_CHARS || 14000);
+  const head = text.slice(0, Math.floor(MAX_SRC * 0.65));
+  const tail = text.length > head.length ? text.slice(Math.max(0, text.length - Math.floor(MAX_SRC * 0.35))) : "";
+  const src = (head + "\n\n---\n\n" + tail).trim();
+
+  if (!src || src.length < 100) {
+    const err = new Error("Texte trop court pour résumé.");
+    err.code = "TEXT_TOO_SHORT";
+    throw err;
+  }
+
+  const completion = await openai.chat.completions.create({
+    model: process.env.SUMMARY_MODEL || process.env.ANALYSE_MODEL || "gpt-4o-mini",
+    temperature: Number(process.env.SUMMARY_TEMPERATURE || 0.1),
+    max_tokens: Number(process.env.SUMMARY_MAX_TOKENS || 900),
+    messages: [
+      {
+        role: "system",
+        content:
+          "Tu es un juriste RDC. Tu dois résumer fidèlement un document et produire un JSON STRICT (sans markdown). " +
+          "Ne rien inventer: si un élément n'est pas dans le texte, mets 'incertain'.",
+      },
+      {
+        role: "user",
+        content:
+          "À partir du texte ci-dessous, retourne un JSON valide sous la forme:\n" +
+          "{\n" +
+          "  \"title\": \"...\",\n" +
+          "  \"domain\": \"penal|civil|famille|travail|foncier|ohada|fiscal|douanier|minier|administratif|constitutionnel|militaire|environnement|routier|immobilier|bancaire|propriete-intellectuelle|droit-des-affaires|incertain\",\n" +
+          "  \"summary6\": [\"phrase1\", \"phrase2\", \"phrase3\", \"phrase4\", \"phrase5\", \"phrase6\"],\n" +
+          "  \"parties\": {\"demandeur\":\"...\", \"defendeur\":\"...\", \"ministere_public\":\"...\", \"autres\":[\"...\"]},\n" +
+          "  \"faits_essentiels\": [\"...\"],\n" +
+          "  \"questions_juridiques\": [\"...\"],\n" +
+          "  \"pieces_mentionnees\": [\"...\"],\n" +
+          "  \"demandes\": [\"...\"],\n" +
+          "  \"risques_points_sensibles\": [\"...\" ]\n" +
+          "}\n\n" +
+          "Contraintes:\n" +
+          "- Le title doit être court, descriptif, basé sur le contenu (pas générique).\n" +
+          "- summary6 = 6 phrases max, logiques, basées sur le texte.\n" +
+          "- Ne pas inventer.\n\n" +
+          "Titre fichier (hint): " + fallbackTitle + "\n\n" +
+          "Texte:\n\"\"\"\n" + src + "\n\"\"\"",
+      },
+    ],
+  });
+
+  const raw = completion.choices?.[0]?.message?.content || "{}";
+  let json;
+  try {
+    json = JSON.parse(raw);
+  } catch {
+    json = {
+      title: fallbackTitle,
+      domain: "incertain",
+      summary6: [],
+      parties: { demandeur: "incertain", defendeur: "incertain", ministere_public: "incertain", autres: [] },
+      faits_essentiels: [],
+      questions_juridiques: [],
+      pieces_mentionnees: [],
+      demandes: [],
+      risques_points_sensibles: [],
+      _raw: String(raw).slice(0, 1200),
+    };
+  }
+
+  const title = String(json?.title || "").trim() || fallbackTitle;
+  const summary6 = Array.isArray(json?.summary6) ? json.summary6.filter(Boolean).slice(0, 6) : [];
+  const summary = summary6.length ? summary6.join(" ") : (String(json?._raw || "").trim() || "").slice(0, 450);
+
+  const summaryText = [
+    "TITRE: " + title,
+    "DOMAINE: " + String(json?.domain || "incertain"),
+    "PARTIES: " + JSON.stringify(json?.parties || {}),
+    "FAITS: " + (Array.isArray(json?.faits_essentiels) ? json.faits_essentiels.join(" ; ") : ""),
+    "QUESTIONS: " + (Array.isArray(json?.questions_juridiques) ? json.questions_juridiques.join(" ; ") : ""),
+    "DEMANDES: " + (Array.isArray(json?.demandes) ? json.demandes.join(" ; ") : ""),
+    "PIECES: " + (Array.isArray(json?.pieces_mentionnees) ? json.pieces_mentionnees.join(" ; ") : ""),
+    "RESUME: " + summary,
+  ].join("\n");
+
+  return { title, summary, summary6, structured: json, summaryText, sourceChars: src.length };
+}
+
 /* -----------------------------
    Router
 ------------------------------*/
 module.exports = function (openai) {
   const router = express.Router();
-
-  /* -----------------------------
-     Résumé JusticeLab (léger)
-     - Objectif: réduire latence/tokens pour l'import
-     - On produit un JSON structuré + un résumé court (6 phrases)
-     - Puis on renvoie un texte compact utilisable par l'indexer
-  ------------------------------*/
-  async function summarizeForJusticeLab(fullText, filename) {
-    const t = cleanExtractedText(fullText);
-    if (!t || t.length < 80) {
-      const err = new Error("Texte trop court/illisible pour résumé.");
-      err.code = "TEXT_TOO_SHORT";
-      throw err;
-    }
-
-    // Limite: on envoie un extrait (début + fin) pour réduire tokens.
-    const head = t.slice(0, 8000);
-    const tail = t.length > 11000 ? t.slice(-3000) : "";
-    const excerpt = (head + (tail ? "\n\n[...FIN DU DOCUMENT...]\n\n" + tail : "")).slice(0, 12000);
-
-    const completion = await openai.chat.completions.create({
-      model: process.env.JUSTICELAB_SUMMARY_MODEL || process.env.ANALYSE_MODEL || "gpt-4o-mini",
-      temperature: 0.1,
-      max_tokens: Number(process.env.JUSTICELAB_SUMMARY_MAX_TOKENS || 650),
-      messages: [
-        {
-          role: "system",
-          content:
-            "Tu es un assistant juridique congolais (RDC). Tu dois résumer un document en restant STRICTEMENT fidèle. " +
-            "Ne pas inventer: si une info n'est pas clairement dans le texte, mets 'incertain'. " +
-            "Réponds UNIQUEMENT en JSON valide (pas de markdown).",
-        },
-        {
-          role: "user",
-          content: `FICHIER: ${safeUpper(path.basename(filename || "document"))}
-
-À partir du texte ci-dessous, produis un JSON:
-{
-  "title": "Titre court (8-14 mots) basé sur le contenu",
-  "resume": "Résumé en EXACTEMENT 6 phrases",
-  "domaine_probable": "penal|foncier|travail|ohada|civil|famille|fiscal|douanier|minier|administratif|constitutionnel|autre|incertain",
-  "juridiction": "tribunal/cour si mentionné ou 'incertain'",
-  "ville": "ville si mentionnée ou 'incertain'",
-  "parties": {
-    "demandeur": "...",
-    "defendeur": "...",
-    "ministere_public": "..."
-  },
-  "faits_cles": ["...", "..."],
-  "demandes": ["..."],
-  "pieces_mentionnees": ["..."],
-  "dates_cles": ["..."],
-  "mots_cles": ["...", "..."]
-}
-
-TEXTE (extrait):
-"""${excerpt}"""`,
-        },
-      ],
-    });
-
-    const raw = completion.choices?.[0]?.message?.content || "{}";
-    let json;
-    try {
-      json = JSON.parse(raw);
-    } catch {
-      json = {
-        title: `Dossier importé: ${path.basename(filename || "document")}`,
-        resume: "Résumé indisponible (format JSON invalide).",
-        domaine_probable: "incertain",
-        juridiction: "incertain",
-        ville: "incertain",
-        parties: { demandeur: "incertain", defendeur: "incertain", ministere_public: "incertain" },
-        faits_cles: [],
-        demandes: [],
-        pieces_mentionnees: [],
-        dates_cles: [],
-        mots_cles: [],
-        _raw: raw.slice(0, 1200),
-      };
-    }
-
-    // Texte compact utilisable côté indexer (moins de tokens que le document complet)
-    const compactText = [
-      `TITRE: ${String(json.title || "").trim()}`,
-      `RÉSUMÉ: ${String(json.resume || "").trim()}`,
-      `DOMAINE: ${String(json.domaine_probable || "").trim()}`,
-      `JURIDICTION: ${String(json.juridiction || "").trim()} | VILLE: ${String(json.ville || "").trim()}`,
-      `PARTIES: Demandeur=${json.parties?.demandeur || "incertain"}; Défendeur=${json.parties?.defendeur || "incertain"}; MP=${json.parties?.ministere_public || "incertain"}`,
-      `FAITS: ${(Array.isArray(json.faits_cles) ? json.faits_cles : []).slice(0, 8).join(" | ")}`,
-      `DEMANDES: ${(Array.isArray(json.demandes) ? json.demandes : []).slice(0, 8).join(" | ")}`,
-      `PIÈCES: ${(Array.isArray(json.pieces_mentionnees) ? json.pieces_mentionnees : []).slice(0, 10).join(" | ")}`,
-      `DATES: ${(Array.isArray(json.dates_cles) ? json.dates_cles : []).slice(0, 10).join(" | ")}`,
-      `MOTS-CLÉS: ${(Array.isArray(json.mots_cles) ? json.mots_cles : []).slice(0, 12).join(", ")}`,
-    ]
-      .filter(Boolean)
-      .join("\n");
-
-    return {
-      structured: json,
-      summaryText: cleanExtractedText(compactText).slice(0, 4500),
-      title: String(json.title || "").trim(),
-      resume: String(json.resume || "").trim(),
-    };
-  }
 
   // Handler extraction brute (JusticeLab import)
   async function handleExtract(req, res) {
@@ -626,7 +624,11 @@ TEXTE (extrait):
     }
   }
 
-  // ✅ Handler "léger": extraction + résumé structuré court (JusticeLab import rapide)
+  // ✅ Routes compatibles
+  router.post("/extract", upload.single("file"), handleExtract);
+  router.post("/analyse-document/extract", upload.single("file"), handleExtract);
+
+  // ✅ Extraction + résumé structuré (import JusticeLab léger)
   async function handleExtractSummary(req, res) {
     if (!req.file) return res.status(400).json({ error: "Aucun fichier envoyé." });
 
@@ -636,6 +638,7 @@ TEXTE (extrait):
 
     try {
       let text = "";
+
       if (ext === ".pdf") {
         text = await extractTextFromPdf(filePath);
       } else if (ext === ".docx") {
@@ -645,23 +648,23 @@ TEXTE (extrait):
         return res.status(400).json({ error: "Format non supporté. PDF ou DOCX requis." });
       }
 
-      const summary = await summarizeForJusticeLab(text, originalName);
+      text = cleanExtractedText(text);
+      if (!text || text.length < 120) {
+        return res.status(400).json({ error: "Texte trop court ou vide après extraction." });
+      }
+
+      const sum = await summarizeForJusticeLab(openai, text, originalName);
 
       return res.json({
-        // ✅ payload pour le frontend JusticeLab
-        summaryText: summary.summaryText,
-        structuredSummary: summary.structured,
-        documentTitle: summary.title || path.basename(originalName),
-        resume: summary.resume || "",
-        filename: originalName,
-        ext,
+        documentTitle: sum.title,
+        documentSummary: sum.summary,
+        summary6: sum.summary6,
+        structured: sum.structured,
+        summaryText: sum.summaryText,
+        meta: { filename: originalName, ext, sourceChars: sum.sourceChars, extractedChars: text.length },
       });
     } catch (err) {
-      console.error("❌ Erreur /extract-summary :", err?.message || err);
-      const code = err?.code;
-      if (code === "TEXT_TOO_SHORT") {
-        return res.status(400).json({ error: "Texte trop court/illisible.", details: err?.message || "" });
-      }
+      console.error("❌ Erreur extraction/résumé :", err?.message || err);
       return res.status(500).json({ error: "Erreur extraction/résumé", details: err?.message || "Inconnue" });
     } finally {
       try {
@@ -670,13 +673,10 @@ TEXTE (extrait):
     }
   }
 
-  // ✅ Routes compatibles
-  router.post("/extract", upload.single("file"), handleExtract);
-  router.post("/analyse-document/extract", upload.single("file"), handleExtract);
-
-  // ✅ Routes "light" compatibles
+  // ✅ Router monté sur /analyse et /analyse-document
   router.post("/extract-summary", upload.single("file"), handleExtractSummary);
-  router.post("/analyse-document/extract-summary", upload.single("file"), handleExtractSummary);
+
+
 
   // POST / -> extraction + (option) analyse
   router.post("/", upload.single("file"), async (req, res) => {
