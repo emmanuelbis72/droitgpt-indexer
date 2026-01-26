@@ -529,6 +529,10 @@ app.post("/ask", async (req, res) => {
   try {
     const { messages, lang = "fr", documentText = null, documentTitle = null } = req.body || {};
 
+    // ✅ Contenu/consignes choisies côté UI (si fourni)
+    const userSelectedContent = safeStr(req.body?.prompt || req.body?.contenu || req.body?.casePrompt || "", 3000);
+
+
     if (!Array.isArray(messages) || !messages.every(isValidMessage)) {
       return res.status(400).json({ error: "Format des messages invalide." });
     }
@@ -647,10 +651,6 @@ app.post("/justice-lab/generate-case", requireAuth, async (req, res) => {
       level = "Intermédiaire",
       seed = String(Date.now()),
       lang = "fr",
-      // ✅ Contenu / contexte demandé côté UI (optionnel)
-      contenu = null,
-      content = null,
-      prompt = null,
       // ✅ Import dossier réel (PDF/DOCX) -> texte extrait par analyse-service
       documentText = null,
       filename = null,
@@ -669,8 +669,6 @@ app.post("/justice-lab/generate-case", requireAuth, async (req, res) => {
     // ✅ compat: "domain" (slug) ou "domaine" (label)
     const domaineLabel = safeStr(domaine || domain || "Pénal", 40);
 
-    const promptContent = safeStr(prompt || contenu || content || "", 6000).trim();
-
     const metaHints = {
       templateId: templateId ? safeStr(templateId, 80) : undefined,
       seed: safeStr(caseSeed || seed, 80),
@@ -678,6 +676,9 @@ app.post("/justice-lab/generate-case", requireAuth, async (req, res) => {
       tribunal: tribunal ? safeStr(tribunal, 120) : undefined,
       chambre: chambre ? safeStr(chambre, 120) : undefined,
     };
+
+    // ✅ Contenu/consignes choisies côté UI (si fourni)
+    const userSelectedContent = safeStr(req.body?.prompt || req.body?.contenu || req.body?.casePrompt || "", 3000);
 
     const system = buildJusticeLabGenerateCaseSystemPrompt().trim();
 
@@ -688,11 +689,7 @@ PARAMÈTRES:
 - Niveau: ${level}
 - Langue: ${lang}
 - Seed: ${metaHints.seed}
-- Contenu demandé: ${promptContent ? `"${safeStr(promptContent, 1200)}"` : "(non précisé)"}
-
-Objectif:
-- Génère un dossier JusticeLab UNIQUE.
-- Si "Contenu demandé" est fourni, base le dossier et les pièces principalement sur ce contexte (sans contredire le domaine / niveau).
+- Contenu/Consignes: ${userSelectedContent ? userSelectedContent : "(non spécifié)"}
 
 Tu dois retourner EXACTEMENT un JSON au format suivant:
 {
@@ -739,7 +736,6 @@ PARAMÈTRES:
 - Langue: ${lang}
 - Seed: ${metaHints.seed}
 - Fichier: ${safeStr(filename || "document", 140)}
-- Contenu demandé: ${promptContent ? `"${safeStr(promptContent, 1200)}"` : "(non précisé)"}
 
 TEXTE DU DOSSIER (extrait):
 """
@@ -748,7 +744,6 @@ ${safeStr(String(documentText || ""), 12000)}
 
 Objectif:
 - Génère un dossier JusticeLab UNIQUE en te basant STRICTEMENT sur le texte ci-dessus.
-- Si "Contenu demandé" est fourni, utilise-le seulement pour préciser/compléter sans contredire le texte.
 - Adapte les noms, dates et lieux au contexte RDC si le texte est ambigu, sans contredire le texte.
 
 Règles impératives:
@@ -770,6 +765,7 @@ PARAMÈTRES:
 - Niveau: ${level}
 - Langue: ${lang}
 - Seed: ${metaHints.seed}
+- Contenu/Consignes: ${userSelectedContent ? userSelectedContent : "(non spécifié)"}
 
 DRAFT:
 ${safeStr(JSON.stringify(draft || {}, null, 2), 9000)}
@@ -792,26 +788,61 @@ Règles:
         },
       ],
       temperature: Number(process.env.JUSTICE_LAB_CASE_TEMPERATURE || 0.6),
-      max_tokens: Number(process.env.JUSTICE_LAB_CASE_MAX_TOKENS || 1400),
+      max_tokens: (() => {
+        const base = Number(process.env.JUSTICE_LAB_CASE_MAX_TOKENS || 0);
+        if (base > 0) return base;
+        // from_document et full demandent plus de tokens (objections + eventsDeck)
+        if (safeMode === "from_document") return 2600;
+        if (safeMode === "full") return 2200;
+        return 1600;
+      })(),
       response_format: { type: "json_object" },
     });
 
     const raw = completion.choices?.[0]?.message?.content || "{}";
 
-    let parsed;
-    try {
-      parsed = JSON.parse(raw);
-    } catch {
-      if (safeMode === "from_document") {
-        return res.status(500).json({ error: "Réponse IA invalide (JSON). Réessaie l'import." });
+    const tryParse = (txt) => {
+      try {
+        return JSON.parse(txt);
+      } catch {
+        return null;
       }
+    };
+
+    let parsed = tryParse(raw);
+
+    // ✅ Si le modèle tronque (JSON invalide), on tente une réparation 1-pass plutôt que renvoyer un dossier vide
+    if (!parsed) {
+      try {
+        const repair = await openai.chat.completions.create({
+          model: process.env.JUSTICE_LAB_CASE_MODEL || process.env.JUSTICE_LAB_MODEL || "gpt-4o-mini",
+          temperature: 0,
+          max_tokens: 1200,
+          response_format: { type: "json_object" },
+          messages: [
+            {
+              role: "system",
+              content:
+                "Tu es un validateur JSON. Convertis le contenu fourni en un JSON STRICTEMENT valide, sans ajouter de commentaires. Retourne uniquement le JSON.",
+            },
+            { role: "user", content: raw },
+          ],
+        });
+        const repaired = repair.choices?.[0]?.message?.content || "{}";
+        parsed = tryParse(repaired);
+      } catch (e) {
+        // ignore
+      }
+    }
+
+    if (!parsed) {
       const fallback = safeMode === "enrich" ? draft || {} : {};
       const caseData = sanitizeCaseData(fallback, {
-        domaine: domaineLabel,
+        domaine,
         niveau: level,
         meta: { ...metaHints, generatedAt: new Date().toISOString() },
       });
-      return res.json({ caseData, warning: "fallback" });
+      return res.json({ caseData, warning: "json_repair_failed" });
     }
 
     const fallbackBase = safeMode === "enrich" ? (draft && typeof draft === "object" ? draft : {}) : {};
@@ -845,13 +876,6 @@ Règles:
     return res.json({ caseData: sanitized });
   } catch (e) {
     console.error("❌ /justice-lab/generate-case error:", e);
-
-    const modeLower = String(req.body?.mode || "full").toLowerCase();
-    const isFromDocument = modeLower === "from_document" || modeLower === "document" || modeLower === "import";
-    if (isFromDocument) {
-      return res.status(500).json({ error: "Erreur IA lors de l'import du dossier. Réessaie." });
-    }
-
     const fallback = req.body?.mode === "enrich" ? req.body?.draft || {} : {};
     const caseData = sanitizeCaseData(fallback, {
       domaine: req.body?.domaine || "Pénal",
