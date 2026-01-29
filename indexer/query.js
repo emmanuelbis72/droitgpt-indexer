@@ -517,6 +517,94 @@ app.get("/", (_req, res) => {
   res.send("✅ API DroitGPT opérationnelle");
 });
 
+/* =========================================================
+   ✅ NEW — Congo Law search (Qdrant) pour "Coin Droit congolais"
+   POST /congo-law/search
+   body: { query: string, limit?: number }
+   returns: { sources: [...], passages: [...] }
+   - Utilise les données déjà indexées (docs/) dans la collection Qdrant existante
+   - Filtre/rerank léger via heuristique RDC (sans réindexation)
+========================================================= */
+app.post("/congo-law/search", async (req, res) => {
+  try {
+    const { query, limit = 7 } = req.body || {};
+    const q = String(query || "").trim();
+    if (q.length < 3) return res.status(400).json({ error: "query requis" });
+
+    // 1) Embedding
+    const embeddingResponse = await openai.embeddings.create({
+      model: process.env.EMBED_MODEL || "text-embedding-3-small",
+      input: q,
+    });
+    const vector = embeddingResponse.data?.[0]?.embedding;
+    if (!vector) return res.status(500).json({ error: "Erreur embedding OpenAI." });
+
+    // 2) Search Qdrant (large puis rerank)
+    let hits = [];
+    try {
+      hits = await withTimeout(
+        qdrant.search(process.env.QDRANT_COLLECTION || "documents", {
+          vector,
+          limit: 30,
+          with_payload: true,
+          with_vector: false,
+        }),
+        Number(process.env.QDRANT_TIMEOUT_MS || 2500),
+        "QDRANT_TIMEOUT"
+      );
+    } catch (e) {
+      console.warn("⚠️ Qdrant /congo-law/search skipped:", e.message);
+      hits = [];
+    }
+
+    const passagesAll = (hits || [])
+      .map((h) => {
+        const p = h?.payload || {};
+        const text = String(p.pageContent || p.text || p.content || p.chunk || "").trim();
+        const source = String(p.source || p.filename || p.path || "").trim();
+        const title = String(p.title || p.source || "Source").trim();
+        return {
+          title,
+          source,
+          text,
+          score: typeof h?.score === "number" ? h.score : 0,
+          type: p.type || p.doc_type || null,
+          year: p.year || p.date || null,
+          author: p.author || null,
+        };
+      })
+      .filter((x) => x.text);
+
+    // 3) Rerank: score Qdrant + bonus Congo
+    const want = Math.min(Math.max(Number(limit) || 7, 1), 15);
+    const passages = passagesAll
+      .sort((a, b) => (b.score) - (a.score))
+      .slice(0, want);
+
+    // 4) Sources dédupliquées (pour l'encadré UI)
+    const seen = new Set();
+    const sources = [];
+    for (const p of passages) {
+      const key = `${p.title || ""}::${p.year || ""}::${p.author || ""}`.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      sources.push({
+        title: p.title,
+        type: p.type,
+        year: p.year,
+        author: p.author,
+        source: p.source,
+      });
+    }
+
+    return res.json({ sources, passages });
+  } catch (e) {
+    console.error("❌ /congo-law/search error:", e);
+    return res.status(500).json({ error: "server_error", details: String(e?.message || e) });
+  }
+});
+
+
 /* =======================
    /ASK — ENDPOINT UNIQUE (public)
 ======================= */
