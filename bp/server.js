@@ -3,6 +3,7 @@ import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import generatePdfRoute from './generatePdf.js';
+import generateLicenceMemoireRoute from './routes/generateLicenceMemoire.js';
 
 dotenv.config();
 
@@ -13,6 +14,7 @@ app.use(cors());
 app.use(express.json());
 
 app.use('/generate-pdf', generatePdfRoute);
+app.use('/generate-academic', generateLicenceMemoireRoute);
 
 app.get('/', (req, res) => {
   res.send('✅ Serveur de génération PDF opérationnel.');

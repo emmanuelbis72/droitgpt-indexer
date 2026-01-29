@@ -2,8 +2,8 @@
 export function academicSystemPrompt(lang) {
   const isEN = lang === "en";
   return isEN
-    ? `You are an academic legal writing assistant. Produce a rigorous undergraduate (Bachelor) law dissertation. Be structured, formal, and cautious. When sources are provided, cite them and do NOT invent.`
-    : `Tu es un assistant de rédaction académique en droit. Rédige un mémoire de licence rigoureux, structuré et formel. Quand des sources sont fournies, cite-les et n’invente pas.`;
+    ? `You are an academic legal writing assistant. Produce a rigorous undergraduate (Bachelor) law dissertation. Be structured, formal, and cautious. Target a maximum of 70 pages total in the final PDF. When sources are provided, cite them and do NOT invent.`
+    : `Tu es un assistant de rédaction académique en droit. Rédige un mémoire de licence rigoureux, structuré et formel. Vise un maximum de 70 pages au total dans le PDF final. Quand des sources sont fournies, cite-les et n’invente pas.`;
 }
 
 export function buildMemoirePlanPrompt({ lang, ctx }) {
@@ -32,7 +32,10 @@ export function buildSectionPrompt({ lang, ctx, sectionTitle, sourcesText }) {
   const planHint = ctx.plan ? `\n\nUser plan:\n${ctx.plan}\n` : "";
 
   return isEN
-    ? `Write the section: "${sectionTitle}" for a Bachelor law dissertation.\nTopic: ${ctx.topic}\nProblem statement: ${ctx.problemStatement}\nObjectives: ${ctx.objectives}\nMethodology: ${ctx.methodology}\nMode: ${mode}\nCitation style: ${citeStyle}\n${planHint}${sourcesBlock}\nRules:
+    ? `Write the section: "${sectionTitle}" for a Bachelor law dissertation.\nTopic: ${ctx.topic}\nProblem statement: ${ctx.problemStatement}\nObjectives: ${ctx.objectives}\nMethodology: ${ctx.methodology}\nMode: ${mode}\nCitation style: ${citeStyle}\n${planHint}${sourcesBlock}\nMaximum length constraint:
+- Keep this section concise so the whole dissertation stays within 70 pages total.
+
+Rules:
 (1) Use headings and subheadings.
 (2) If SOURCES are provided, you MUST cite using bracketed numbers exactly like [1], [2], [3]... corresponding to the numbered SOURCES blocks.
     - Never cite a number that does not exist.

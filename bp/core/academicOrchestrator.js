@@ -4,8 +4,29 @@ import { academicSystemPrompt, buildMemoirePlanPrompt, buildSectionPrompt } from
 import { searchCongoLawSources, formatPassagesForPrompt } from "./qdrantRag.js";
 
 export async function generateLicenceMemoire({ lang, ctx }) {
+const MAX_PAGES = 70;
+
+function clampPagesTarget(n) {
+  const v = Number(n || 0);
+  if (!Number.isFinite(v) || v <= 0) return MAX_PAGES;
+  return Math.min(Math.max(v, 10), MAX_PAGES);
+}
+
+function computeSectionMaxTokens({ pagesTarget, sectionsCount, defaultMaxTokens }) {
+  // Heuristic: keep total tokens bounded to avoid exceeding 70 pages.
+  // Conservative: ~250-350 tokens per page at font size 11 depending on language/spacing.
+  const perPage = Number(process.env.ACAD_TOKENS_PER_PAGE || 280);
+  const totalBudget = clampPagesTarget(pagesTarget) * perPage;
+  const perSection = Math.floor(totalBudget / Math.max(sectionsCount, 1));
+  return Math.max(600, Math.min(defaultMaxTokens, perSection));
+}
+
+
   const temperature = Number(process.env.ACAD_TEMPERATURE || 0.35);
   const maxTokens = Number(process.env.ACAD_MAX_TOKENS || 1800);
+
+  // Force hard cap: never exceed 70 pages
+  ctx.lengthPagesTarget = clampPagesTarget(ctx.lengthPagesTarget || 70);
 
   // 1) Plan (use user plan if provided)
   let plan = String(ctx.plan || "").trim();
@@ -22,6 +43,8 @@ export async function generateLicenceMemoire({ lang, ctx }) {
 
   // 2) Sections (stable set)
   const sectionTitles = extractSectionTitles(plan, lang);
+
+  const maxTokensPerSection = computeSectionMaxTokens({ pagesTarget: ctx.lengthPagesTarget, sectionsCount: sectionTitles.length, defaultMaxTokens: maxTokens });
 
   const sections = [];
   const sourcesUsed = [];
@@ -40,7 +63,7 @@ export async function generateLicenceMemoire({ lang, ctx }) {
         { role: "user", content: buildSectionPrompt({ lang, ctx: { ...ctx, plan }, sectionTitle: title, sourcesText: passagesText }) },
       ],
       temperature,
-      max_tokens: maxTokens,
+      max_tokens: maxTokensPerSection,
     });
 
     sections.push({ title, content });
