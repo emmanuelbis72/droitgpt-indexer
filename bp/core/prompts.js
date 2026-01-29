@@ -36,6 +36,41 @@ export const SECTION_ORDER = [
   "funding_ask",
 ];
 
+
+function draftBlock(lang, ctx) {
+  const raw = String(ctx?.draftText || "").trim();
+  if (!raw) return "";
+  const notes = String(ctx?.rewriteNotes || "").trim();
+  const clipped = raw.length > 14000 ? raw.slice(0, 14000) + "\n\n[...TRUNCATED...]" : raw;
+
+  if (lang === "en") {
+    return `
+[DRAFT BUSINESS PLAN (to revise)]
+You must use this draft as the primary source of truth.
+Your job: rewrite, correct, restructure and upgrade it to investor/bank grade.
+- Keep the core facts, fix inconsistencies, remove fluff, improve clarity.
+- Do NOT invent precise statistics. Use ranges + assumptions.
+${notes ? `\n[REVISION NOTES]\n${notes}\n` : ""}
+
+DRAFT TEXT:
+"""${clipped}"""
+`.trim();
+  }
+
+  return `
+[BROUILLON DE PLAN D’AFFAIRES (à corriger)]
+Tu dois utiliser ce brouillon comme source principale.
+Ta mission : corriger, restructurer et élever le contenu au niveau banque/investisseur.
+- Conserver les faits clés, corriger les incohérences, supprimer le superflu, améliorer la clarté.
+- Ne pas inventer de statistiques précises. Utilise des fourchettes + hypothèses.
+${notes ? `\n[CONSIGNES DE CORRECTION]\n${notes}\n` : ""}
+
+TEXTE DU BROUILLON :
+"""${clipped}"""
+`.trim();
+}
+
+
 export function sectionPrompt({ lang, sectionKey, ctx }) {
   const baseCtx = `
 [CONTEXTE]
@@ -75,6 +110,7 @@ Exigences:
 - Document premium investisseur/banque/incubateur.
 - Pas de stats inventées.
 - Si JSON demandé: JSON STRICT uniquement.
+${draftBlock(lang, ctx)}
 `.trim();
 
   const baseCtxEN = `
@@ -115,6 +151,7 @@ Requirements:
 - Premium investor/bank/incubator grade.
 - No fake stats.
 - If JSON requested: STRICT JSON ONLY.
+${draftBlock(lang, ctx)}
 `.trim();
 
   const ctxBlock = lang === "en" ? baseCtxEN : baseCtx;
