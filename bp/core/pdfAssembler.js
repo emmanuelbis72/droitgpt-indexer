@@ -1537,3 +1537,29 @@ function sanitizeFilename(name) {
     .replace(/[^a-zA-Z0-9_-]/g, "_")
     .slice(0, 60);
 }
+
+// ===== Improved Financial Charts (Line Charts) =====
+function renderLineChart(doc, { title, labels, values }, styles) {
+  const x = doc.page.margins.left;
+  const w = doc.page.width - doc.page.margins.left - doc.page.margins.right;
+  const h = 160;
+
+  doc.text(title, x, doc.y);
+  const chartY = doc.y + 15;
+
+  const max = Math.max(...values, 1);
+  const stepX = w / (labels.length - 1);
+
+  doc.moveTo(x, chartY + h).lineTo(x + w, chartY + h).stroke();
+
+  values.forEach((v, i) => {
+    const px = x + i * stepX;
+    const py = chartY + h - (v / max) * h;
+    if (i === 0) doc.moveTo(px, py);
+    else doc.lineTo(px, py);
+    doc.circle(px, py, 2).fill();
+  });
+
+  doc.stroke();
+  doc.moveDown(2);
+}

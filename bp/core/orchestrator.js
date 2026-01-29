@@ -621,3 +621,56 @@ function buildFallbackKpiCalendar({ ctx, lang }) {
     ],
   };
 }
+
+
+// ===== Funding Ask JSON Formatter (auto-clean) =====
+function looksLikeJsonText(txt) {
+  const s = String(txt || "").trim();
+  return s.startsWith("{") || s.startsWith("[") || /```json/i.test(s);
+}
+
+function formatFundingAskFromJson(obj, lang) {
+  const isEN = lang === "en";
+  const root = (obj && typeof obj === "object") ? obj : {};
+  const bf = root.besoin_financement || root.funding_need || root.funding_ask || {};
+  const uf = root.utilisation_des_fonds || root.use_of_funds || root.utilisation_fonds || {};
+
+  const money = (n, cur) => {
+    const v = Number(n || 0);
+    if (!Number.isFinite(v) || v === 0) return "—";
+    return `${Math.round(v).toLocaleString("en-US")} ${cur || ""}`.trim();
+  };
+
+  const cur = bf.devise || bf.currency || "USD";
+  const lines = [];
+
+  lines.push(isEN ? "## Funding Need" : "## Besoin de financement");
+  lines.push(isEN
+    ? `- Total: **${money(bf.montant_total, cur)}**`
+    : `- Montant total : **${money(bf.montant_total, cur)}**`
+  );
+
+  if (bf.objectif_principal) {
+    lines.push(isEN
+      ? `- Objective: ${bf.objectif_principal}`
+      : `- Objectif : ${bf.objectif_principal}`
+    );
+  }
+
+  if (Array.isArray(bf.options_structure)) {
+    lines.push("");
+    lines.push(isEN ? "### Structure options" : "### Options de structure");
+    bf.options_structure.forEach(o => lines.push(`- ${o}`));
+  }
+
+  lines.push("");
+  lines.push(isEN ? "## Use of Funds" : "## Utilisation des fonds");
+
+  if (Array.isArray(uf.postes)) {
+    uf.postes.forEach(p => {
+      lines.push(`- ${p.poste}: **${money(p.montant, cur)}**`);
+    });
+  }
+
+  return lines.join("\n");
+}
