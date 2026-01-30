@@ -8,17 +8,15 @@ import generateLicenceMemoireRoute from './routes/generateLicenceMemoire.js';
 dotenv.config();
 
 const app = express();
-app.get("/__whoami", (req, res) => {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.json({
-    ok: true,
-    service: "businessplan-v9yy",
-    time: new Date().toISOString(),
-    pid: process.pid,
-  });
-});
 
-// ===== CORS (GLOBAL) =====
+/** ===========================
+ *  CORS (robuste, dev+prod)
+ *  ===========================
+ *  - Autorise tous les ports localhost (Vite)
+ *  - Autorise Vercel + domaine public
+ *  - Répond aux preflight OPTIONS avec 204 + headers
+ *  - Ajoute systématiquement les headers CORS sur les réponses autorisées
+ */
 const allowedOriginPatterns = [
   /^http:\/\/localhost:\d+$/i,
   /^http:\/\/127\.0\.0\.1:\d+$/i,
@@ -31,22 +29,34 @@ function isAllowedOrigin(origin) {
   return allowedOriginPatterns.some((p) => p.test(origin));
 }
 
-app.use((req, res, next) => {
+function applyCors(req, res) {
   const origin = req.headers.origin;
 
   if (isAllowedOrigin(origin)) {
-    if (origin) res.setHeader("Access-Control-Allow-Origin", origin);
-    else res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Vary", "Origin");
+    if (origin) {
+      res.setHeader("Access-Control-Allow-Origin", origin);
+      res.setHeader("Vary", "Origin");
+    } else {
+      // outils sans Origin
+      res.setHeader("Access-Control-Allow-Origin", "*");
+    }
   }
 
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
   res.setHeader("Access-Control-Expose-Headers", "Content-Disposition");
   res.setHeader("Access-Control-Max-Age", "86400");
-
+}
+app.use((req, res, next) => {
+  applyCors(req, res);
   if (req.method === "OPTIONS") return res.sendStatus(204);
   next();
+});
+
+// IMPORTANT: “béton” — handler OPTIONS global (certaines libs interceptent autrement)
+app.options("*", (req, res) => {
+  applyCors(req, res);
+  return res.sendStatus(204);
 });
 
 

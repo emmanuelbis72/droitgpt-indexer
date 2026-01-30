@@ -5,11 +5,45 @@ import { writeLicenceMemoirePdf } from "../core/academicPdfAssembler.js";
 
 const router = express.Router();
 
+// ===== CORS (route-level) =====
+const allowedOriginPatterns = [
+  /^http:\/\/localhost:\d+$/i,
+  /^http:\/\/127\.0\.0\.1:\d+$/i,
+  /^https:\/\/droitgpt-ui\.vercel\.app$/i,
+  /^https:\/\/www\.droitgpt\.com$/i,
+];
+function isAllowedOrigin(origin) {
+  if (!origin) return true;
+  return allowedOriginPatterns.some((p) => p.test(origin));
+}
+function applyCors(req, res) {
+  const origin = req.headers.origin;
+  if (isAllowedOrigin(origin)) {
+    if (origin) {
+      res.setHeader("Access-Control-Allow-Origin", origin);
+      res.setHeader("Vary", "Origin");
+    } else {
+      res.setHeader("Access-Control-Allow-Origin", "*");
+    }
+
+router.options("/licence-memoire", (req, res) => {
+  applyCors(req, res);
+  return res.sendStatus(204);
+});
+  }
+  res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.setHeader("Access-Control-Expose-Headers", "Content-Disposition");
+}
+
+
 router.get("/licence-memoire", (_req, res) => {
   res.json({ ok: true, message: "✅ Endpoint licence-memoire OK. Utilise POST pour générer le PDF." });
 });
 
 router.post("/licence-memoire", async (req, res) => {
+  applyCors(req, res);
+
   req.setTimeout(15 * 60 * 1000);
   res.setTimeout(15 * 60 * 1000);
 
