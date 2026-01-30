@@ -4,33 +4,79 @@ import {
   academicSystemPrompt,
   buildMemoirePlanPrompt,
   buildMemoireSectionPrompt,
+  // ✅ compat: some older code may import buildSectionPrompt
+  buildSectionPrompt,
 } from "./academicPrompts.js";
 import { searchCongoLawSources, formatPassagesForPrompt } from "./qdrantRag.js";
-async function generateSectionWithRetries({ lang, ctx, title, passagesText, temperature, maxTokensPerSection }) {
-  const attempts = Number(process.env.ACAD_SECTION_RETRIES || 2);
-  const minChars = Number(process.env.ACAD_MIN_SECTION_CHARS || 1200);
 
-  let last = "";
-  for (let i = 0; i <= attempts; i++) {
-    const boost = i === 0 ? 1 : 1.4; // increase tokens on retry
-    const mt = Math.min(Math.floor(maxTokensPerSection * boost), Number(process.env.ACAD_HARD_MAX_TOKENS || 5000));
+/**
+ * =========================================================
+ * Génération Mémoire (Licence) — Orchestrateur
+ * =========================================================
+ * ✅ Modifs MINIMALES, sans casser l’existant
+ * - Génère un plan si absent
+ * - Décompose en unités suffisamment nombreuses (viser ~70 pages)
+ * - Retry si une section revient vide/trop courte (évite pages blanches)
+ * - Mode droit congolais: RAG via searchCongoLawSources
+ *
+ * Exports attendus:
+ * - generateLicenceMemoire (utilisé par la route)
+ * - generateLicenceMemoire (alias de compat)
+ */
 
-    const content = await generateSectionWithRetries({
+async function generateSectionWithRetries({
   lang,
-  ctx: { ...ctx, plan },
+  ctx,
   title,
   passagesText,
   temperature,
   maxTokensPerSection,
-});
+}) {
+  const attempts = Number(process.env.ACAD_SECTION_RETRIES || 2);
+  const minChars = Number(process.env.ACAD_MIN_SECTION_CHARS || 2400);
+  const hardMax = Number(process.env.ACAD_HARD_MAX_TOKENS || 5000);
 
-sections.push({ title, content });
+  let last = "";
+  for (let i = 0; i <= attempts; i++) {
+    const boost = i === 0 ? 1 : 1.35;
+    const mt = Math.min(Math.floor(maxTokensPerSection * boost), hardMax);
+
+    const promptFn = typeof buildMemoireSectionPrompt === "function" ? buildMemoireSectionPrompt : buildSectionPrompt;
+
+    const content = await deepseekChat({
+      messages: [
+        { role: "system", content: academicSystemPrompt(lang) },
+        {
+          role: "user",
+          content: promptFn({
+            lang,
+            ctx,
+            sectionTitle: title,
+            sourcesText: passagesText,
+          }),
+        },
+      ],
+      temperature,
+      max_tokens: mt,
+    });
+
+    last = String(content || "").trim();
+    if (last.length >= minChars) return last;
+
+    console.warn("[Memoire] Section too short/empty, retry", {
+      title,
+      attempt: i + 1,
+      chars: last.length,
+      max_tokens: mt,
+    });
   }
 
-  return { plan, sections, sourcesUsed: dedupeSources(sourcesUsed) };
+  // fallback: never empty
+  return (
+    last ||
+    `**${title}**\n\n(Contenu non généré : réponse vide du modèle. Veuillez relancer la génération.)\n`
+  );
 }
-
-/* ---------------- Helpers ---------------- */
 
 function dedupeSources(arr) {
   if (!Array.isArray(arr)) return [];
@@ -47,13 +93,8 @@ function dedupeSources(arr) {
 }
 
 /**
- * Extraire des unités de rédaction assez nombreuses:
- * - Intro (générale)
- * - Part I : Chap 1 + Chap 2 (avec sections)
- * - Part II : Chap 3 + Chap 4 (avec sections)
- * - Conclusion générale
- * - Bibliographie (draft)
- * - Annexes (draft)
+ * Plan -> unités de rédaction plus nombreuses, pour éviter un PDF trop court.
+ * On garde simple: on prend intro/parties/chapitres/sections et on limite à 18.
  */
 function extractWritingUnits(planText, lang) {
   const isEN = lang === "en";
@@ -71,32 +112,30 @@ function extractWritingUnits(planText, lang) {
 
   for (const line of lines) {
     const t = line.replace(/^[-•\d.\s]+/, "");
-    if (!t) continue;
     const up = t.toUpperCase();
 
-    const match =
-      isEN
-        ? up.startsWith("GENERAL INTRO") ||
-          up.startsWith("INTRO") ||
-          up.startsWith("PART") ||
-          up.startsWith("CHAPTER") ||
-          up.startsWith("SECTION") ||
-          up.startsWith("CONCLUSION") ||
-          up.startsWith("BIBLIO") ||
-          up.startsWith("ANNEX")
-        : up.startsWith("INTRO") ||
-          up.startsWith("PARTIE") ||
-          up.startsWith("CHAP") ||
-          up.startsWith("SECTION") ||
-          up.startsWith("CONCLUSION") ||
-          up.startsWith("BIBLIO") ||
-          up.startsWith("ANNEX");
+    const match = isEN
+      ? up.startsWith("GENERAL INTRO") ||
+        up.startsWith("INTRO") ||
+        up.startsWith("PART") ||
+        up.startsWith("CHAPTER") ||
+        up.startsWith("SECTION") ||
+        up.startsWith("CONCLUSION") ||
+        up.startsWith("BIBLIO") ||
+        up.startsWith("ANNEX")
+      : up.startsWith("INTRO") ||
+        up.startsWith("PARTIE") ||
+        up.startsWith("CHAP") ||
+        up.startsWith("SECTION") ||
+        up.startsWith("CONCLUSION") ||
+        up.startsWith("BIBLIO") ||
+        up.startsWith("ANNEX");
 
     if (match) push(t);
   }
 
-  // Si plan trop court, fallback robuste (16 unités)
-  if (units.length < 10) {
+  // fallback robuste
+  if (units.length < 12) {
     return isEN
       ? [
           "GENERAL INTRODUCTION",
@@ -136,6 +175,95 @@ function extractWritingUnits(planText, lang) {
         ];
   }
 
-  // Garder assez d'unités pour viser 70 pages
-  return units.slice(0, 18);
+  return units.slice(0, 24);
 }
+
+export async function generateLicenceMemoire({ lang, ctx }) {
+  const temperature = Number(process.env.ACAD_TEMPERATURE || 0.35);
+
+  const safeCtx = { ...(ctx || {}) };
+  // ✅ objectif: 70 pages via contenu (pas via pages blanches)
+  safeCtx.lengthPagesTarget = 70;
+
+  const isCongoLawMode = ["droit_congolais", "qdrantLaw", "congo_law", "droitcongolais"].includes(
+    String(safeCtx.mode || "").trim()
+  );
+
+  // 1) Plan
+  let plan = String(safeCtx.plan || "").trim();
+  if (!plan) {
+    plan = await deepseekChat({
+      messages: [
+        { role: "system", content: academicSystemPrompt(lang) },
+        { role: "user", content: buildMemoirePlanPrompt({ lang, ctx: safeCtx }) },
+      ],
+      temperature,
+      max_tokens: Number(process.env.ACAD_PLAN_MAX_TOKENS || 1400),
+    });
+  }
+
+  // 2) Unités de rédaction
+  const sectionTitles = extractWritingUnits(plan, lang);
+
+  // 3) Budget tokens par section (heuristique)
+  const tokensPerPage = Number(process.env.ACAD_TOKENS_PER_PAGE || 420);
+  const totalBudget = 70 * tokensPerPage;
+  const perSectionBudget = Math.floor(totalBudget / Math.max(sectionTitles.length, 1));
+  const hardMaxTokensPerSection = Number(process.env.ACAD_MAX_TOKENS_PER_SECTION || 4200);
+  const maxTokensPerSection = Math.max(1800, Math.min(hardMaxTokensPerSection, perSectionBudget));
+
+  const sections = [];
+  const sourcesUsed = [];
+
+  for (const title of sectionTitles) {
+    let passagesText = "";
+    if (isCongoLawMode) {
+      const { sources, passages } = await searchCongoLawSources({
+        query: `${safeCtx.topic || ""}\n${title}`,
+        limit: 8,
+      });
+      (sources || []).forEach((s) => sourcesUsed.push(s));
+      passagesText = formatPassagesForPrompt(passages);
+    }
+
+    const content = await generateSectionWithRetries({
+      lang,
+      ctx: { ...safeCtx, plan },
+      title,
+      passagesText,
+      temperature,
+      maxTokensPerSection,
+    });
+
+    sections.push({ title, content });
+  }
+
+
+// ✅ Safety net: if content seems too short, generate extra annexes to reach ~70 pages
+const totalChars = sections.reduce((acc, s) => acc + String(s?.content || "").length, 0);
+const minTotalChars = Number(process.env.ACAD_MIN_TOTAL_CHARS || 140000); // heuristic for ~70 pages
+if (totalChars < minTotalChars) {
+  const extras = [
+    "ANNEXE A : Tableaux et indicateurs (brouillon)",
+    "ANNEXE B : Jurisprudence et décisions pertinentes (brouillon)",
+    "ANNEXE C : Textes légaux cités (brouillon)",
+    "ANNEXE D : Synthèse et recommandations opérationnelles (brouillon)",
+  ];
+  for (const t of extras) {
+    const content = await generateSectionWithRetries({
+      lang,
+      ctx: { ...safeCtx, plan },
+      title: t,
+      passagesText: "",
+      temperature,
+      maxTokensPerSection,
+    });
+    sections.push({ title: t, content });
+  }
+}
+
+  return { plan, sections, sourcesUsed: dedupeSources(sourcesUsed) };
+}
+
+// ✅ compat export attendu par certaines routes anciennes
+export { generateLicenceMemoire as generateLicenceMemoire };

@@ -10,6 +10,9 @@ router.get("/licence-memoire", (_req, res) => {
 });
 
 router.post("/licence-memoire", async (req, res) => {
+  req.setTimeout(15 * 60 * 1000);
+  res.setTimeout(15 * 60 * 1000);
+
   try {
     const b = req.body || {};
     const lang = String(b.language || "fr").toLowerCase() === "en" ? "en" : "fr";

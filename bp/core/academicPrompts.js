@@ -164,3 +164,8 @@ Politique des sources :
 - Si une source manque : écrire "(source non fournie)" et ajouter la note "source non fournie".
 - Ne jamais inventer des articles numérotés, jurisprudences, auteurs ou ouvrages.`;
 }
+
+
+// ✅ Backward-compat alias
+export const buildSectionPrompt = buildMemoireSectionPrompt;
+
