@@ -8,8 +8,7 @@ import generateLicenceMemoireRoute from './routes/generateLicenceMemoire.js';
 dotenv.config();
 
 const app = express();
-
-// ===== CORS FIX (Frontend -> Backend PDF / Mémoire) =====
+// ===== CORS (GLOBAL) =====
 const allowedOriginPatterns = [
   /^http:\/\/localhost:\d+$/i,
   /^http:\/\/127\.0\.0\.1:\d+$/i,
@@ -26,13 +25,12 @@ app.use((req, res, next) => {
   const origin = req.headers.origin;
 
   if (isAllowedOrigin(origin)) {
-    // reflect origin for browsers; prevents CORS issues across dev ports
     if (origin) res.setHeader("Access-Control-Allow-Origin", origin);
     else res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Vary", "Origin");
   }
 
-  res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
   res.setHeader("Access-Control-Expose-Headers", "Content-Disposition");
   res.setHeader("Access-Control-Max-Age", "86400");
@@ -40,6 +38,8 @@ app.use((req, res, next) => {
   if (req.method === "OPTIONS") return res.sendStatus(204);
   next();
 });
+
+
 
 const PORT = process.env.PORT || 5001;
 
