@@ -6,90 +6,25 @@ import {
   buildMemoireSectionPrompt,
 } from "./academicPrompts.js";
 import { searchCongoLawSources, formatPassagesForPrompt } from "./qdrantRag.js";
+async function generateSectionWithRetries({ lang, ctx, title, passagesText, temperature, maxTokensPerSection }) {
+  const attempts = Number(process.env.ACAD_SECTION_RETRIES || 2);
+  const minChars = Number(process.env.ACAD_MIN_SECTION_CHARS || 1200);
 
-/**
- * Génération Mémoire (Licence)
- * ✅ UX/produit:
- * - Tous les mémoires = 70 pages (A4 ~11pt), sans champ "taille"
- * - Mode droit congolais : RAG Qdrant (sans exposer "Qdrant" au front)
- * - On génère par unités (introduction, parties/chapitres/sections, conclusion, biblio, annexes)
- */
+  let last = "";
+  for (let i = 0; i <= attempts; i++) {
+    const boost = i === 0 ? 1 : 1.4; // increase tokens on retry
+    const mt = Math.min(Math.floor(maxTokensPerSection * boost), Number(process.env.ACAD_HARD_MAX_TOKENS || 5000));
 
-export async function generateLicenceMemoire({ lang, ctx }) {
-  const PAGES_TARGET = 70; // fixe
-  const temperature = Number(process.env.ACAD_TEMPERATURE || 0.35);
+    const content = await generateSectionWithRetries({
+  lang,
+  ctx: { ...ctx, plan },
+  title,
+  passagesText,
+  temperature,
+  maxTokensPerSection,
+});
 
-  // Budget tokens total (heuristique)
-  const tokensPerPage = Number(process.env.ACAD_TOKENS_PER_PAGE || 320);
-  const totalBudget = PAGES_TARGET * tokensPerPage;
-
-  // max_tokens par section (borne haute, dépend du provider)
-  const hardMaxTokensPerSection = Number(process.env.ACAD_MAX_TOKENS_PER_SECTION || 3200);
-  const planMaxTokens = Number(process.env.ACAD_PLAN_MAX_TOKENS || 1100);
-
-  // 0) Normaliser ctx
-  const safeCtx = { ...(ctx || {}) };
-  safeCtx.lengthPagesTarget = PAGES_TARGET;
-
-  const isCongoLawMode = ["droit_congolais", "qdrantLaw", "congo_law", "droitcongolais"].includes(
-    String(safeCtx.mode || "").trim()
-  );
-
-  // 1) Plan (utiliser plan utilisateur si fourni)
-  let plan = String(safeCtx.plan || "").trim();
-  if (!plan) {
-    plan = await deepseekChat({
-      messages: [
-        { role: "system", content: academicSystemPrompt(lang) },
-        { role: "user", content: buildMemoirePlanPrompt({ lang, ctx: safeCtx }) },
-      ],
-      temperature,
-      max_tokens: planMaxTokens,
-    });
-  }
-
-  // 2) Unités de rédaction (plus nombreuses => 70 pages réelles)
-  const sectionTitles = extractWritingUnits(plan, lang);
-
-  // budget par unité
-  const perSectionBudget = Math.floor(totalBudget / Math.max(sectionTitles.length, 1));
-  const maxTokensPerSection = Math.max(
-    1100,
-    Math.min(hardMaxTokensPerSection, perSectionBudget)
-  );
-
-  const sections = [];
-  const sourcesUsed = [];
-
-  for (const title of sectionTitles) {
-    let passagesText = "";
-    if (isCongoLawMode) {
-      const { sources, passages } = await searchCongoLawSources({
-        query: `${safeCtx.topic || ""}\n${title}`,
-        limit: 8,
-      });
-      (sources || []).forEach((s) => sourcesUsed.push(s));
-      passagesText = formatPassagesForPrompt(passages);
-    }
-
-    const content = await deepseekChat({
-      messages: [
-        { role: "system", content: academicSystemPrompt(lang) },
-        {
-          role: "user",
-          content: buildMemoireSectionPrompt({
-            lang,
-            ctx: { ...safeCtx, plan },
-            sectionTitle: title,
-            sourcesText: passagesText,
-          }),
-        },
-      ],
-      temperature,
-      max_tokens: maxTokensPerSection,
-    });
-
-    sections.push({ title, content });
+sections.push({ title, content });
   }
 
   return { plan, sections, sourcesUsed: dedupeSources(sourcesUsed) };

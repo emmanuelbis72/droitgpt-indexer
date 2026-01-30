@@ -7,10 +7,15 @@ import path from "path";
  * =========================================================
  * DroitGPT — Academic PDF Assembler (Mémoire)
  * =========================================================
- * ✅ Compatibilité: le routeur attend `writeLicenceMemoirePdf({ res, title, ctx, plan, sections })`
- * ✅ Sortie: PDF (stream) par défaut
- * ✅ Notes de bas de page visibles par défaut (bloc "NOTES DE BAS DE PAGE")
- * ✅ Titres/sous-titres en gras via marqueurs **...**
+ * Objectif: assembler un mémoire long et lisible (A4, 11pt),
+ * avec titres en gras + notes de bas de page visibles par défaut.
+ *
+ * ✅ Règles appliquées:
+ * - Format A4, marges académiques, police 11pt
+ * - Titres/sous-titres en GRAS (détection des marqueurs **...**)
+ * - Pas de titres Markdown (#/##/###): ils sont imprimés en texte normal
+ * - Notes de bas de page: bloc "NOTES DE BAS DE PAGE" (ou "NOTES (FOOTNOTES)")
+ * - Numérotation de pages en pied de page
  */
 
 function safeText(v) {
@@ -24,12 +29,13 @@ function renderTextWithBold(doc, text, opts = {}) {
   for (const raw of lines) {
     const line = raw.trimEnd();
 
+    // sauter lignes trop longues vides
     if (!line.trim()) {
       doc.moveDown(0.5);
       continue;
     }
 
-    // Neutraliser Markdown headings (#/##/###)
+    // Neutraliser Markdown headings
     const noMd = line.replace(/^#{1,6}\s+/, "");
 
     // Ligne entièrement en **...**
@@ -40,7 +46,7 @@ function renderTextWithBold(doc, text, opts = {}) {
       continue;
     }
 
-    // Ligne avec segments **...**
+    // Si la ligne contient plusieurs segments **...**
     const parts = [];
     let rest = noMd;
     while (rest.length) {
@@ -55,14 +61,17 @@ function renderTextWithBold(doc, text, opts = {}) {
       rest = rest.slice(idx + m[0].length);
     }
 
+    // Rendu segments (utilise continued)
     const baseOpts = { ...opts };
     for (let i = 0; i < parts.length; i++) {
       const p = parts[i];
       const isLast = i === parts.length - 1;
-      doc.font(p.b ? "Times-Bold" : "Times-Roman");
+      if (p.b) doc.font("Times-Bold");
+      else doc.font("Times-Roman");
+
       doc.text(p.t, { ...baseOpts, continued: !isLast });
     }
-    doc.text("");
+    doc.text(""); // terminer la ligne
     doc.font("Times-Roman");
   }
 }
@@ -73,7 +82,8 @@ function addFooter(doc) {
     doc.switchToPage(i);
     const pageNumber = i + 1;
 
-    doc.font("Times-Roman").fontSize(9);
+    doc.font("Times-Roman")
+      .fontSize(9);
 
     const bottom = doc.page.margins.bottom;
     const y = doc.page.height - bottom + 18;
@@ -82,72 +92,14 @@ function addFooter(doc) {
   }
 }
 
-function buildMemoirePdf(doc, { title, ctx, plan, sections }) {
-  const c = ctx || {};
-
-  // ---------------- Cover ----------------
-  doc.font("Times-Bold").fontSize(16).text(title || "MÉMOIRE DE LICENCE", { align: "center" });
-  doc.moveDown(1.2);
-
-  doc.font("Times-Roman").fontSize(11);
-  if (c.university) doc.text(c.university, { align: "center" });
-  if (c.faculty) doc.text(`Faculté : ${c.faculty}`, { align: "center" });
-  if (c.department) doc.text(`Département : ${c.department}`, { align: "center" });
-  if (c.academicYear) doc.text(`Année : ${c.academicYear}`, { align: "center" });
-
-  doc.moveDown(1.0);
-  if (c.studentName) doc.text(`Étudiant : ${c.studentName}`, { align: "center" });
-  if (c.supervisorName) doc.text(`Encadreur : ${c.supervisorName}`, { align: "center" });
-
-  doc.moveDown(1.4);
-  doc.text(new Date().toLocaleDateString(), { align: "center" });
-
-  doc.addPage();
-
-  // ---------------- Plan ----------------
-  doc.font("Times-Bold").fontSize(14).text("PLAN DU MÉMOIRE", { align: "left" });
-  doc.moveDown(0.8);
-  doc.font("Times-Roman").fontSize(11);
-  renderTextWithBold(doc, safeText(plan), { align: "left" });
-
-  doc.addPage();
-
-  // ---------------- Sections ----------------
-  const secs = Array.isArray(sections) ? sections : [];
-  for (let idx = 0; idx < secs.length; idx++) {
-    const sec = secs[idx] || {};
-    const secTitle = safeText(sec.title);
-    const content = safeText(sec.content);
-
-    if (secTitle.trim()) {
-      doc.font("Times-Bold").fontSize(13).text(secTitle.trim());
-      doc.moveDown(0.6);
-    }
-    doc.font("Times-Roman").fontSize(11);
-
-    const split = content.split(/\n\s*(?:NOTES DE BAS DE PAGE|NOTES \(FOOTNOTES\))\s*\n/i);
-    const mainText = split[0] || "";
-    const notesText = split.slice(1).join("\n").trim();
-
-    renderTextWithBold(doc, mainText, { align: "justify" });
-
-    if (notesText) {
-      doc.moveDown(0.8);
-      doc.font("Times-Bold").fontSize(10).text("NOTES DE BAS DE PAGE");
-      doc.moveDown(0.3);
-      doc.font("Times-Roman").fontSize(9);
-      renderTextWithBold(doc, notesText, { align: "left" });
-      doc.font("Times-Roman").fontSize(11);
-    }
-
-    if (idx < secs.length - 1) doc.addPage();
-  }
-}
-
 /**
- * Assemble un PDF et l'écrit sur disque (utile debug/local).
+ * Assemble un PDF à partir d'un plan + sections.
+ * @param {Object} params
+ * @param {string} params.plan
+ * @param {Array<{title:string, content:string}>} params.sections
+ * @param {string} params.outputPath
  */
-export async function assembleAcademicPdf({ title, ctx, plan, sections, outputPath }) {
+export async function assembleAcademicPdf({ plan, sections, outputPath }) {
   return new Promise((resolve, reject) => {
     try {
       const out = outputPath || path.join(process.cwd(), `memoire_${Date.now()}.pdf`);
@@ -161,9 +113,60 @@ export async function assembleAcademicPdf({ title, ctx, plan, sections, outputPa
       const stream = fs.createWriteStream(out);
       doc.pipe(stream);
 
-      buildMemoirePdf(doc, { title, ctx, plan, sections });
+      // ---------------- Cover ----------------
+      doc.font("Times-Bold").fontSize(16).text("MÉMOIRE DE LICENCE", { align: "center" });
+      doc.moveDown(1.2);
+      doc.font("Times-Roman").fontSize(11).text("Document généré par DroitGPT", { align: "center" });
+      doc.moveDown(2);
+      doc.font("Times-Roman").fontSize(11).text(new Date().toLocaleDateString(), { align: "center" });
 
+      doc.addPage();
+
+      // ---------------- Plan ----------------
+      doc.font("Times-Bold").fontSize(14).text("PLAN DU MÉMOIRE", { align: "left" });
+      doc.moveDown(0.8);
+      doc.font("Times-Roman").fontSize(11);
+      renderTextWithBold(doc, safeText(plan), { align: "left" });
+
+      doc.addPage();
+
+      // ---------------- Sections ----------------
+      const secs = Array.isArray(sections) ? sections : [];
+      for (let idx = 0; idx < secs.length; idx++) {
+        const sec = secs[idx] || {};
+        const title = safeText(sec.title);
+        const content = safeText(sec.content);
+
+        // Titre section
+        if (title.trim()) {
+          doc.font("Times-Bold").fontSize(13).text(title.trim());
+          doc.moveDown(0.6);
+        }
+        doc.font("Times-Roman").fontSize(11);
+
+        // Séparer notes de bas de page
+        const split = content.split(/\n\s*(?:NOTES DE BAS DE PAGE|NOTES \(FOOTNOTES\))\s*\n/i);
+        const mainText = split[0] || "";
+        const notesText = split.slice(1).join("\n").trim();
+
+        renderTextWithBold(doc, mainText, { align: "justify" });
+
+        if (notesText) {
+          doc.moveDown(0.8);
+          doc.font("Times-Bold").fontSize(10).text("NOTES DE BAS DE PAGE");
+          doc.moveDown(0.3);
+          doc.font("Times-Roman").fontSize(9);
+          renderTextWithBold(doc, notesText, { align: "left" });
+          doc.font("Times-Roman").fontSize(11);
+        }
+
+        // Nouvelle page uniquement si ce n'est pas la dernière section
+        if (idx < secs.length - 1) doc.addPage();
+      }
+
+      // Footer page numbers
       addFooter(doc);
+
       doc.end();
 
       stream.on("finish", () => resolve(out));
@@ -174,40 +177,12 @@ export async function assembleAcademicPdf({ title, ctx, plan, sections, outputPa
   });
 }
 
+
 /**
- * ✅ Fonction attendue par le backend Express.
- * Elle stream le PDF directement dans la réponse HTTP.
- *
- * Usage (route):
- * return writeLicenceMemoirePdf({ res, title, ctx, plan, sections });
+ * Backward-compatible export expected by routes:
+ * generateLicenceMemoire.js imports { writeLicenceMemoirePdf } from academicPdfAssembler.js
+ * This wrapper calls assembleAcademicPdf.
  */
-export async function writeLicenceMemoirePdf({ res, title, ctx, plan, sections }) {
-  if (!res) throw new Error("writeLicenceMemoirePdf: res is required");
-
-  // Headers PDF
-  const safeName = String(title || "memoire_licence")
-    .slice(0, 80)
-    .replace(/\s+/g, "_")
-    .replace(/[^a-zA-Z0-9_\-]/g, "");
-  res.setHeader("Content-Type", "application/pdf");
-  res.setHeader("Content-Disposition", `attachment; filename="${safeName}.pdf"`);
-
-  const doc = new PDFDocument({
-    size: "A4",
-    margins: { top: 56, bottom: 56, left: 64, right: 64 },
-    bufferPages: true,
-  });
-
-  // Important: pipe to HTTP response
-  doc.pipe(res);
-
-  try {
-    buildMemoirePdf(doc, { title, ctx, plan, sections });
-    addFooter(doc);
-    doc.end();
-  } catch (e) {
-    // If something crashes while writing, end the response
-    try { doc.end(); } catch (_) {}
-    throw e;
-  }
+export async function writeLicenceMemoirePdf({ plan, sections, outputPath }) {
+  return assembleAcademicPdf({ plan, sections, outputPath });
 }
