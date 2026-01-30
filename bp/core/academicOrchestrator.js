@@ -4,24 +4,14 @@ import {
   academicSystemPrompt,
   buildMemoirePlanPrompt,
   buildMemoireSectionPrompt,
-  // ✅ compat: some older code may import buildSectionPrompt
+  // compat (older code)
   buildSectionPrompt,
 } from "./academicPrompts.js";
 import { searchCongoLawSources, formatPassagesForPrompt } from "./qdrantRag.js";
 
 /**
- * =========================================================
- * Génération Mémoire (Licence) — Orchestrateur
- * =========================================================
- * ✅ Modifs MINIMALES, sans casser l’existant
- * - Génère un plan si absent
- * - Décompose en unités suffisamment nombreuses (viser ~70 pages)
- * - Retry si une section revient vide/trop courte (évite pages blanches)
- * - Mode droit congolais: RAG via searchCongoLawSources
- *
- * Exports attendus:
- * - generateLicenceMemoire (utilisé par la route)
- * - generateLicenceMemoire (alias de compat)
+ * ✅ Export attendu par la route:
+ *   - generateLicenceMemoire
  */
 
 async function generateSectionWithRetries({
@@ -41,7 +31,10 @@ async function generateSectionWithRetries({
     const boost = i === 0 ? 1 : 1.35;
     const mt = Math.min(Math.floor(maxTokensPerSection * boost), hardMax);
 
-    const promptFn = typeof buildMemoireSectionPrompt === "function" ? buildMemoireSectionPrompt : buildSectionPrompt;
+    const promptFn =
+      typeof buildMemoireSectionPrompt === "function"
+        ? buildMemoireSectionPrompt
+        : buildSectionPrompt;
 
     const content = await deepseekChat({
       messages: [
@@ -71,7 +64,6 @@ async function generateSectionWithRetries({
     });
   }
 
-  // fallback: never empty
   return (
     last ||
     `**${title}**\n\n(Contenu non généré : réponse vide du modèle. Veuillez relancer la génération.)\n`
@@ -92,10 +84,6 @@ function dedupeSources(arr) {
   return out;
 }
 
-/**
- * Plan -> unités de rédaction plus nombreuses, pour éviter un PDF trop court.
- * On garde simple: on prend intro/parties/chapitres/sections et on limite à 18.
- */
 function extractWritingUnits(planText, lang) {
   const isEN = lang === "en";
   const text = String(planText || "").trim();
@@ -134,7 +122,6 @@ function extractWritingUnits(planText, lang) {
     if (match) push(t);
   }
 
-  // fallback robuste
   if (units.length < 12) {
     return isEN
       ? [
@@ -180,16 +167,13 @@ function extractWritingUnits(planText, lang) {
 
 export async function generateLicenceMemoire({ lang, ctx }) {
   const temperature = Number(process.env.ACAD_TEMPERATURE || 0.35);
-
   const safeCtx = { ...(ctx || {}) };
-  // ✅ objectif: 70 pages via contenu (pas via pages blanches)
   safeCtx.lengthPagesTarget = 70;
 
   const isCongoLawMode = ["droit_congolais", "qdrantLaw", "congo_law", "droitcongolais"].includes(
     String(safeCtx.mode || "").trim()
   );
 
-  // 1) Plan
   let plan = String(safeCtx.plan || "").trim();
   if (!plan) {
     plan = await deepseekChat({
@@ -202,10 +186,8 @@ export async function generateLicenceMemoire({ lang, ctx }) {
     });
   }
 
-  // 2) Unités de rédaction
   const sectionTitles = extractWritingUnits(plan, lang);
 
-  // 3) Budget tokens par section (heuristique)
   const tokensPerPage = Number(process.env.ACAD_TOKENS_PER_PAGE || 420);
   const totalBudget = 70 * tokensPerPage;
   const perSectionBudget = Math.floor(totalBudget / Math.max(sectionTitles.length, 1));
@@ -238,32 +220,27 @@ export async function generateLicenceMemoire({ lang, ctx }) {
     sections.push({ title, content });
   }
 
-
-// ✅ Safety net: if content seems too short, generate extra annexes to reach ~70 pages
-const totalChars = sections.reduce((acc, s) => acc + String(s?.content || "").length, 0);
-const minTotalChars = Number(process.env.ACAD_MIN_TOTAL_CHARS || 140000); // heuristic for ~70 pages
-if (totalChars < minTotalChars) {
-  const extras = [
-    "ANNEXE A : Tableaux et indicateurs (brouillon)",
-    "ANNEXE B : Jurisprudence et décisions pertinentes (brouillon)",
-    "ANNEXE C : Textes légaux cités (brouillon)",
-    "ANNEXE D : Synthèse et recommandations opérationnelles (brouillon)",
-  ];
-  for (const t of extras) {
-    const content = await generateSectionWithRetries({
-      lang,
-      ctx: { ...safeCtx, plan },
-      title: t,
-      passagesText: "",
-      temperature,
-      maxTokensPerSection,
-    });
-    sections.push({ title: t, content });
+  const totalChars = sections.reduce((acc, s) => acc + String(s?.content || "").length, 0);
+  const minTotalChars = Number(process.env.ACAD_MIN_TOTAL_CHARS || 140000);
+  if (totalChars < minTotalChars) {
+    const extras = [
+      "ANNEXE A : Tableaux et indicateurs (brouillon)",
+      "ANNEXE B : Jurisprudence et décisions pertinentes (brouillon)",
+      "ANNEXE C : Textes légaux cités (brouillon)",
+      "ANNEXE D : Synthèse et recommandations opérationnelles (brouillon)",
+    ];
+    for (const t of extras) {
+      const content = await generateSectionWithRetries({
+        lang,
+        ctx: { ...safeCtx, plan },
+        title: t,
+        passagesText: "",
+        temperature,
+        maxTokensPerSection,
+      });
+      sections.push({ title: t, content });
+    }
   }
-}
 
   return { plan, sections, sourcesUsed: dedupeSources(sourcesUsed) };
 }
-
-// ✅ compat export attendu par certaines routes anciennes
-export { generateLicenceMemoire as generateLicenceMemoire };
