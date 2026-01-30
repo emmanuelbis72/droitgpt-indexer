@@ -8,6 +8,16 @@ import generateLicenceMemoireRoute from './routes/generateLicenceMemoire.js';
 dotenv.config();
 
 const app = express();
+app.get("/__whoami", (req, res) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.json({
+    ok: true,
+    service: "businessplan-v9yy",
+    time: new Date().toISOString(),
+    pid: process.pid,
+  });
+});
+
 // ===== CORS (GLOBAL) =====
 const allowedOriginPatterns = [
   /^http:\/\/localhost:\d+$/i,
