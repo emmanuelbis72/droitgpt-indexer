@@ -176,3 +176,13 @@ export async function assembleAcademicPdf({ plan, sections, outputPath }) {
     }
   });
 }
+
+
+/**
+ * Backward-compatible export expected by routes:
+ * generateLicenceMemoire.js imports { writeLicenceMemoirePdf } from academicPdfAssembler.js
+ * This wrapper calls assembleAcademicPdf.
+ */
+export async function writeLicenceMemoirePdf({ plan, sections, outputPath }) {
+  return assembleAcademicPdf({ plan, sections, outputPath });
+}
