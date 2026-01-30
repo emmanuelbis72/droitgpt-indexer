@@ -1,98 +1,166 @@
 // academicPrompts.js
 
+/**
+ * DroitGPT — Academic prompts (Mémoire)
+ * ✅ Règles UX demandées:
+ * - Tous les mémoires = 70 pages (A4 ~11pt) : longueur obligatoire.
+ * - Titres / sous-titres en GRAS via **...** (pas de ###, pas de Markdown de titres).
+ * - Champ "Méthodologie", "Taille", "Citations" gérés côté formulaire -> ne pas dépendre ici.
+ * - Notes de bas de page visibles par défaut : utiliser (1), (2)... dans le texte + section "NOTES DE BAS DE PAGE".
+ * - Ne jamais inventer de sources : si une source manque, écrire "source non fournie".
+ */
+
 export function academicSystemPrompt(lang) {
   const isEN = lang === "en";
+
   return isEN
     ? `You are an academic legal writing assistant. Write a rigorous Bachelor-level law dissertation.
 
-Constraints:
-- Target a FULL 70-page PDF (A4, ~11pt). If too short, expand with substantive legal analysis (no filler).
-- No Markdown. Use plain text headings (CHAPTER..., SECTION...).
-- Use formal academic French/English.
-- If sources are provided, cite using [1], [2]... strictly matching the provided SOURCES blocks. Never invent.`
+NON-NEGOTIABLE OUTPUT RULES:
+- Target a FULL 70-page PDF (A4, ~11pt). If content is short, EXPAND with substantive legal analysis (no filler).
+- NO Markdown headings. Do NOT use "#", "##", "###".
+- Use bold markers ONLY for headings/subheadings: **CHAPTER I: ...**, **Section 1: ...**, **Paragraph 1: ...**.
+- Write in a formal academic style.
+
+FOOTNOTES (default, mandatory when referencing sources):
+- In-text footnote markers: (1), (2), (3)...
+- At the end of EACH section, include:
+  NOTES (FOOTNOTES)
+  (1) ...
+  (2) ...
+- If a claim needs a source but none is provided, write: (source not provided) and in NOTES: "(n) source not provided".
+
+NEVER INVENT:
+- Never invent articles, case law, or bibliographic entries. If unsure, state uncertainty.`
     : `Tu es un assistant de rédaction académique en droit. Rédige un mémoire de licence rigoureux.
 
-Contraintes:
-- Viser un PDF COMPLET de 70 pages (A4, ~11pt). Si c'est trop court, développer avec une analyse juridique substantielle (pas de remplissage).
-- Pas de Markdown. Utiliser des titres en texte simple (CHAPITRE..., SECTION...).
+RÈGLES DE SORTIE (OBLIGATOIRES) :
+- Viser un PDF COMPLET de 70 pages (A4, ~11pt). Si c’est trop court, DÉVELOPPER avec une analyse juridique substantielle (pas de remplissage).
+- AUCUN titre en Markdown. Ne pas utiliser "#", "##", "###".
+- Titres / sous-titres en GRAS via **...** uniquement : **CHAPITRE I : ...**, **Section 1 : ...**, **Paragraphe 1 : ...**.
 - Style académique formel.
-- Si des sources sont fournies, citer sous la forme [1], [2]... correspondant strictement aux blocs SOURCES. Ne jamais inventer.`;
+
+NOTES DE BAS DE PAGE (par défaut) :
+- Appels de note dans le texte : (1), (2), (3)...
+- À la fin de CHAQUE section, ajouter :
+  NOTES DE BAS DE PAGE
+  (1) ...
+  (2) ...
+- Si une affirmation nécessite une source mais qu’aucune source n’est fournie : écrire "(source non fournie)" et dans NOTES : "(n) source non fournie".
+
+INTERDICTION D’INVENTER :
+- Ne jamais inventer des articles numérotés, jurisprudences, auteurs ou ouvrages. Si incertain, le dire clairement.`;
 }
 
 export function buildMemoirePlanPrompt({ lang, ctx }) {
   const isEN = lang === "en";
-  const topic = ctx.topic || "Sujet non précisé";
+  const topic = ctx?.topic || "Sujet non précisé";
 
   return isEN
     ? `Create a detailed dissertation plan for: "${topic}".
 
+Format rules:
+- No Markdown headings.
+- Use bold markers for headings only: **GENERAL INTRODUCTION**, **PART I**, **CHAPTER I**, **Section 1**, etc.
+
 Required structure (no JSON):
-- General Introduction
-- PART I (2 chapters; each chapter with 2-3 sections)
-- PART II (2 chapters; each chapter with 2-3 sections)
-- General Conclusion
-- Bibliography
-- Annexes
+- **GENERAL INTRODUCTION**
+- **PART I** (2 chapters; each chapter with 2–3 sections)
+- **PART II** (2 chapters; each chapter with 2–3 sections)
+- **GENERAL CONCLUSION**
+- **BIBLIOGRAPHY**
+- **ANNEXES**
 
-Write clean headings in plain text (no Markdown).`
-    : `Propose un plan détaillé de mémoire (niveau licence) pour : "${topic}".
+The plan must be suitable for a 70-page dissertation (include enough sections/subsections).`
+    : `Élabore un plan détaillé de mémoire pour : "${topic}".
 
-Structure obligatoire (pas de JSON):
-- Introduction générale
-- PARTIE I (2 chapitres; chaque chapitre avec 2-3 sections)
-- PARTIE II (2 chapitres; chaque chapitre avec 2-3 sections)
-- Conclusion générale
-- Bibliographie
-- Annexes
+Règles de forme :
+- Pas de titres en Markdown.
+- Utiliser le GRAS uniquement pour les titres : **INTRODUCTION GÉNÉRALE**, **PARTIE I**, **CHAPITRE I**, **Section 1**, etc.
 
-Donne des titres propres en texte simple (pas de Markdown).`;
+Structure obligatoire (pas de JSON) :
+- **INTRODUCTION GÉNÉRALE**
+- **PARTIE I** (2 chapitres ; chaque chapitre avec 2–3 sections)
+- **PARTIE II** (2 chapitres ; chaque chapitre avec 2–3 sections)
+- **CONCLUSION GÉNÉRALE**
+- **BIBLIOGRAPHIE**
+- **ANNEXES**
+
+Le plan doit permettre un mémoire de 70 pages (prévoir suffisamment de sous-sections).`;
 }
 
-export function buildSectionPrompt({ lang, ctx, sectionTitle, sourcesText }) {
+export function buildMemoireSectionPrompt({ lang, ctx, sectionTitle, sourcesText }) {
   const isEN = lang === "en";
-  const mode = ctx.mode === "droit_congolais" ? (isEN ? "Congolese law mode" : "Mode droit congolais") : (isEN ? "Standard mode" : "Mode standard");
+  const topic = ctx?.topic || "Sujet non précisé";
+  const ps = ctx?.problemStatement || "";
+  const obj = ctx?.objectives || "";
+
+  // Mode label (UI-facing) — do not expose internal tech words to the user
+  const mode =
+    ctx?.mode === "qdrantLaw" ? (isEN ? "Congolese law mode" : "Mode droit congolais") : isEN ? "Standard mode" : "Mode standard";
 
   const sourcesBlock = sourcesText
-    ? `\n\nSOURCES (use them as evidence and cite):\n${sourcesText}\n`
+    ? `
+
+SOURCES (use as evidence; do not invent):
+${sourcesText}
+`
     : "";
+  const planHint = ctx?.plan ? `
 
-  const planHint = ctx.plan ? `\n\nUser plan:\n${ctx.plan}\n` : "";
-
-  const methLine = ctx.mode === "droit_congolais" && ctx.methodology ? (isEN ? `Method: ${ctx.methodology}` : `Méthode : ${ctx.methodology}`) : "";
+User plan:
+${ctx.plan}
+` : "";
 
   return isEN
     ? `Write the section: "${sectionTitle}" for a Bachelor law dissertation.
-Topic: ${ctx.topic}
-Problem statement: ${ctx.problemStatement}
-Objectives: ${ctx.objectives}
-${methLine}
-Mode: ${mode}
+
+Context:
+- Topic: ${topic}
+- Problem statement: ${ps}
+- Objectives: ${obj}
+- Mode: ${mode}
+${planHint}${sourcesBlock}
+
+Length requirement:
+- This dissertation must reach a FULL 70 pages overall. Do NOT be overly concise.
+- Write a complete section with: definitions, doctrinal views (only if provided), constitutional/legal analysis, practical issues, and structured mini-conclusion.
 
 Formatting rules:
-- No Markdown.
-- Use clear headings in plain text: CHAPTER, SECTION, Subsection.
-- Write long-form academic paragraphs.
+- No Markdown headings (#, ##, ### prohibited).
+- Headings/subheadings must be bold with **...**:
+  **CHAPTER/CHAPITRE...**, **Section...**, **Paragraph...**
+- Use footnotes by default:
+  - In-text markers: (1), (2), (3)...
+  - End of section: "NOTES (FOOTNOTES)" listing each note.
 
-Citations:
-- If SOURCES are provided, cite with [1], [2]... matching the SOURCES numbering.
-- Never cite a number that does not exist.
-- If a claim is not supported, write (source not provided).
-${planHint}${sourcesBlock}`
+Sources policy:
+- If SOURCES are provided, base claims on them and create footnotes referencing the relevant source text.
+- If a needed source is missing, write "(source not provided)" and add the corresponding note "source not provided".
+- Never invent legal articles, cases, or bibliographic entries.`
     : `Rédige la section : "${sectionTitle}" pour un mémoire de licence en droit.
-Sujet : ${ctx.topic}
-Problématique : ${ctx.problemStatement}
-Objectifs : ${ctx.objectives}
-${methLine}
-Mode : ${mode}
 
-Règles de forme:
-- Pas de Markdown.
-- Titres en texte simple : CHAPITRE, SECTION, Sous-section.
-- Paragraphes longs, style académique.
+Contexte :
+- Sujet : ${topic}
+- Problématique : ${ps}
+- Objectifs : ${obj}
+- Mode : ${mode}
+${planHint}${sourcesBlock}
 
-Citations:
-- Si des SOURCES sont fournies, citer avec [1], [2]... correspondant aux SOURCES.
-- Ne cite jamais un numéro qui n'existe pas.
-- Toute affirmation non couverte : (source non fournie).
-${planHint}${sourcesBlock}`;
+Exigence de longueur :
+- Le mémoire doit atteindre un TOTAL de 70 pages. Ne sois pas trop bref.
+- Produis une section complète : définitions, points doctrinaux (seulement si fournis), analyse constitutionnelle/juridique, difficultés pratiques, mini-conclusion structurée.
+
+Règles de forme :
+- Interdiction d’utiliser des titres Markdown (#, ##, ###).
+- Titres / sous-titres en GRAS via **...** :
+  **CHAPITRE...**, **Section...**, **Paragraphe...**
+- Notes de bas de page par défaut :
+  - Appels : (1), (2), (3)...
+  - Fin de section : "NOTES DE BAS DE PAGE" listant chaque note.
+
+Politique des sources :
+- Si des SOURCES sont fournies, fonder les affirmations dessus et ajouter des notes correspondantes.
+- Si une source manque : écrire "(source non fournie)" et ajouter la note "source non fournie".
+- Ne jamais inventer des articles numérotés, jurisprudences, auteurs ou ouvrages.`;
 }

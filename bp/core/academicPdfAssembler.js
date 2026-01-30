@@ -1,105 +1,178 @@
 // academicPdfAssembler.js
 import PDFDocument from "pdfkit";
+import fs from "fs";
+import path from "path";
 
-export function writeLicenceMemoirePdf({ res, title, ctx, plan, sections }) {
-  const MAX_PDF_PAGES = 70;
-  res.setHeader("Content-Type", "application/pdf");
-  res.setHeader("Content-Disposition", `attachment; filename="${safeFileName(title)}.pdf"`);
+/**
+ * =========================================================
+ * DroitGPT — Academic PDF Assembler (Mémoire)
+ * =========================================================
+ * Objectif: assembler un mémoire long et lisible (A4, 11pt),
+ * avec titres en gras + notes de bas de page visibles par défaut.
+ *
+ * ✅ Règles appliquées:
+ * - Format A4, marges académiques, police 11pt
+ * - Titres/sous-titres en GRAS (détection des marqueurs **...**)
+ * - Pas de titres Markdown (#/##/###): ils sont imprimés en texte normal
+ * - Notes de bas de page: bloc "NOTES DE BAS DE PAGE" (ou "NOTES (FOOTNOTES)")
+ * - Numérotation de pages en pied de page
+ */
 
-  const doc = new PDFDocument({ size: "A4", margins: { top: 50, left: 55, right: 55, bottom: 50 } });
-  doc.pipe(res);
+function safeText(v) {
+  return String(v || "");
+}
 
-  let pageCount = 1;
-  let stopWriting = false;
-  doc.on("pageAdded", () => {
-    pageCount += 1;
-    if (pageCount > MAX_PDF_PAGES) {
-      stopWriting = true;
+// Détection simple: une ligne " **TITRE** " => rendu en gras
+function renderTextWithBold(doc, text, opts = {}) {
+  const lines = safeText(text).split(/\r?\n/);
+
+  for (const raw of lines) {
+    const line = raw.trimEnd();
+
+    // sauter lignes trop longues vides
+    if (!line.trim()) {
+      doc.moveDown(0.5);
+      continue;
+    }
+
+    // Neutraliser Markdown headings
+    const noMd = line.replace(/^#{1,6}\s+/, "");
+
+    // Ligne entièrement en **...**
+    const mFull = noMd.match(/^\*\*(.+?)\*\*\s*$/);
+    if (mFull) {
+      doc.font("Times-Bold").text(mFull[1], opts);
+      doc.font("Times-Roman");
+      continue;
+    }
+
+    // Si la ligne contient plusieurs segments **...**
+    const parts = [];
+    let rest = noMd;
+    while (rest.length) {
+      const m = rest.match(/\*\*(.+?)\*\*/);
+      if (!m) {
+        parts.push({ t: rest, b: false });
+        break;
+      }
+      const idx = m.index || 0;
+      if (idx > 0) parts.push({ t: rest.slice(0, idx), b: false });
+      parts.push({ t: m[1], b: true });
+      rest = rest.slice(idx + m[0].length);
+    }
+
+    // Rendu segments (utilise continued)
+    const baseOpts = { ...opts };
+    for (let i = 0; i < parts.length; i++) {
+      const p = parts[i];
+      const isLast = i === parts.length - 1;
+      if (p.b) doc.font("Times-Bold");
+      else doc.font("Times-Roman");
+
+      doc.text(p.t, { ...baseOpts, continued: !isLast });
+    }
+    doc.text(""); // terminer la ligne
+    doc.font("Times-Roman");
+  }
+}
+
+function addFooter(doc) {
+  const range = doc.bufferedPageRange();
+  for (let i = range.start; i < range.start + range.count; i++) {
+    doc.switchToPage(i);
+    const pageNumber = i + 1;
+
+    doc.font("Times-Roman")
+      .fontSize(9);
+
+    const bottom = doc.page.margins.bottom;
+    const y = doc.page.height - bottom + 18;
+
+    doc.text(String(pageNumber), 0, y, { align: "center" });
+  }
+}
+
+/**
+ * Assemble un PDF à partir d'un plan + sections.
+ * @param {Object} params
+ * @param {string} params.plan
+ * @param {Array<{title:string, content:string}>} params.sections
+ * @param {string} params.outputPath
+ */
+export async function assembleAcademicPdf({ plan, sections, outputPath }) {
+  return new Promise((resolve, reject) => {
+    try {
+      const out = outputPath || path.join(process.cwd(), `memoire_${Date.now()}.pdf`);
+
+      const doc = new PDFDocument({
+        size: "A4",
+        margins: { top: 56, bottom: 56, left: 64, right: 64 },
+        bufferPages: true,
+      });
+
+      const stream = fs.createWriteStream(out);
+      doc.pipe(stream);
+
+      // ---------------- Cover ----------------
+      doc.font("Times-Bold").fontSize(16).text("MÉMOIRE DE LICENCE", { align: "center" });
+      doc.moveDown(1.2);
+      doc.font("Times-Roman").fontSize(11).text("Document généré par DroitGPT", { align: "center" });
+      doc.moveDown(2);
+      doc.font("Times-Roman").fontSize(11).text(new Date().toLocaleDateString(), { align: "center" });
+
+      doc.addPage();
+
+      // ---------------- Plan ----------------
+      doc.font("Times-Bold").fontSize(14).text("PLAN DU MÉMOIRE", { align: "left" });
+      doc.moveDown(0.8);
+      doc.font("Times-Roman").fontSize(11);
+      renderTextWithBold(doc, safeText(plan), { align: "left" });
+
+      doc.addPage();
+
+      // ---------------- Sections ----------------
+      const secs = Array.isArray(sections) ? sections : [];
+      for (let idx = 0; idx < secs.length; idx++) {
+        const sec = secs[idx] || {};
+        const title = safeText(sec.title);
+        const content = safeText(sec.content);
+
+        // Titre section
+        if (title.trim()) {
+          doc.font("Times-Bold").fontSize(13).text(title.trim());
+          doc.moveDown(0.6);
+        }
+        doc.font("Times-Roman").fontSize(11);
+
+        // Séparer notes de bas de page
+        const split = content.split(/\n\s*(?:NOTES DE BAS DE PAGE|NOTES \(FOOTNOTES\))\s*\n/i);
+        const mainText = split[0] || "";
+        const notesText = split.slice(1).join("\n").trim();
+
+        renderTextWithBold(doc, mainText, { align: "justify" });
+
+        if (notesText) {
+          doc.moveDown(0.8);
+          doc.font("Times-Bold").fontSize(10).text("NOTES DE BAS DE PAGE");
+          doc.moveDown(0.3);
+          doc.font("Times-Roman").fontSize(9);
+          renderTextWithBold(doc, notesText, { align: "left" });
+          doc.font("Times-Roman").fontSize(11);
+        }
+
+        // Nouvelle page uniquement si ce n'est pas la dernière section
+        if (idx < secs.length - 1) doc.addPage();
+      }
+
+      // Footer page numbers
+      addFooter(doc);
+
+      doc.end();
+
+      stream.on("finish", () => resolve(out));
+      stream.on("error", reject);
+    } catch (e) {
+      reject(e);
     }
   });
-
-  const charsPerPage = Number(process.env.ACAD_CHARS_PER_PAGE || 1800); // conservative
-  function truncateToRemainingPages(text) {
-    if (stopWriting) return "";
-    const remaining = Math.max(MAX_PDF_PAGES - pageCount + 1, 0);
-    const maxChars = remaining * charsPerPage;
-    const t = String(text || "");
-    if (t.length <= maxChars) return t;
-    return t.slice(0, Math.max(maxChars - 200, 0)) + "\n\n[Document tronqué automatiquement pour respecter la limite de 70 pages.]";
-  }
-
-
-  // Cover
-  doc.font("Helvetica-Bold").fontSize(16).text(ctx.university || "Université", { align: "center" });
-  doc.moveDown(0.4);
-  doc.font("Helvetica").fontSize(12).text(ctx.faculty || "Faculté", { align: "center" });
-  if (ctx.department) {
-    doc.moveDown(0.2);
-    doc.font("Helvetica").fontSize(11).text(ctx.department, { align: "center" });
-  }
-  doc.moveDown(1.2);
-  doc.font("Helvetica-Bold").fontSize(18).text(title, { align: "center" });
-  doc.moveDown(1.2);
-
-  doc.font("Helvetica").fontSize(11);
-  if (ctx.studentName) doc.text(`Étudiant : ${ctx.studentName}`, { align: "center" });
-  if (ctx.supervisorName) doc.text(`Encadreur : ${ctx.supervisorName}`, { align: "center" });
-  if (ctx.academicYear) doc.text(`Année académique : ${ctx.academicYear}`, { align: "center" });
-  if (pageCount >= MAX_PDF_PAGES) { stopWriting = true; doc.end(); return; }
-  doc.addPage();
-
-  // Plan
-  doc.font("Helvetica-Bold").fontSize(14).text("Plan", { align: "left" });
-  doc.moveDown(0.6);
-  doc.font("Helvetica").fontSize(11).text(truncateToRemainingPages(String(plan || "").trim() || "—"), { align: "left" });
-
-  // Sections
-  for (const s of sections || []) {
-  if (pageCount >= MAX_PDF_PAGES) { stopWriting = true; doc.end(); return; }
-  doc.addPage();
-    doc.font("Helvetica-Bold").fontSize(14).text(s.title || "Section", { align: "left" });
-    doc.moveDown(0.6);
-    doc.font("Helvetica").fontSize(11).text(truncateToRemainingPages(String(s.content || "").trim()), { align: "left" });
-  }
-
-
-// Notes de bas de page / Sources (optionnel)
-if (ctx?.mode === "droit_congolais" && Array.isArray(ctx?.sourcesUsed) && ctx.sourcesUsed.length) {
-  if (pageCount < MAX_PDF_PAGES) {
-    doc.addPage();
-  } else {
-    stopWriting = true;
-  }
-  if (!stopWriting) doc.font("Helvetica-Bold").fontSize(14).text("Notes de bas de page (sources)", { align: "left" });
-  doc.moveDown(0.6);
-  doc.font("Helvetica").fontSize(10);
-
-  const maxNotes = 40;
-  ctx.sourcesUsed.slice(0, maxNotes).forEach((s, i) => {
-    const n = s?.n || s?.idx || i + 1;
-    const title = s?.title || s?.source || "Source";
-    const author = s?.author ? ` — ${s.author}` : "";
-    const year = s?.year ? `, ${s.year}` : "";
-    const src = s?.source ? ` — ${s.source}` : "";
-    const type = s?.type ? ` (${s.type})` : "";
-    doc.text(`[${n}] ${title}${type}${author}${year}${src}`);
-    doc.moveDown(0.2);
-  });
-
-  if (ctx.sourcesUsed.length > maxNotes) {
-    doc.moveDown(0.4);
-    doc.fillColor("#999999").text(`… ${ctx.sourcesUsed.length - maxNotes} autre(s) source(s) non affichée(s).`);
-    doc.fillColor("black");
-  }
-}
-
-  doc.end();
-}
-
-function safeFileName(s) {
-  return String(s || "memoire")
-    .replace(/[^\w\s-]/g, "")
-    .trim()
-    .replace(/\s+/g, "_")
-    .slice(0, 80);
 }
