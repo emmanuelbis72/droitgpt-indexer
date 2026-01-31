@@ -3,15 +3,16 @@ import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import generatePdfRoute from './generatePdf.js';
+import generateLicenceMemoireRoute from './routes/generateLicenceMemoire.js';
 
 dotenv.config();
 
 const app = express();
 
-// ⏱️ Timeouts longs (DeepSeek Reasoner peut prendre 45 minutes)
+// ⏱️ Long timeout (DeepSeek Reasoner): 45 minutes by default
 const SERVER_TIMEOUT_MS = Number(process.env.SERVER_TIMEOUT_MS || 45 * 60 * 1000);
 
-// Applique un timeout long à chaque requête/réponse (évite coupure pendant génération)
+// Apply long timeout to every request/response (prevents socket close during generation)
 app.use((req, res, next) => {
   req.setTimeout(SERVER_TIMEOUT_MS);
   res.setTimeout(SERVER_TIMEOUT_MS);
@@ -19,14 +20,7 @@ app.use((req, res, next) => {
 });
 
 
-
-/**
- * ===== CORS (robuste) =====
- * Objectif: éviter le "No Access-Control-Allow-Origin" sur OPTIONS + POST (PDF).
- * - Autorise tous les ports localhost (dev)
- * - Autorise Vercel + domaine prod
- * - Expose Content-Disposition (nom du PDF)
- */
+// ===== CORS FIX (Frontend -> Backend PDF / Mémoire) =====
 const allowedOriginPatterns = [
   /^http:\/\/localhost:\d+$/i,
   /^http:\/\/127\.0\.0\.1:\d+$/i,
@@ -34,49 +28,42 @@ const allowedOriginPatterns = [
   /^https:\/\/www\.droitgpt\.com$/i,
 ];
 
-const corsOptions = {
-  origin: (origin, cb) => {
-    if (!origin) return cb(null, true); // curl/postman
-    const ok = allowedOriginPatterns.some((p) => p.test(origin));
-    return cb(null, ok);
-  },
-  methods: ["GET", "POST", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"],
-  exposedHeaders: ["Content-Disposition"],
-  credentials: false,
-  maxAge: 86400,
-};
+function isAllowedOrigin(origin) {
+  if (!origin) return true; // curl/postman
+  return allowedOriginPatterns.some((p) => p.test(origin));
+}
 
-// ✅ CORS avant tout (y compris OPTIONS preflight)
-app.use(cors(corsOptions));
-app.options("*", cors(corsOptions));
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+
+  if (isAllowedOrigin(origin)) {
+    // reflect origin for browsers; prevents CORS issues across dev ports
+    if (origin) res.setHeader("Access-Control-Allow-Origin", origin);
+    else res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Vary", "Origin");
+  }
+
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.setHeader("Access-Control-Expose-Headers", "Content-Disposition");
+  res.setHeader("Access-Control-Max-Age", "86400");
+
+  if (req.method === "OPTIONS") return res.sendStatus(204);
+  next();
+});
 
 const PORT = process.env.PORT || 5001;
 
-app.use(express.json({ limit: '10mb' }));
-
-// ✅ Debug route pour vérifier en prod que ce serveur est bien celui déployé
-app.get("/__whoami", (req, res) => {
-  res.json({
-    ok: true,
-    service: "pdf-service/generate-academic",
-    time: new Date().toISOString(),
-    pid: process.pid,
-  });
-});
-
+app.use(cors());
+app.use(express.json());
 
 app.use('/generate-pdf', generatePdfRoute);
+app.use('/generate-academic', generateLicenceMemoireRoute);
 
 app.get('/', (req, res) => {
   res.send('✅ Serveur de génération PDF opérationnel.');
 });
 
-const httpServer = app.listen(PORT, () => {
+app.listen(PORT, () => {
   console.log(`🚀 PDF Service en ligne sur http://localhost:${PORT}`);
 });
-
-// ⏱️ Timeouts Node HTTP (protège contre coupure proxy/headers)
-httpServer.requestTimeout = SERVER_TIMEOUT_MS;          // durée totale d'une requête
-httpServer.headersTimeout = SERVER_TIMEOUT_MS + 10_000; // doit être > requestTimeout
-httpServer.keepAliveTimeout = 65_000;
