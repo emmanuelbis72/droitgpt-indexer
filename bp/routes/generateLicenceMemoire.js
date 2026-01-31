@@ -5,21 +5,31 @@ import { writeLicenceMemoirePdf } from "../core/academicPdfAssembler.js";
 
 const router = express.Router();
 
+router.options("/licence-memoire", (_req, res) => {
+  // cors middleware gère normalement ceci, mais on garde une réponse propre
+  return res.sendStatus(204);
+});
+
 router.get("/licence-memoire", (_req, res) => {
   res.json({ ok: true, message: "✅ Endpoint licence-memoire OK. Utilise POST pour générer le PDF." });
 });
 
 router.post("/licence-memoire", async (req, res) => {
-  console.log("[licence-memoire] POST hit", { origin: req.headers.origin, ct: req.headers["content-type"] });
+  // ⏱️ DeepSeek Reasoner peut prendre longtemps : 45 minutes
+  const ROUTE_TIMEOUT_MS = Number(process.env.ACAD_REQUEST_TIMEOUT_MS || 45 * 60 * 1000);
+  req.setTimeout(ROUTE_TIMEOUT_MS);
+  res.setTimeout(ROUTE_TIMEOUT_MS);
+
+
   try {
     const b = req.body || {};
-    const lang = String(b.language || "fr").toLowerCase() === "en" ? "en" : "fr";
+    const lang = String(b.lang || b.language || "fr").toLowerCase() === "en" ? "en" : "fr";
 
     const ctx = {
       mode: b.mode === "droit_congolais" ? "droit_congolais" : "standard",
       citationStyle: b.citationStyle === "apa" ? "apa" : "footnotes",
 
-      topic: String(b.topic || "").trim(),
+      topic: String(b.topic || b.title || b.subject || "").trim(),
       university: String(b.university || "").trim(),
       faculty: String(b.faculty || "").trim(),
       department: String(b.department || "").trim(),
