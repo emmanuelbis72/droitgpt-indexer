@@ -113,7 +113,7 @@ ${ctx.plan}
 ` : "";
 
   return isEN
-    ? `Write the section: "${sectionTitle}" for a Bachelor law dissertation.
+    ? `Write the section: "${sectionTitle}" for a Bachelor-level dissertation.
 
 Context:
 - Topic: ${topic}
@@ -122,23 +122,36 @@ Context:
 - Mode: ${mode}
 ${planHint}${sourcesBlock}
 
-Length requirement:
-- This dissertation must reach a FULL 70 pages overall. Do NOT be overly concise.
-- Write a complete section with: definitions, doctrinal views (only if provided), constitutional/legal analysis, practical issues, and structured mini-conclusion.
+LENGTH TARGET (important):
+- The full dissertation should approach 70 pages (A4 ~11pt).
+- Aim for a “full” section with rich structure and transitions.
+- Indicative targets:
+  - GENERAL INTRODUCTION / GENERAL CONCLUSION: 1,500–2,200 words
+  - PART / CHAPTER: 2,200–3,200 words
+  - SECTION / SUBSECTION: 1,300–2,100 words
+- If short, expand with substantive analysis (no filler).
 
-Formatting rules:
-- No Markdown headings (#, ##, ### prohibited).
-- Headings/subheadings must be bold with **...**:
-  **CHAPTER/CHAPITRE...**, **Section...**, **Paragraph...**
-- Use footnotes by default:
-  - In-text markers: (1), (2), (3)...
-  - End of section: "NOTES (FOOTNOTES)" listing each note.
+QUALITY EXPECTATIONS:
+- Definitions and conceptual framework
+- Literature/state of the art ONLY if elements are provided; otherwise write “source not provided”
+- Legal/institutional analysis when relevant; otherwise domain analysis (discipline-specific)
+- Critical discussion: limits, stakes, impacts, risks, recommendations
+- Structured mini-conclusion
+
+Formatting:
+- No Markdown headings (#, ##, ###).
+- Headings/subheadings must be bold with **...** (e.g., **I. ...**, **A. ...**, **1. ...**).
+- Clear paragraphs.
+
+Footnotes by default:
+- In-text markers: (1), (2), (3)...
+- End of section: "NOTES (FOOTNOTES)" listing each note.
+- If a source is missing: write "(source not provided)" and add the corresponding note.
 
 Sources policy:
-- If SOURCES are provided, base claims on them and create footnotes referencing the relevant source text.
-- If a needed source is missing, write "(source not provided)" and add the corresponding note "source not provided".
-- Never invent legal articles, cases, or bibliographic entries.`
-    : `Rédige la section : "${sectionTitle}" pour un mémoire de licence en droit.
+- If SOURCES are provided: base key claims on them and connect notes to relevant source excerpts.
+- Never fabricate references (authors, laws, cases, stats). If uncertain: "source not provided".`
+    : `Rédige la section : "${sectionTitle}" pour un mémoire de fin d’études (niveau licence).
 
 Contexte :
 - Sujet : ${topic}
@@ -147,22 +160,36 @@ Contexte :
 - Mode : ${mode}
 ${planHint}${sourcesBlock}
 
-Exigence de longueur :
-- Le mémoire doit atteindre un TOTAL de 70 pages. Ne sois pas trop bref.
-- Produis une section complète : définitions, points doctrinaux (seulement si fournis), analyse constitutionnelle/juridique, difficultés pratiques, mini-conclusion structurée.
+OBJECTIF DE LONGUEUR (très important) :
+- Le mémoire final doit approcher 70 pages (A4 ~11pt).
+- Vise une section “pleine” avec une structure riche et des transitions.
+- Cibles indicatives (à respecter au mieux) :
+  - INTRODUCTION GÉNÉRALE / CONCLUSION GÉNÉRALE : 1 500 – 2 200 mots
+  - CHAPITRE / PARTIE : 2 200 – 3 200 mots
+  - SECTION / SOUS-SECTION : 1 300 – 2 100 mots
+- Si tu es en-dessous, développe par analyse (pas de remplissage).
+
+CONTENU ATTENDU (haute qualité) :
+- Définitions et cadre conceptuel
+- État de la question (doctrine/rapports/études) UNIQUEMENT si des éléments sont fournis ; sinon explique “source non fournie”
+- Analyse juridique / institutionnelle quand pertinent ; sinon analyse technique/sectorielle selon la discipline
+- Discussion critique : limites, enjeux, impacts, risques, recommandations
+- Mini-conclusion structurée (2–4 paragraphes)
 
 Règles de forme :
-- Interdiction d’utiliser des titres Markdown (#, ##, ###).
+- Interdiction des titres Markdown (#, ##, ###).
 - Titres / sous-titres en GRAS via **...** :
-  **CHAPITRE...**, **Section...**, **Paragraphe...**
-- Notes de bas de page par défaut :
-  - Appels : (1), (2), (3)...
-  - Fin de section : "NOTES DE BAS DE PAGE" listant chaque note.
+  **I. ...**, **A. ...**, **1. ...**
+- Paragraphes aérés, phrases claires.
+
+Notes de bas de page (par défaut) :
+- Appels : (1), (2), (3)...
+- Fin de section : "NOTES DE BAS DE PAGE" listant chaque note.
+- Si une source manque : écrire "(source non fournie)" et ajouter la note correspondante.
 
 Politique des sources :
-- Si des SOURCES sont fournies, fonder les affirmations dessus et ajouter des notes correspondantes.
-- Si une source manque : écrire "(source non fournie)" et ajouter la note "source non fournie".
-- Ne jamais inventer des articles numérotés, jurisprudences, auteurs ou ouvrages.`;
+- Si des SOURCES sont fournies : base les affirmations importantes dessus et relie-les à des notes.
+- Ne jamais fabriquer de références (auteurs, ouvrages, articles, jurisprudence, statistiques). Si incertain : "source non fournie".`;
 }
 
 
