@@ -82,7 +82,7 @@ function addFooter(doc) {
     doc.font("Times-Roman").fontSize(9);
 
     const bottom = doc.page.margins.bottom;
-    const y = doc.page.height - bottom + 18;
+    const y = doc.page.height - 30; // keep inside page to avoid blank extra pages
     doc.text(String(pageNumber), 0, y, { align: "center" });
   }
 }
