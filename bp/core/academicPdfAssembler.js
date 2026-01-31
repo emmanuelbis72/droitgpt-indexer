@@ -75,15 +75,35 @@ function renderTextWithBold(doc, text, opts = {}) {
 }
 
 function addFooter(doc) {
+  // IMPORTANT: Write footer without affecting layout / without triggering page breaks.
   const range = doc.bufferedPageRange();
+
   for (let i = range.start; i < range.start + range.count; i++) {
     doc.switchToPage(i);
-    const pageNumber = i + 1;
-    doc.font("Times-Roman").fontSize(9);
 
-    const bottom = doc.page.margins.bottom;
-    const y = doc.page.height - 30; // keep inside page to avoid blank extra pages
-    doc.text(String(pageNumber), 0, y, { align: "center" });
+    const prevX = doc.x;
+    const prevY = doc.y;
+
+    doc.save();
+    doc.font("Times-Roman").fontSize(9).opacity(0.75);
+
+    const pageNumber = i + 1;
+
+    // Stay INSIDE the printable area to avoid PDFKit auto addPage()
+    const y = doc.page.height - doc.page.margins.bottom + 0 - 14; // 14pt above bottom margin
+    const x = doc.page.margins.left;
+    const w = doc.page.width - doc.page.margins.left - doc.page.margins.right;
+
+    doc.text(String(pageNumber), x, y, {
+      width: w,
+      align: "center",
+      lineBreak: false, // critical: don't move doc.y / don't trigger overflow
+    });
+
+    doc.restore();
+
+    doc.x = prevX;
+    doc.y = prevY;
   }
 }
 

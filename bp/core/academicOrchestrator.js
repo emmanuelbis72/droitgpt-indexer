@@ -22,8 +22,10 @@ async function generateSectionWithRetries({
   temperature,
   maxTokensPerSection,
 }) {
-  const attempts = Number(process.env.ACAD_SECTION_RETRIES || 2);
-  const minChars = Number(process.env.ACAD_MIN_SECTION_CHARS || 2400);
+  const attemptsEnv = Number(process.env.ACAD_SECTION_RETRIES || 2);
+  const attempts = Math.max(3, attemptsEnv);
+  const minCharsEnv = Number(process.env.ACAD_MIN_SECTION_CHARS || 2400);
+  const minChars = Math.max(3800, minCharsEnv); // enforce density to reach ~70 pages
   const hardMax = Number(process.env.ACAD_HARD_MAX_TOKENS || 5000);
 
   let last = "";
@@ -162,7 +164,7 @@ function extractWritingUnits(planText, lang) {
         ];
   }
 
-  return units.slice(0, 24);
+  return units.slice(0, 34);
 }
 
 export async function generateLicenceMemoire({ lang, ctx }) {
