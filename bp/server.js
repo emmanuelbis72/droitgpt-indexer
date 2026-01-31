@@ -3,19 +3,17 @@ import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import generatePdfRoute from './generatePdf.js';
-import generateLicenceMemoireRoute from './routes/generateLicenceMemoire.js';
 
 dotenv.config();
 
 const app = express();
 
-/** ===========================
- *  CORS (robuste, dev+prod)
- *  ===========================
- *  - Autorise tous les ports localhost (Vite)
- *  - Autorise Vercel + domaine public
- *  - Répond aux preflight OPTIONS avec 204 + headers
- *  - Ajoute systématiquement les headers CORS sur les réponses autorisées
+/**
+ * ===== CORS (robuste) =====
+ * Objectif: éviter le "No Access-Control-Allow-Origin" sur OPTIONS + POST (PDF).
+ * - Autorise tous les ports localhost (dev)
+ * - Autorise Vercel + domaine prod
+ * - Expose Content-Disposition (nom du PDF)
  */
 const allowedOriginPatterns = [
   /^http:\/\/localhost:\d+$/i,
@@ -24,50 +22,39 @@ const allowedOriginPatterns = [
   /^https:\/\/www\.droitgpt\.com$/i,
 ];
 
-function isAllowedOrigin(origin) {
-  if (!origin) return true; // curl/postman
-  return allowedOriginPatterns.some((p) => p.test(origin));
-}
+const corsOptions = {
+  origin: (origin, cb) => {
+    if (!origin) return cb(null, true); // curl/postman
+    const ok = allowedOriginPatterns.some((p) => p.test(origin));
+    return cb(null, ok);
+  },
+  methods: ["GET", "POST", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+  exposedHeaders: ["Content-Disposition"],
+  credentials: false,
+  maxAge: 86400,
+};
 
-function applyCors(req, res) {
-  const origin = req.headers.origin;
-
-  if (isAllowedOrigin(origin)) {
-    if (origin) {
-      res.setHeader("Access-Control-Allow-Origin", origin);
-      res.setHeader("Vary", "Origin");
-    } else {
-      // outils sans Origin
-      res.setHeader("Access-Control-Allow-Origin", "*");
-    }
-  }
-
-  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-  res.setHeader("Access-Control-Expose-Headers", "Content-Disposition");
-  res.setHeader("Access-Control-Max-Age", "86400");
-}
-app.use((req, res, next) => {
-  applyCors(req, res);
-  if (req.method === "OPTIONS") return res.sendStatus(204);
-  next();
-});
-
-// IMPORTANT: “béton” — handler OPTIONS global (certaines libs interceptent autrement)
-app.options("*", (req, res) => {
-  applyCors(req, res);
-  return res.sendStatus(204);
-});
-
-
+// ✅ CORS avant tout (y compris OPTIONS preflight)
+app.use(cors(corsOptions));
+app.options("*", cors(corsOptions));
 
 const PORT = process.env.PORT || 5001;
 
-app.use(cors());
 app.use(express.json());
 
+// ✅ Debug route pour vérifier en prod que ce serveur est bien celui déployé
+app.get("/__whoami", (req, res) => {
+  res.json({
+    ok: true,
+    service: "pdf-service/generate-academic",
+    time: new Date().toISOString(),
+    pid: process.pid,
+  });
+});
+
+
 app.use('/generate-pdf', generatePdfRoute);
-app.use('/generate-academic', generateLicenceMemoireRoute);
 
 app.get('/', (req, res) => {
   res.send('✅ Serveur de génération PDF opérationnel.');
