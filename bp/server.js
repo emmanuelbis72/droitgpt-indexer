@@ -9,17 +9,6 @@ dotenv.config();
 
 const app = express();
 
-// ⏱️ Long timeout (DeepSeek Reasoner): 45 minutes by default
-const SERVER_TIMEOUT_MS = Number(process.env.SERVER_TIMEOUT_MS || 45 * 60 * 1000);
-
-// Apply long timeout to every request/response (prevents socket close during generation)
-app.use((req, res, next) => {
-  req.setTimeout(SERVER_TIMEOUT_MS);
-  res.setTimeout(SERVER_TIMEOUT_MS);
-  next();
-});
-
-
 // ===== CORS FIX (Frontend -> Backend PDF / Mémoire) =====
 const allowedOriginPatterns = [
   /^http:\/\/localhost:\d+$/i,
