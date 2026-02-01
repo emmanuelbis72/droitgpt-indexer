@@ -1,16 +1,12 @@
 // academicOrchestrator.js
-
-function endsWithCompleteSentence(text) {
-  const t = String(text || "").trim();
-  if (!t) return false;
-  return /[\.!\?…]$/.test(t);
-}
-
+import { deepseekChat } from "./deepseekClient.js";
+import {
+import {
   academicSystemPrompt,
   buildMemoirePlanPrompt,
   buildMemoireSectionPrompt,
-  // compat (older code)
   buildSectionPrompt,
+  buildMemoireRevisionPrompt,
 } from "./academicPrompts.js";
 import { searchCongoLawSources, formatPassagesForPrompt } from "./qdrantRag.js";
 
@@ -127,93 +123,122 @@ function extractWritingUnits(planText, lang) {
     if (match) push(t);
   }
 
-  // Base outline (fallback) – long enough to reach ~70 pages when expanded.
-  const base = isEN
-    ? [
-        "GENERAL INTRODUCTION",
-        "PART I: Conceptual and Theoretical Framework",
-        "CHAPTER I: Concepts, definition and indicators",
-        "Section 1: Definitions and doctrinal approaches",
-        "Section 2: Principles and indicators of the rule of law",
-        "Section 3: Comparative benchmarks and measurement limits",
-        "CHAPTER II: Historical and political context of the DRC",
-        "Section 1: Constitutional evolution and major reforms",
-        "Section 2: Institutional dynamics and governance patterns",
-        "Section 3: Security context, crisis and resilience factors",
-        "PART II: Constitutional Foundations and Legal Mechanisms",
-        "CHAPTER III: Supremacy of the Constitution and legality",
-        "Section 1: Hierarchy of norms and constitutional review",
-        "Section 2: Legislative process and normative control",
-        "Section 3: Administrative legality and regulatory power",
-        "CHAPTER IV: Separation of powers and checks and balances",
-        "Section 1: Executive power and accountability",
-        "Section 2: Parliament and oversight tools",
-        "Section 3: Independent institutions and oversight bodies",
-        "PART III: Implementation Challenges and Perspectives",
-        "CHAPTER V: Judiciary independence and effectiveness",
-        "Section 1: Status of judges and institutional safeguards",
-        "Section 2: Practical obstacles and reforms",
-        "Section 3: Access to justice and quality of decisions",
-        "CHAPTER VI: Constitutional justice and enforcement",
-        "Section 1: Role and limits of constitutional jurisdiction",
-        "Section 2: Execution of decisions and political compliance",
-        "Section 3: Human rights litigation and remedies",
-        "CHAPTER VII: Governance, rights protection and reforms",
-        "Section 1: Transparency, anti-corruption and public finance",
-        "Section 2: Rights protection in times of crisis",
-        "Section 3: Reform roadmap and realistic prospects",
-        "GENERAL CONCLUSION",
-        "BIBLIOGRAPHY (draft)",
-        "ANNEXES (draft)",
-      ]
-    : [
-        "INTRODUCTION GÉNÉRALE",
-        "PARTIE I : Cadre conceptuel et théorique",
-        "CHAPITRE I : Notion, définition et indicateurs de l’État de droit",
-        "Section 1 : Définitions et approches doctrinales",
-        "Section 2 : Principes et indicateurs de l’État de droit",
-        "Section 3 : Repères comparés et limites de mesure",
-        "CHAPITRE II : Contexte historique et politico-institutionnel de la RDC",
-        "Section 1 : Évolution constitutionnelle et réformes majeures",
-        "Section 2 : Dynamiques institutionnelles et gouvernance",
-        "Section 3 : Contexte sécuritaire, crise et résilience",
-        "PARTIE II : Fondements constitutionnels et mécanismes juridiques",
-        "CHAPITRE III : Suprématie de la Constitution et principe de légalité",
-        "Section 1 : Hiérarchie des normes et contrôle de constitutionnalité",
-        "Section 2 : Production de la norme et contrôle de la loi",
-        "Section 3 : Légalité administrative et pouvoir réglementaire",
-        "CHAPITRE IV : Séparation des pouvoirs et contre-pouvoirs",
-        "Section 1 : Pouvoir exécutif et redevabilité",
-        "Section 2 : Parlement et instruments de contrôle",
-        "Section 3 : Institutions d’appui à la démocratie et contrôle",
-        "PARTIE III : Défis de mise en œuvre et perspectives",
-        "CHAPITRE V : Indépendance et efficacité du pouvoir judiciaire",
-        "Section 1 : Statut des magistrats et garanties institutionnelles",
-        "Section 2 : Obstacles pratiques et pistes de réforme",
-        "Section 3 : Accès à la justice et qualité de la décision",
-        "CHAPITRE VI : Justice constitutionnelle et effectivité des décisions",
-        "Section 1 : Rôle, limites et enjeux de la Cour constitutionnelle",
-        "Section 2 : Exécution des décisions et contraintes politiques",
-        "Section 3 : Contentieux des droits fondamentaux et réparations",
-        "CHAPITRE VII : Gouvernance, protection des droits et réformes",
-        "Section 1 : Transparence, lutte contre la corruption et finances publiques",
-        "Section 2 : Protection des droits en période de crise",
-        "Section 3 : Feuille de route des réformes et perspectives réalistes",
-        "CONCLUSION GÉNÉRALE",
-        "BIBLIOGRAPHIE (brouillon)",
-        "ANNEXES (brouillon)",
-      ];
-
-  // If the plan is short or noisy, merge with base to guarantee enough units.
-  const merged = [...units];
-  for (const t of base) {
-    if (!merged.includes(t)) merged.push(t);
+  if (units.length < 12) {
+    return isEN
+      ? [
+          "GENERAL INTRODUCTION",
+          "CHAPTER I: Concepts, Definition and Theoretical Framework",
+          "Section 1: The concept of the rule of law",
+          "Section 2: Principles and indicators",
+          "CHAPTER II: Constitutional foundations in the DRC",
+          "Section 1: Supremacy of the Constitution and legality",
+          "Section 2: Separation of powers and checks and balances",
+          "CHAPTER III: Institutional implementation challenges",
+          "Section 1: Judiciary independence and effectiveness",
+          "Section 2: Constitutional justice and enforcement",
+          "CHAPTER IV: Practical challenges and prospects",
+          "Section 1: Rights protection in times of crisis",
+          "Section 2: Governance, accountability and reforms",
+          "GENERAL CONCLUSION",
+          "BIBLIOGRAPHY (draft)",
+          "ANNEXES (draft)",
+        ]
+      : [
+          "INTRODUCTION GÉNÉRALE",
+          "CHAPITRE I : Notion et théorie de l’État de droit",
+          "Section 1 : Définition et approches doctrinales",
+          "Section 2 : Principes et indicateurs",
+          "CHAPITRE II : Fondements constitutionnels en RDC",
+          "Section 1 : Suprématie de la Constitution et légalité",
+          "Section 2 : Séparation des pouvoirs et contre-pouvoirs",
+          "CHAPITRE III : Obstacles institutionnels à l’effectivité",
+          "Section 1 : Indépendance et efficacité de la justice",
+          "Section 2 : Justice constitutionnelle et exécution",
+          "CHAPITRE IV : Défis pratiques et perspectives",
+          "Section 1 : Droits fondamentaux en période de crise",
+          "Section 2 : Gouvernance, redevabilité et réformes",
+          "CONCLUSION GÉNÉRALE",
+          "BIBLIOGRAPHIE (brouillon)",
+          "ANNEXES (brouillon)",
+        ];
   }
 
-  // Final target: enough sections to fill ~70 pages.
-  const target = 34;
-  return merged.slice(0, target);
+  return units.slice(0, 24);
 }
+
+
+export async function reviseLicenceMemoireFromDraft({ lang = "fr", title = "Mémoire (version corrigée)", ctx = {}, draftText = "" }) {
+  const temperature = Number(process.env.ACAD_TEMPERATURE || 0.35);
+  const maxTokensPerSection = Number(process.env.ACAD_MAX_TOKENS_PER_SECTION || 5200);
+  const hardMax = Number(process.env.ACAD_HARD_MAX_TOKENS || 6500);
+
+  const clean = String(draftText || "").replace(/\r/g, "").trim();
+  if (!clean) {
+    throw new Error("Draft text is empty (no extractable content).");
+  }
+
+  // Découpe en blocs raisonnables (évite dépassement tokens)
+  const maxChunkChars = 8000;
+  const chunks = [];
+  let cur = "";
+  for (const line of clean.split(/\n/)) {
+    if ((cur + "\n" + line).length > maxChunkChars) {
+      chunks.push(cur.trim());
+      cur = line;
+    } else {
+      cur += (cur ? "\n" : "") + line;
+    }
+  }
+  if (cur.trim()) chunks.push(cur.trim());
+
+  // Plan: on garde un plan simple, puis sections = blocs corrigés/enrichis
+  const planPrompt = buildMemoirePlanPrompt({ lang, ctx, topic: ctx?.topic || title });
+  const plan = await deepseekChat({
+    messages: [
+      { role: "system", content: academicSystemPrompt(lang) },
+      { role: "user", content: planPrompt },
+    ],
+    temperature,
+    max_tokens: Number(process.env.ACAD_PLAN_MAX_TOKENS || 1600),
+  });
+
+  const sections = [];
+  for (let i = 0; i < chunks.length; i++) {
+    const chunk = chunks[i];
+    const sectionTitle = chunks.length <= 1 ? "Texte intégral (corrigé et enrichi)" : `Bloc ${i + 1} (corrigé et enrichi)`;
+
+    const prompt = buildMemoireRevisionPrompt({
+      lang,
+      ctx,
+      title,
+      sectionTitle,
+      draftChunk: chunk,
+    });
+
+    const content = await deepseekChat({
+      messages: [
+        { role: "system", content: academicSystemPrompt(lang) },
+        { role: "user", content: prompt },
+      ],
+      temperature,
+      max_tokens: Math.min(maxTokensPerSection, hardMax),
+    });
+
+    sections.push({
+      title: `**${sectionTitle}**`,
+      content: String(content || "").trim(),
+    });
+  }
+
+  // S'assure qu'on a au moins quelques sections (au cas où)
+  return {
+    title,
+    ctx,
+    plan: String(plan || "").trim(),
+    sections,
+  };
+}
+
 
 export async function generateLicenceMemoire({ lang, ctx }) {
   const temperature = Number(process.env.ACAD_TEMPERATURE || 0.35);

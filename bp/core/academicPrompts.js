@@ -75,8 +75,6 @@ The plan must be suitable for a 70-page dissertation (include enough sections/su
     : `Élabore un plan détaillé de mémoire pour : "${topic}".
 
 Règles de forme :
-- IMPORTANT : Ne termine jamais au milieu d’une phrase. Si tu approches une limite, termine la phrase, puis écris "[FIN DE SECTION]".
-
 - Pas de titres en Markdown.
 - Utiliser le GRAS uniquement pour les titres : **INTRODUCTION GÉNÉRALE**, **PARTIE I**, **CHAPITRE I**, **Section 1**, etc.
 
@@ -115,7 +113,7 @@ ${ctx.plan}
 ` : "";
 
   return isEN
-    ? `Write the section: "${sectionTitle}" for a Bachelor-level dissertation.
+    ? `Write the section: "${sectionTitle}" for a Bachelor law dissertation.
 
 Context:
 - Topic: ${topic}
@@ -124,36 +122,23 @@ Context:
 - Mode: ${mode}
 ${planHint}${sourcesBlock}
 
-LENGTH TARGET (important):
-- The full dissertation should approach 70 pages (A4 ~11pt).
-- Aim for a “full” section with rich structure and transitions.
-- Indicative targets:
-  - GENERAL INTRODUCTION / GENERAL CONCLUSION: 1,500–2,200 words
-  - PART / CHAPTER: 2,200–3,200 words
-  - SECTION / SUBSECTION: 1,300–2,100 words
-- If short, expand with substantive analysis (no filler).
+Length requirement:
+- This dissertation must reach a FULL 70 pages overall. Do NOT be overly concise.
+- Write a complete section with: definitions, doctrinal views (only if provided), constitutional/legal analysis, practical issues, and structured mini-conclusion.
 
-QUALITY EXPECTATIONS:
-- Definitions and conceptual framework
-- Literature/state of the art ONLY if elements are provided; otherwise write “source not provided”
-- Legal/institutional analysis when relevant; otherwise domain analysis (discipline-specific)
-- Critical discussion: limits, stakes, impacts, risks, recommendations
-- Structured mini-conclusion
-
-Formatting:
-- No Markdown headings (#, ##, ###).
-- Headings/subheadings must be bold with **...** (e.g., **I. ...**, **A. ...**, **1. ...**).
-- Clear paragraphs.
-
-Footnotes by default:
-- In-text markers: (1), (2), (3)...
-- End of section: "NOTES (FOOTNOTES)" listing each note.
-- If a source is missing: write "(source not provided)" and add the corresponding note.
+Formatting rules:
+- No Markdown headings (#, ##, ### prohibited).
+- Headings/subheadings must be bold with **...**:
+  **CHAPTER/CHAPITRE...**, **Section...**, **Paragraph...**
+- Use footnotes by default:
+  - In-text markers: (1), (2), (3)...
+  - End of section: "NOTES (FOOTNOTES)" listing each note.
 
 Sources policy:
-- If SOURCES are provided: base key claims on them and connect notes to relevant source excerpts.
-- Never fabricate references (authors, laws, cases, stats). If uncertain: "source not provided".`
-    : `Rédige la section : "${sectionTitle}" pour un mémoire de fin d’études (niveau licence).
+- If SOURCES are provided, base claims on them and create footnotes referencing the relevant source text.
+- If a needed source is missing, write "(source not provided)" and add the corresponding note "source not provided".
+- Never invent legal articles, cases, or bibliographic entries.`
+    : `Rédige la section : "${sectionTitle}" pour un mémoire de licence en droit.
 
 Contexte :
 - Sujet : ${topic}
@@ -162,38 +147,72 @@ Contexte :
 - Mode : ${mode}
 ${planHint}${sourcesBlock}
 
-OBJECTIF DE LONGUEUR (très important) :
-- Le mémoire final doit approcher 70 pages (A4 ~11pt).
-- Vise une section “pleine” avec une structure riche et des transitions.
-- Cibles indicatives (à respecter au mieux) :
-  - INTRODUCTION GÉNÉRALE / CONCLUSION GÉNÉRALE : 1 500 – 2 200 mots
-  - CHAPITRE / PARTIE : 2 200 – 3 200 mots
-  - SECTION / SOUS-SECTION : 1 300 – 2 100 mots
-- Si tu es en-dessous, développe par analyse (pas de remplissage).
-
-CONTENU ATTENDU (haute qualité) :
-- Définitions et cadre conceptuel
-- État de la question (doctrine/rapports/études) UNIQUEMENT si des éléments sont fournis ; sinon explique “source non fournie”
-- Analyse juridique / institutionnelle quand pertinent ; sinon analyse technique/sectorielle selon la discipline
-- Discussion critique : limites, enjeux, impacts, risques, recommandations
-- Mini-conclusion structurée (2–4 paragraphes)
+Exigence de longueur :
+- Le mémoire doit atteindre un TOTAL de 70 pages. Ne sois pas trop bref.
+- Produis une section complète : définitions, points doctrinaux (seulement si fournis), analyse constitutionnelle/juridique, difficultés pratiques, mini-conclusion structurée.
 
 Règles de forme :
-- IMPORTANT : Ne termine jamais au milieu d’une phrase. Si tu approches une limite, termine la phrase, puis écris "[FIN DE SECTION]".
-
-- Interdiction des titres Markdown (#, ##, ###).
+- Interdiction d’utiliser des titres Markdown (#, ##, ###).
 - Titres / sous-titres en GRAS via **...** :
-  **I. ...**, **A. ...**, **1. ...**
-- Paragraphes aérés, phrases claires.
-
-Notes de bas de page (par défaut) :
-- Appels : (1), (2), (3)...
-- Fin de section : "NOTES DE BAS DE PAGE" listant chaque note.
-- Si une source manque : écrire "(source non fournie)" et ajouter la note correspondante.
+  **CHAPITRE...**, **Section...**, **Paragraphe...**
+- Notes de bas de page par défaut :
+  - Appels : (1), (2), (3)...
+  - Fin de section : "NOTES DE BAS DE PAGE" listant chaque note.
 
 Politique des sources :
-- Si des SOURCES sont fournies : base les affirmations importantes dessus et relie-les à des notes.
-- Ne jamais fabriquer de références (auteurs, ouvrages, articles, jurisprudence, statistiques). Si incertain : "source non fournie".`;
+- Si des SOURCES sont fournies, fonder les affirmations dessus et ajouter des notes correspondantes.
+- Si une source manque : écrire "(source non fournie)" et ajouter la note "source non fournie".
+- Ne jamais inventer des articles numérotés, jurisprudences, auteurs ou ouvrages.`;
+}
+
+
+export function buildMemoireRevisionPrompt({ lang = "fr", ctx = {}, title = "", sectionTitle = "Révision", draftChunk = "" }) {
+  const c = ctx || {};
+  const topic = c.topic || title || "Mémoire";
+
+  if (String(lang).toLowerCase().startsWith("en")) {
+    return `You are revising a draft dissertation. Improve language, structure, and depth while preserving meaning.
+
+Context:
+- Topic: ${topic}
+- Section: ${sectionTitle}
+
+TASK:
+- Correct grammar, spelling, style, and clarity.
+- Enrich with deeper explanations, better transitions, and academic tone.
+- Do NOT invent references, laws, cases, statistics. If you need a citation, write "(source not provided)" and add it in the footnotes.
+- Keep content faithful to the draft; you may reorganize for clarity.
+
+FORMAT:
+- No Markdown headings (#, ##, ###).
+- Headings/subheadings in bold via **...**.
+- Footnotes: markers (1), (2), ... and end with "NOTES (FOOTNOTES)".
+
+DRAFT TO REVISE:
+${draftChunk}
+`;
+  }
+
+  return `Tu es un relecteur académique et un rédacteur. Tu révises un mémoire brouillon pour le corriger et l’enrichir, tout en gardant le fond.
+
+Contexte :
+- Sujet : ${topic}
+- Section : ${sectionTitle}
+
+TÂCHE :
+- Corriger orthographe, grammaire, ponctuation, style.
+- Améliorer la structure (transitions, cohérence, titres), enrichir par des explications et une analyse plus profonde.
+- Ne pas inventer de références, lois, jurisprudences, chiffres. Si une source est nécessaire : écrire "(source non fournie)" et l’ajouter dans les notes.
+- Rester fidèle au contenu du brouillon ; tu peux réorganiser pour clarifier.
+
+FORMAT :
+- Interdiction des titres Markdown (#, ##, ###).
+- Titres/sous-titres en gras via **...**.
+- Notes: appels (1), (2), (3) ... et finir par "NOTES DE BAS DE PAGE".
+
+BROUILLON À RÉVISER :
+${draftChunk}
+`;
 }
 
 

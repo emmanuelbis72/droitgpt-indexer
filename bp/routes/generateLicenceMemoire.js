@@ -1,21 +1,68 @@
 // generateLicenceMemoire.js
 import express from "express";
-import { generateLicenceMemoire } from "../core/academicOrchestrator.js";
+import multer from "multer";
+import mammoth from "mammoth";
+
+import { generateLicenceMemoire, reviseLicenceMemoireFromDraft } from "../core/academicOrchestrator.js";
 import { writeLicenceMemoirePdf } from "../core/academicPdfAssembler.js";
 
 const router = express.Router();
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 25 * 1024 * 1024 }, // 25MB
+});
+
+async function extractDraftText(file) {
+  if (!file) throw new Error("Aucun fichier brouillon reçu.");
+  const name = String(file.originalname || "").toLowerCase();
+  const mime = String(file.mimetype || "").toLowerCase();
+
+  // DOCX
+  if (name.endsWith(".docx") || mime.includes("wordprocessingml")) {
+    const r = await mammoth.extractRawText({ buffer: file.buffer });
+    return String(r.value || "").trim();
+  }
+
+  // TXT
+  if (name.endsWith(".txt") || mime.startsWith("text/")) {
+    return String(file.buffer.toString("utf-8") || "").trim();
+  }
+
+  // PDF: optionnel, via service externe d'extraction (évite pdfjs/pdf-parse en prod)
+  if (name.endsWith(".pdf") || mime === "application/pdf") {
+    const extractUrl = process.env.ANALYSE_PDF_EXTRACT_URL;
+    if (!extractUrl) {
+      throw new Error("Import PDF non activé. Configure ANALYSE_PDF_EXTRACT_URL (service d'extraction) ou utilise un DOCX.");
+    }
+    const fd = new FormData();
+    fd.append("file", new Blob([file.buffer], { type: "application/pdf" }), file.originalname || "draft.pdf");
+
+    const resp = await fetch(extractUrl, { method: "POST", body: fd });
+    if (!resp.ok) {
+      const t = await resp.text().catch(() => "");
+      throw new Error(`Extraction PDF échouée: ${resp.status} ${t.slice(0, 200)}`);
+    }
+    const j = await resp.json();
+    const txt = j?.text || j?.content || "";
+    return String(txt || "").trim();
+  }
+
+  throw new Error("Format de brouillon non supporté. Utilise .docx ou .txt (PDF seulement si ANALYSE_PDF_EXTRACT_URL est configuré).");
+}
+
 
 router.get("/licence-memoire", (_req, res) => {
   res.json({ ok: true, message: "✅ Endpoint licence-memoire OK. Utilise POST pour générer le PDF." });
 });
 
 router.post("/licence-memoire", async (req, res) => {
-  const ROUTE_TIMEOUT_MS = Number(process.env.ACAD_REQUEST_TIMEOUT_MS || 45 * 60 * 1000);
-req.setTimeout(ROUTE_TIMEOUT_MS);
-res.setTimeout(ROUTE_TIMEOUT_MS);
-try {
+  req.setTimeout(15 * 60 * 1000);
+  res.setTimeout(15 * 60 * 1000);
+
+  try {
     const b = req.body || {};
-    const lang = String(b.language || b.lang || "fr").toLowerCase() === "en" ? "en" : "fr";
+    const lang = String(b.language || "fr").toLowerCase() === "en" ? "en" : "fr";
 
     const ctx = {
       mode: b.mode === "droit_congolais" ? "droit_congolais" : "standard",
@@ -55,6 +102,34 @@ try {
   } catch (e) {
     console.error("❌ /generate-academic/licence-memoire error:", e);
     return res.status(500).json({ error: "Erreur serveur", details: String(e?.message || e) });
+  }
+});
+
+
+router.options("/licence-memoire/revise", (_req, res) => res.sendStatus(204));
+
+// ✅ Import + correction/enrichissement d'un brouillon (DOCX/TXT/PDF optionnel)
+router.post("/licence-memoire/revise", upload.single("file"), async (req, res) => {
+  try {
+    const b = req.body || {};
+    const lang = String(b.language || b.lang || "fr");
+    const title = String(b.title || b.topic || "Mémoire (version corrigée)");
+    const ctx = b.ctx ? (typeof b.ctx === "string" ? JSON.parse(b.ctx) : b.ctx) : {};
+
+    const draftText = await extractDraftText(req.file);
+
+    const result = await reviseLicenceMemoireFromDraft({ lang, title, ctx, draftText });
+
+    return writeLicenceMemoirePdf({
+      res,
+      title: result.title,
+      ctx: result.ctx,
+      plan: result.plan,
+      sections: result.sections,
+    });
+  } catch (err) {
+    console.error("reviseLicenceMemoire error:", err);
+    return res.status(400).json({ ok: false, error: String(err?.message || err) });
   }
 });
 
