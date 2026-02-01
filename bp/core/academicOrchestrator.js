@@ -1,5 +1,4 @@
 // academicOrchestrator.js
-\1
 
 function endsWithCompleteSentence(text) {
   const t = String(text || "").trim();
