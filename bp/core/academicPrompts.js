@@ -75,6 +75,8 @@ The plan must be suitable for a 70-page dissertation (include enough sections/su
     : `Élabore un plan détaillé de mémoire pour : "${topic}".
 
 Règles de forme :
+- IMPORTANT : Ne termine jamais au milieu d’une phrase. Si tu approches une limite, termine la phrase, puis écris "[FIN DE SECTION]".
+
 - Pas de titres en Markdown.
 - Utiliser le GRAS uniquement pour les titres : **INTRODUCTION GÉNÉRALE**, **PARTIE I**, **CHAPITRE I**, **Section 1**, etc.
 
@@ -177,6 +179,8 @@ CONTENU ATTENDU (haute qualité) :
 - Mini-conclusion structurée (2–4 paragraphes)
 
 Règles de forme :
+- IMPORTANT : Ne termine jamais au milieu d’une phrase. Si tu approches une limite, termine la phrase, puis écris "[FIN DE SECTION]".
+
 - Interdiction des titres Markdown (#, ##, ###).
 - Titres / sous-titres en GRAS via **...** :
   **I. ...**, **A. ...**, **1. ...**

@@ -1,6 +1,12 @@
 // academicOrchestrator.js
-import { deepseekChat } from "./deepseekClient.js";
-import {
+\1
+
+function endsWithCompleteSentence(text) {
+  const t = String(text || "").trim();
+  if (!t) return false;
+  return /[\.!\?…]$/.test(t);
+}
+
   academicSystemPrompt,
   buildMemoirePlanPrompt,
   buildMemoireSectionPrompt,
