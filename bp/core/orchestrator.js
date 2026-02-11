@@ -6,16 +6,20 @@ import { systemPrompt, sectionPrompt, SECTION_ORDER } from "./prompts.js";
  * Premium orchestration:
  * - Generates each section
  * - JSON sections are parsed + normalized (especially financials)
- * - Text sections are protected against truncation (END marker + auto-continue)
- * - Returns sections + assembled plain text
+ * - Text sections are protected against truncation (END marker + smart auto-continue)
+ * - Fast mode: continue ONLY when truly necessary (reduces generation time)
  */
 export async function generateBusinessPlanPremium({ lang, ctx, lite = false }) {
   const temperature = Number(process.env.BP_TEMPERATURE || 0.25);
-  const maxSectionTokens = Number(process.env.BP_MAX_SECTION_TOKENS || 1800);
 
-  // ✅ retries / minimal section size
-  const sectionRetries = Number(process.env.BP_SECTION_RETRIES || 3);
-  const minSectionChars = Number(process.env.BP_MIN_SECTION_CHARS || 1200);
+  // ✅ Default raised for better content; you can override in env
+  // Recommended: 4200–6000 for speed, 7000–9000 for max detail
+  const maxSectionTokens = Number(process.env.BP_MAX_SECTION_TOKENS || 5200);
+
+  // ✅ Fast + safe defaults (override via env)
+  const sectionRetries = Number(process.env.BP_SECTION_RETRIES || 1); // max "CONTINUE" calls
+  const minSectionChars = Number(process.env.BP_MIN_SECTION_CHARS || 900); // avoid too-short sections
+  const longEnoughChars = Number(process.env.BP_LONG_ENOUGH_CHARS || 2200); // if reached, avoid extra CONTINUE
 
   // ✅ Mode lite rapide
   const order = lite
@@ -35,7 +39,7 @@ export async function generateBusinessPlanPremium({ lang, ctx, lite = false }) {
         ctx,
         temperature,
         max_tokens: maxSectionTokens,
-        retries: sectionRetries,
+        retries: Number(process.env.BP_JSON_RETRIES || 2),
       });
 
       const obj = safeJsonParse(extractJsonBlock(raw));
@@ -60,7 +64,7 @@ export async function generateBusinessPlanPremium({ lang, ctx, lite = false }) {
       continue;
     }
 
-    // Text sections (protected against truncation)
+    // Text sections (fast + safe)
     let content = await generateTextSectionWithContinuation({
       key,
       lang,
@@ -69,6 +73,7 @@ export async function generateBusinessPlanPremium({ lang, ctx, lite = false }) {
       max_tokens: maxSectionTokens,
       retries: sectionRetries,
       minChars: minSectionChars,
+      longEnoughChars,
     });
 
     // Funding ask sometimes returns JSON by mistake -> auto-format
@@ -92,7 +97,7 @@ export async function generateBusinessPlanPremium({ lang, ctx, lite = false }) {
 }
 
 /* =========================================================
-   ✅ Truncation-proof generation (TEXT)
+   ✅ Truncation-proof generation (TEXT) — FAST MODE
 ========================================================= */
 
 async function generateTextSectionWithContinuation({
@@ -101,8 +106,9 @@ async function generateTextSectionWithContinuation({
   ctx,
   temperature,
   max_tokens,
-  retries = 3,
-  minChars = 1200,
+  retries = 1,
+  minChars = 900,
+  longEnoughChars = 2200,
 }) {
   const marker = `[[END_SECTION:${key}]]`;
 
@@ -123,26 +129,45 @@ async function generateTextSectionWithContinuation({
     const chunk = String(raw || "").trim();
     if (chunk) acc = (acc ? acc + "\n\n" : "") + chunk;
 
-    // If it has the marker and does not look truncated and is not too short -> accept
+    const hasMarker = hasEndMarker(acc, marker);
     const cleaned = stripEndMarker(acc, marker);
 
+    const len = cleaned.length;
+    const longEnough = len >= longEnoughChars;
+
+    const likelyTrunc = isLikelyTruncated(cleaned);
+    const severeTrunc = isSeverelyTruncated(cleaned);
+
+    // ✅ Accept conditions (FAST):
+    // - If marker present and either not truncated OR already long enough
+    // - OR marker missing but already long enough and not severely truncated
+    // Also enforce minChars only when content is short
     const ok =
-      hasEndMarker(acc, marker) &&
-      !isLikelyTruncated(cleaned) &&
-      cleaned.length >= Math.min(minChars, 8000); // avoid forcing giant sections
+      (hasMarker && (longEnough || (!likelyTrunc && len >= minChars))) ||
+      (!hasMarker && longEnough && !severeTrunc);
 
-    if (ok) return cleaned.trim();
+    if (ok) {
+      // If the model left a messy ending, fix locally (0 extra IA calls)
+      const fixed = finalizeText(cleaned, { longEnough, likelyTrunc, severeTrunc });
+      return fixed.trim();
+    }
 
-    // If missing marker OR likely truncated OR too short: continue
+    // If too short, or severely truncated, attempt CONTINUE
+    const shouldContinue =
+      len < minChars || severeTrunc || (!hasMarker && !longEnough);
+
+    if (!shouldContinue) {
+      // Accept as-is (best effort)
+      return finalizeText(cleaned, { longEnough, likelyTrunc, severeTrunc }).trim();
+    }
+
+    // CONTINUE: provide tail for continuity
     const tail = cleaned.slice(-900);
-
     prompt = buildContinuePrompt({ key, lang, marker, tail });
-
-    // Next attempt will append
   }
 
-  // Final fallback: return whatever we have (without marker)
-  return stripEndMarker(acc, marker).trim();
+  // Final fallback: return whatever we have
+  return finalizeText(stripEndMarker(acc, marker), { longEnough: true, likelyTrunc: true, severeTrunc: true }).trim();
 }
 
 function buildTextPromptWithEndMarker({ lang, key, ctx, marker }) {
@@ -187,27 +212,74 @@ function stripEndMarker(text, marker) {
 function isLikelyTruncated(text) {
   const s = String(text || "").trim();
   if (!s) return true;
-
   // Ends with proper punctuation?
   const endsOk = /[.!?…»)\]]\s*$/.test(s);
-
   // Ends with colon/dash = suspicious
   const endsBad = /[:\-–—]\s*$/.test(s);
-
-  // Last line short / mid-word cut
+  // Mid-word cut (rough)
   const last = s.slice(-120);
   const midWord = /[A-Za-zÀ-ÿ]{2,}$/.test(last) && !endsOk;
-
-  // A section can end without punctuation in some styles, but for BP we enforce punctuation.
   return !endsOk || endsBad || midWord;
+}
+
+// More strict detector: used to decide whether we must "CONTINUE"
+function isSeverelyTruncated(text) {
+  const s = String(text || "").trim();
+  if (!s) return true;
+
+  const tail = s.slice(-220);
+  const hasPunctNearEnd = /[.!?…»)\]]/.test(tail);
+
+  // strong signs: ends with colon/dash OR ends mid-word AND no punctuation in last ~220 chars
+  const endsBad = /[:\-–—]\s*$/.test(s);
+  const endsOk = /[.!?…»)\]]\s*$/.test(s);
+  const midWord = /[A-Za-zÀ-ÿ]{2,}$/.test(s.slice(-40)) && !endsOk;
+
+  return (endsBad || midWord) && !hasPunctNearEnd;
+}
+
+function finalizeText(text, { longEnough, likelyTrunc, severeTrunc }) {
+  let s = String(text || "").trim();
+  if (!s) return s;
+
+  // If clearly messy ending and content is long enough, cut to last punctuation (fast local fix)
+  if ((severeTrunc || likelyTrunc) && longEnough) {
+    s = trimToLastSentenceEnd(s, 500) || s;
+  }
+
+  // Ensure final punctuation
+  s = ensureNiceEnding(s);
+
+  return s;
+}
+
+function trimToLastSentenceEnd(text, lookback = 500) {
+  const s = String(text || "");
+  const start = Math.max(0, s.length - lookback);
+  const chunk = s.slice(start);
+  // find last punctuation in chunk
+  const idx = Math.max(
+    chunk.lastIndexOf("."),
+    chunk.lastIndexOf("!"),
+    chunk.lastIndexOf("?"),
+    chunk.lastIndexOf("…")
+  );
+  if (idx === -1) return null;
+  return (s.slice(0, start + idx + 1)).trim();
+}
+
+function ensureNiceEnding(text) {
+  const s = String(text || "").trim();
+  if (!s) return s;
+  if (/[.!?…»)\]]\s*$/.test(s)) return s;
+  return s + ".";
 }
 
 /* =========================================================
    ✅ JSON generation with retry (no markers)
 ========================================================= */
 
-async function generateJsonSectionWithRetry({ key, lang, ctx, temperature, max_tokens, retries = 3 }) {
-  // First attempt: normal prompt
+async function generateJsonSectionWithRetry({ key, lang, ctx, temperature, max_tokens, retries = 2 }) {
   let prompt = sectionPrompt({ lang, sectionKey: key, ctx });
 
   for (let attempt = 0; attempt <= retries; attempt++) {
@@ -224,7 +296,6 @@ async function generateJsonSectionWithRetry({ key, lang, ctx, temperature, max_t
     const obj = safeJsonParse(extractJsonBlock(txt));
     if (obj && typeof obj === "object") return txt;
 
-    // Retry prompt: enforce strict JSON
     prompt = `
 ${sectionPrompt({ lang, sectionKey: key, ctx })}
 
@@ -236,7 +307,6 @@ RÈGLES JSON STRICTES (OBLIGATOIRES):
 `.trim();
   }
 
-  // Return last raw; normalizers will fallback if null
   return "";
 }
 
@@ -396,10 +466,12 @@ function normalizeFinancials(obj, ctx) {
         const r = isObj(row) ? { ...row } : {};
         const out = { label: String(r.label || "").trim(), __format: String(r.__format || defaultFormat) };
 
+        // Map any year-like keys to Y1..Y5
         for (const [k, v] of Object.entries(r)) {
           const y = normalizeYearKey(k);
           if (y) out[y] = parseNumber(v);
         }
+        // Ensure all years present
         for (const y of years) {
           if (out[y] === undefined) out[y] = 0;
         }
@@ -463,6 +535,7 @@ function normalizeFinancials(obj, ctx) {
     scenarios,
   };
 
+  // If the model still returned all zeros, fallback to a minimal built model
   const rev = findRow(fin.pnl, ["revenue", "ventes", "chiffre"]);
   const hasNonZero = rev ? years.some((y) => Number(rev[y] || 0) > 0) : false;
 
@@ -477,19 +550,23 @@ function normalizeYearKey(key) {
   const k = String(key || "").trim().toLowerCase();
   if (!k) return null;
 
+  // y1, y 1, year1, year 1
   let m = k.match(/^y\s*([1-9])$/);
   if (m) return `Y${m[1]}`;
   m = k.match(/^year\s*([1-9])$/);
   if (m) return `Y${m[1]}`;
 
+  // "1".."9"
   m = k.match(/^([1-9])$/);
   if (m) return `Y${m[1]}`;
 
+  // "y1:" etc
   m = k.match(/^y\s*([1-9])[^0-9]*/);
   if (m) return `Y${m[1]}`;
   m = k.match(/^year\s*([1-9])[^0-9]*/);
   if (m) return `Y${m[1]}`;
 
+  // "Year 1" / "YEAR 1"
   m = k.match(/^year\s+([1-9])$/);
   if (m) return `Y${m[1]}`;
 
@@ -501,10 +578,13 @@ function parseNumber(v) {
   const s = String(v ?? "").trim();
   if (!s) return 0;
 
+  // percent
   const cleaned = s.replace(/[^\d,.\-]/g, "").replace(/\s+/g, "");
 
+  // Support "1,234,567" / "1.234.567" / "1234,56" (best effort)
   let num = 0;
   if (cleaned.includes(",") && cleaned.includes(".")) {
+    // assume commas are thousands separators
     num = Number(cleaned.replace(/,/g, ""));
   } else if (cleaned.includes(",") && !cleaned.includes(".")) {
     const parts = cleaned.split(",");
@@ -545,7 +625,8 @@ function findRow(rows, needles) {
 function buildFallbackFinancials({ ctx, currency = "USD", years }) {
   const ys = Array.isArray(years) && years.length ? years : ["Y1", "Y2", "Y3", "Y4", "Y5"];
 
-  const baseRevenueY1 = 120000;
+  // Very conservative baseline model (keeps service usable even if AI fails)
+  const baseRevenueY1 = 120000; // adjust conservative
   const growth = [1, 1.35, 1.7, 2.05, 2.45];
   const revenue = ys.map((_, i) => Math.round(baseRevenueY1 * growth[i]));
   const cogs = revenue.map((r) => Math.round(r * 0.45));
@@ -553,7 +634,11 @@ function buildFallbackFinancials({ ctx, currency = "USD", years }) {
   const capex = [35000, 12000, 8000, 8000, 8000];
   const financing = [60000, 0, 0, 0, 0];
 
-  const pnl = [rowFrom("Revenue", revenue, ys, "money"), rowFrom("COGS", cogs, ys, "money"), rowFrom("OPEX", opex, ys, "money")];
+  const pnl = [
+    rowFrom("Revenue", revenue, ys, "money"),
+    rowFrom("COGS", cogs, ys, "money"),
+    rowFrom("OPEX", opex, ys, "money"),
+  ];
 
   const cashflow = [
     rowFrom("Operating Cashflow", revenue.map((r, i) => r - cogs[i] - opex[i]), ys, "money"),
@@ -562,7 +647,7 @@ function buildFallbackFinancials({ ctx, currency = "USD", years }) {
   ];
 
   const balance_sheet = [
-    rowFrom("Cash", revenue.map((r, i) => Math.max(0, r - cogs[i] - opex[i] - capex[i] + financing[i])), ys, "money"),
+    rowFrom("Cash", revenue.map((r, i) => Math.max(0, (r - cogs[i] - opex[i]) - capex[i] + financing[i])), ys, "money"),
     rowFrom("Inventory", revenue.map((r) => Math.round(r * 0.05)), ys, "money"),
     rowFrom("Total Assets", revenue.map((r) => Math.round(r * 0.40)), ys, "money"),
     rowFrom("Total Liabilities", revenue.map((r) => Math.round(r * 0.18)), ys, "money"),
@@ -580,7 +665,10 @@ function buildFallbackFinancials({ ctx, currency = "USD", years }) {
       { label: "CAPEX initial", value: `${capex[0]} ${currency}` },
       { label: "Contexte", value: String(ctx?.country || "—") },
     ],
-    revenue_drivers: [rowFrom("Volumes / ventes (index)", [100, 135, 170, 205, 245], ys, "number"), rowFrom("Prix moyen (index)", [100, 102, 104, 106, 108], ys, "number")],
+    revenue_drivers: [
+      rowFrom("Volumes / ventes (index)", [100, 135, 170, 205, 245], ys, "number"),
+      rowFrom("Prix moyen (index)", [100, 102, 104, 106, 108], ys, "number"),
+    ],
     pnl,
     cashflow,
     balance_sheet,
@@ -599,9 +687,7 @@ function buildFallbackFinancials({ ctx, currency = "USD", years }) {
 
 function rowFrom(label, arr, years, fmt) {
   const r = { label, __format: fmt };
-  years.forEach((y, i) => {
-    r[y] = Number(arr[i] || 0);
-  });
+  years.forEach((y, i) => { r[y] = Number(arr[i] || 0); });
   return r;
 }
 
@@ -651,6 +737,7 @@ function fallbackTextSection({ key, lang, ctx }) {
         ].join("\n");
   }
 
+  // Default fallback for other text sections: summarize user-provided fields
   const blocks = [
     ctx?.product ? (isEN ? "Product/Service" : "Produit/Service") + ": " + ctx.product : null,
     ctx?.customers ? (isEN ? "Customers" : "Clients") + ": " + ctx.customers : null,
@@ -659,7 +746,6 @@ function fallbackTextSection({ key, lang, ctx }) {
     ctx?.competition ? (isEN ? "Competition" : "Concurrence") + ": " + ctx.competition : null,
     ctx?.risks ? (isEN ? "Risks" : "Risques") + ": " + ctx.risks : null,
   ].filter(Boolean);
-
   return blocks.length ? blocks.join("\n\n") : "";
 }
 
@@ -672,19 +758,41 @@ function buildFallbackCanvas({ ctx, lang }) {
   const bullets = (arr) => arr.filter(Boolean);
 
   return {
-    partenaires_cles: bullets([isEN ? "Suppliers & producers" : "Fournisseurs & producteurs", isEN ? "Distribution partners" : "Partenaires de distribution", isEN ? "Regulators & compliance" : "Autorités & conformité", isEN ? "Financial partners" : "Partenaires financiers"]),
-    activites_cles: bullets([isEN ? "Production / service delivery" : "Production / délivrance du service", isEN ? "Quality control & standards" : "Contrôle qualité & standards", isEN ? "Sales & distribution" : "Vente & distribution", isEN ? "Marketing & customer support" : "Marketing & support client"]),
-    ressources_cles: bullets([isEN ? "Team & know-how" : "Équipe & savoir-faire", isEN ? "Facilities & equipment" : "Infrastructure & équipements", isEN ? "Brand & channels" : "Marque & canaux", isEN ? "Processes & SOPs" : "Processus & procédures"]),
+    partenaires_cles: bullets([
+      isEN ? "Suppliers & producers" : "Fournisseurs & producteurs",
+      isEN ? "Distribution partners" : "Partenaires de distribution",
+      isEN ? "Regulators & compliance" : "Autorités & conformité",
+      isEN ? "Financial partners" : "Partenaires financiers",
+    ]),
+    activites_cles: bullets([
+      isEN ? "Production / service delivery" : "Production / délivrance du service",
+      isEN ? "Quality control & standards" : "Contrôle qualité & standards",
+      isEN ? "Sales & distribution" : "Vente & distribution",
+      isEN ? "Marketing & customer support" : "Marketing & support client",
+    ]),
+    ressources_cles: bullets([
+      isEN ? "Team & know-how" : "Équipe & savoir-faire",
+      isEN ? "Facilities & equipment" : "Infrastructure & équipements",
+      isEN ? "Brand & channels" : "Marque & canaux",
+      isEN ? "Processes & SOPs" : "Processus & procédures",
+    ]),
     propositions_de_valeur: bullets([
       product
-        ? (isEN ? "Natural / premium offering" : "Offre premium") + ": " + product.slice(0, 140) + (product.length > 140 ? "…" : "")
+        ? (isEN ? "Natural / premium offering" : "Offre premium") +
+          ": " +
+          product.slice(0, 140) +
+          (product.length > 140 ? "…" : "")
         : isEN
         ? "High-quality, reliable delivery"
         : "Qualité élevée et livraison fiable",
       isEN ? "Compliance, traceability, and consistency" : "Conformité, traçabilité, constance",
       isEN ? "Better customer experience & measurable outcomes" : "Expérience client + résultats mesurables",
     ]),
-    relations_clients: bullets([isEN ? "B2B contracts & SLAs" : "Contrats B2B & engagements", isEN ? "Customer support and feedback loop" : "Support client + boucle feedback", isEN ? "Loyalty & retention programs" : "Fidélisation & rétention"]),
+    relations_clients: bullets([
+      isEN ? "B2B contracts & SLAs" : "Contrats B2B & engagements",
+      isEN ? "Customer support and feedback loop" : "Support client + boucle feedback",
+      isEN ? "Loyalty & retention programs" : "Fidélisation & rétention",
+    ]),
     canaux: bullets([isEN ? "Retail & distributors" : "Retail & distributeurs", isEN ? "Direct sales (B2B)" : "Vente directe (B2B)", isEN ? "Digital & partnerships" : "Digital & partenariats"]),
     segments_clients: bullets([customers ? customers.slice(0, 160) + (customers.length > 160 ? "…" : "") : isEN ? "Urban households & B2B buyers" : "Ménages urbains & acheteurs B2B", isEN ? "Institutional accounts" : "Comptes institutionnels"]),
     structure_de_couts: bullets([isEN ? "Inputs / raw materials" : "Intrants / matières premières", isEN ? "Labor & operations" : "Main-d’œuvre & opérations", isEN ? "Logistics & distribution" : "Logistique & distribution", isEN ? "Marketing & compliance" : "Marketing & conformité"]),
@@ -709,9 +817,7 @@ function buildFallbackKpiCalendar({ ctx, lang }) {
   };
 }
 
-/* -------------------------
-   Funding Ask JSON Formatter (auto-clean)
-------------------------- */
+// ===== Funding Ask JSON Formatter (auto-clean) =====
 function looksLikeJsonText(txt) {
   const s = String(txt || "").trim();
   return s.startsWith("{") || s.startsWith("[") || /```json/i.test(s);
@@ -719,7 +825,7 @@ function looksLikeJsonText(txt) {
 
 function formatFundingAskFromJson(obj, lang) {
   const isEN = lang === "en";
-  const root = obj && typeof obj === "object" ? obj : {};
+  const root = (obj && typeof obj === "object") ? obj : {};
   const bf = root.besoin_financement || root.funding_need || root.funding_ask || {};
   const uf = root.utilisation_des_fonds || root.use_of_funds || root.utilisation_fonds || {};
 
@@ -733,23 +839,29 @@ function formatFundingAskFromJson(obj, lang) {
   const lines = [];
 
   lines.push(isEN ? "## Funding Need" : "## Besoin de financement");
-  lines.push(isEN ? `- Total: **${money(bf.montant_total, cur)}**` : `- Montant total : **${money(bf.montant_total, cur)}**`);
+  lines.push(isEN
+    ? `- Total: **${money(bf.montant_total, cur)}**`
+    : `- Montant total : **${money(bf.montant_total, cur)}**`
+  );
 
   if (bf.objectif_principal) {
-    lines.push(isEN ? `- Objective: ${bf.objectif_principal}` : `- Objectif : ${bf.objectif_principal}`);
+    lines.push(isEN
+      ? `- Objective: ${bf.objectif_principal}`
+      : `- Objectif : ${bf.objectif_principal}`
+    );
   }
 
   if (Array.isArray(bf.options_structure)) {
     lines.push("");
     lines.push(isEN ? "### Structure options" : "### Options de structure");
-    bf.options_structure.forEach((o) => lines.push(`- ${o}`));
+    bf.options_structure.forEach(o => lines.push(`- ${o}`));
   }
 
   lines.push("");
   lines.push(isEN ? "## Use of Funds" : "## Utilisation des fonds");
 
   if (Array.isArray(uf.postes)) {
-    uf.postes.forEach((p) => {
+    uf.postes.forEach(p => {
       lines.push(`- ${p.poste}: **${money(p.montant, cur)}**`);
     });
   }
