@@ -10,12 +10,14 @@ import {
 import { searchCongoLawSources, formatPassagesForPrompt } from "./qdrantRag.js";
 
 function slugifyTitle(s) {
-  return String(s || "")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "_")
-    .replace(/_+/g, "_")
-    .replace(/^_+|_+$/g, "")
-    .slice(0, 40) || "section";
+  return (
+    String(s || "")
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "_")
+      .replace(/_+/g, "_")
+      .replace(/^_+|_+$/g, "")
+      .slice(0, 40) || "section"
+  );
 }
 
 function stripEndMarker(text, marker) {
@@ -87,7 +89,6 @@ async function generateSectionWithRetries({
   const sectionId = slugifyTitle(title);
   const marker = `[[END_SECTION:${sectionId}]]`;
 
-  let last = "";
   let acc = "";
 
   for (let i = 0; i <= attempts; i++) {
@@ -116,31 +117,27 @@ async function generateSectionWithRetries({
       max_tokens: mt,
     });
 
-    last = String(content || "").trim();
+    const last = String(content || "").trim();
     if (!last) continue;
 
-    acc = (acc ? acc + "
-
-" : "") + " : "") + last;
+    // ✅ FIX: safe concatenation (no raw newlines inside quotes)
+    acc = (acc ? acc + "\n\n" : "") + last;
 
     const cleaned = stripEndMarker(acc, marker);
-
     const hasMarker = acc.includes(marker);
     const truncated = isLikelyTruncated(cleaned);
 
-    // ✅ if it's already long enough, don't pay an extra model call—finish locally
-    if ((cleaned.length >= longEnoughChars) && (!hasMarker || truncated)) {
+    // ✅ If already long enough, finish locally (avoid extra model call)
+    if (cleaned.length >= longEnoughChars && (!hasMarker || truncated)) {
       return ensureNiceEnding(trimToLastPunct(cleaned));
     }
 
-    // ✅ OK: complete enough + has marker + meets minimum size
+    // ✅ Complete enough
     if (hasMarker && !truncated && cleaned.length >= minChars) {
       return ensureNiceEnding(cleaned);
     }
 
-    // If too short, we let the loop retry with slightly larger tokens (above).
-    // If likely truncated and not long enough yet, we do a continuation call inside the next attempt
-    // by switching the context (tail-based).
+    // Otherwise: do ONE continuation attempt in this loop iteration
     const tail = cleaned.slice(-900);
     const continuePrompt = buildContinuePrompt({ lang, title, marker, tail });
 
@@ -155,16 +152,15 @@ async function generateSectionWithRetries({
 
     const contTxt = String(cont || "").trim();
     if (contTxt) {
-      acc = acc + "
-
-" + contTxt;
+      // ✅ FIX: safe concatenation
+      acc = acc + "\n\n" + contTxt;
     }
 
     const cleaned2 = stripEndMarker(acc, marker);
     const hasMarker2 = acc.includes(marker);
     const truncated2 = isLikelyTruncated(cleaned2);
 
-    if ((cleaned2.length >= longEnoughChars) && (!hasMarker2 || truncated2)) {
+    if (cleaned2.length >= longEnoughChars && (!hasMarker2 || truncated2)) {
       return ensureNiceEnding(trimToLastPunct(cleaned2));
     }
     if (hasMarker2 && !truncated2 && cleaned2.length >= minChars) {
@@ -179,13 +175,10 @@ async function generateSectionWithRetries({
     });
   }
 
-  const finalText = stripEndMarker(acc || last, marker);
+  const finalText = stripEndMarker(acc, marker);
   return (
     ensureNiceEnding(trimToLastPunct(finalText)) ||
-    `**${title}**
-
-(Contenu non généré : réponse vide du modèle. Veuillez relancer la génération.)
-`
+    `**${title}**\n\n(Contenu non généré : réponse vide du modèle. Veuillez relancer la génération.)\n`
   );
 }
 
@@ -284,8 +277,12 @@ function extractWritingUnits(planText, lang) {
   return units.slice(0, 24);
 }
 
-
-export async function reviseLicenceMemoireFromDraft({ lang = "fr", title = "Mémoire (version corrigée)", ctx = {}, draftText = "" }) {
+export async function reviseLicenceMemoireFromDraft({
+  lang = "fr",
+  title = "Mémoire (version corrigée)",
+  ctx = {},
+  draftText = "",
+}) {
   const temperature = Number(process.env.ACAD_TEMPERATURE || 0.35);
   const maxTokensPerSection = Number(process.env.ACAD_MAX_TOKENS_PER_SECTION || 5200);
   const hardMax = Number(process.env.ACAD_HARD_MAX_TOKENS || 6500);
@@ -309,7 +306,6 @@ export async function reviseLicenceMemoireFromDraft({ lang = "fr", title = "Mém
   }
   if (cur.trim()) chunks.push(cur.trim());
 
-  // Plan: on garde un plan simple, puis sections = blocs corrigés/enrichis
   const planPrompt = buildMemoirePlanPrompt({ lang, ctx, topic: ctx?.topic || title });
   const plan = await deepseekChat({
     messages: [
@@ -323,7 +319,10 @@ export async function reviseLicenceMemoireFromDraft({ lang = "fr", title = "Mém
   const sections = [];
   for (let i = 0; i < chunks.length; i++) {
     const chunk = chunks[i];
-    const sectionTitle = chunks.length <= 1 ? "Texte intégral (corrigé et enrichi)" : `Bloc ${i + 1} (corrigé et enrichi)`;
+    const sectionTitle =
+      chunks.length <= 1
+        ? "Texte intégral (corrigé et enrichi)"
+        : `Bloc ${i + 1} (corrigé et enrichi)`;
 
     const prompt = buildMemoireRevisionPrompt({
       lang,
@@ -348,7 +347,6 @@ export async function reviseLicenceMemoireFromDraft({ lang = "fr", title = "Mém
     });
   }
 
-  // S'assure qu'on a au moins quelques sections (au cas où)
   return {
     title,
     ctx,
@@ -356,7 +354,6 @@ export async function reviseLicenceMemoireFromDraft({ lang = "fr", title = "Mém
     sections,
   };
 }
-
 
 export async function generateLicenceMemoire({ lang, ctx }) {
   const temperature = Number(process.env.ACAD_TEMPERATURE || 0.35);
