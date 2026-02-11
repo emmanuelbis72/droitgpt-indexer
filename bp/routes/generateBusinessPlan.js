@@ -1,5 +1,4 @@
-// business-plan-service/routes/generateBusinessPlan.js
-import express from "express";
+﻿import express from "express";
 import multer from "multer";
 import path from "path";
 import { generateBusinessPlanPremium } from "../core/orchestrator.js";
@@ -13,7 +12,6 @@ import {
 
 const router = express.Router();
 
-// ✅ Upload (rewrite brouillon) – mémoire (Render-friendly)
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: Number(process.env.BP_DRAFT_MAX_BYTES || 15 * 1024 * 1024) },
@@ -29,7 +27,7 @@ function safeFilenameBase(name) {
 function truncateText(s, maxChars) {
   const t = String(s || "").replace(/\u0000/g, "");
   if (t.length <= maxChars) return t;
-  return t.slice(0, maxChars) + `\n\n[...TRONQUÉ: ${t.length - maxChars} caractères...]`;
+  return t.slice(0, maxChars) + `\n\n[...TRONQUE: ${t.length - maxChars} caracteres...]`;
 }
 
 async function extractDraftTextFromUpload(file) {
@@ -38,12 +36,10 @@ async function extractDraftTextFromUpload(file) {
   const ext = path.extname(original).toLowerCase();
   const mime = String(file.mimetype || "").toLowerCase();
 
-  // TXT
   if (ext === ".txt" || mime.includes("text/plain")) {
     return file.buffer.toString("utf-8");
   }
 
-  // DOCX (mammoth)
   if (ext === ".docx" || mime.includes("officedocument.wordprocessingml")) {
     try {
       const mammoth = await import("mammoth");
@@ -57,7 +53,6 @@ async function extractDraftTextFromUpload(file) {
     }
   }
 
-  // PDF (pdf-parse)
   if (ext === ".pdf" || mime.includes("pdf")) {
     try {
       const mod = await import("pdf-parse");
@@ -72,49 +67,27 @@ async function extractDraftTextFromUpload(file) {
     }
   }
 
-  // Fallback: try utf-8
   return file.buffer.toString("utf-8");
 }
 
-
-/**
- * GET /generate-business-plan/premium
- * Utile pour test navigateur (évite "Cannot GET")
- */
-router.get("/premium", (_req, res) => {
+function premiumHealth(_req, res) {
   res.json({
     ok: true,
-    message: "✅ Endpoint premium OK. Utilise POST pour générer le business plan (pdf/json).",
+    message: "Endpoint premium OK. Utilise POST pour generer le business plan (pdf/json).",
     example: {
       method: "POST",
       url: "/generate-business-plan/premium",
       body: { lang: "fr", companyName: "TEST", output: "json" },
     },
   });
-});
+}
 
-/**
- * POST /generate-business-plan/premium
- * Body:
- * {
- *   lang: "fr" | "en",
- *   docType: "startup" | "agri" | "ngo" | "industry",
- *   audience: "investor" | "bank" | "incubator" | "donor",
- *   companyName, country, city, sector, stage,
- *   product, customers, businessModel, traction, competition, risks,
- *   finAssumptions, fundingAsk,
- *   output: "pdf" | "json",
- *   lite: true/false (lite => Canvas+SWOT+Finances seulement)
- *   test: true (retour instantané)
- * }
- */
-router.post("/premium", async (req, res) => {
+async function premiumGenerate(req, res) {
   try {
     const b = req.body || {};
 
-    // ✅ mode test instantané (debug)
     if (b?.test === true) {
-      return res.json({ ok: true, message: "✅ Route premium OK (test mode)" });
+      return res.json({ ok: true, message: "Route premium OK (test mode)" });
     }
 
     const lang = normalizeLang(b.lang || process.env.BP_LANG_DEFAULT || "fr");
@@ -125,30 +98,26 @@ router.post("/premium", async (req, res) => {
       city: safeStr(b.city || "Kinshasa / Lubumbashi", 120),
       sector: safeStr(b.sector || "Multi-secteur", 120),
       stage: safeStr(b.stage || "Early-stage", 60),
-
       docType: normalizeDocType(b.docType),
       audience: normalizeAudience(b.audience),
-
       product: safeStr(b.product, 2500),
       customers: safeStr(b.customers, 2500),
       businessModel: safeStr(b.businessModel, 2500),
       traction: safeStr(b.traction, 2500),
       competition: safeStr(b.competition, 2500),
       risks: safeStr(b.risks, 2500),
-
       finAssumptions: safeStr(b.finAssumptions, 3500),
       fundingAsk: safeStr(b.fundingAsk, 2500),
     };
 
     const title =
       lang === "en"
-        ? `${ctx.companyName} — Business Plan (Premium)`
-        : `${ctx.companyName} — Plan d’affaires (Premium)`;
+        ? `${ctx.companyName} - Business Plan (Premium)`
+        : `${ctx.companyName} - Plan d'affaires (Premium)`;
 
     const output = String(b.output || "pdf").toLowerCase();
     const lite = Boolean(b.lite);
 
-    // ✅ Génération orchestrée (inclut Financials en JSON structuré)
     const { sections, fullText } = await generateBusinessPlanPremium({
       lang,
       ctx,
@@ -159,7 +128,6 @@ router.post("/premium", async (req, res) => {
       return res.json({ title, lang, ctx, lite, sections, fullText });
     }
 
-    // ✅ PDF Premium (TOC, pages, tableaux Canvas/SWOT/Finances)
     return writeBusinessPlanPdfPremium({
       res,
       title,
@@ -167,46 +135,30 @@ router.post("/premium", async (req, res) => {
       sections,
     });
   } catch (e) {
-    console.error("❌ /generate-business-plan/premium error:", e);
+    console.error("/generate-business-plan error:", e);
     return res.status(500).json({
       error: "Erreur serveur",
       details: String(e?.message || e),
     });
   }
-});
+}
 
-
-/**
- * POST /generate-business-plan/premium/rewrite
- * Multipart form-data:
- *  - file: PDF/DOCX/TXT (optional)
- *  - text: texte brut (si pas de fichier)
- *  - notes: consignes (optionnel)
- *  - + champs habituels (companyName, country, ... docType, audience, lang)
- *
- * Sortie: PDF (stable) — même assembleur que /premium
- */
-router.post("/premium/rewrite", upload.single("file"), async (req, res) => {
+async function premiumRewrite(req, res) {
   try {
     const b = req.body || {};
 
     const lang = normalizeLang(b.lang || process.env.BP_LANG_DEFAULT || "fr");
 
-    // 1) extraction texte brouillon (fichier OU texte collé)
     let draftText = "";
-    if (req.file) {
-      draftText = await extractDraftTextFromUpload(req.file);
-    } else {
-      draftText = String(b.text || "");
-    }
+    if (req.file) draftText = await extractDraftTextFromUpload(req.file);
+    else draftText = String(b.text || "");
 
     draftText = truncateText(draftText, Number(process.env.BP_DRAFT_MAX_CHARS || 14000)).trim();
 
     if (!draftText) {
       return res.status(400).json({
         error: "BROUILLON_VIDE",
-        details:
-          "Importe un fichier (PDF/DOCX/TXT) OU colle le texte du brouillon dans le champ 'text'.",
+        details: "Importe un fichier (PDF/DOCX/TXT) OU colle le texte du brouillon dans le champ 'text'.",
       });
     }
 
@@ -216,21 +168,16 @@ router.post("/premium/rewrite", upload.single("file"), async (req, res) => {
       city: safeStr(b.city || "Kinshasa / Lubumbashi", 120),
       sector: safeStr(b.sector || "Multi-secteur", 120),
       stage: safeStr(b.stage || "Early-stage", 60),
-
       docType: normalizeDocType(b.docType),
       audience: normalizeAudience(b.audience),
-
       product: safeStr(b.product, 2500),
       customers: safeStr(b.customers, 2500),
       businessModel: safeStr(b.businessModel, 2500),
       traction: safeStr(b.traction, 2500),
       competition: safeStr(b.competition, 2500),
       risks: safeStr(b.risks, 2500),
-
       finAssumptions: safeStr(b.finAssumptions, 3500),
       fundingAsk: safeStr(b.fundingAsk, 2500),
-
-      // ✅ Ajouts non cassants (utilisés par prompts si présents)
       draftText,
       rewriteNotes: safeStr(b.notes || "", 2500),
       mode: "rewrite",
@@ -239,10 +186,9 @@ router.post("/premium/rewrite", upload.single("file"), async (req, res) => {
     const safeName = safeFilenameBase(ctx.companyName);
     const title =
       lang === "en"
-        ? `${safeName} — Business Plan (Premium, Revised)`
-        : `${safeName} — Plan d’affaires (Premium, corrigé)`;
+        ? `${safeName} - Business Plan (Premium, Revised)`
+        : `${safeName} - Plan d'affaires (Premium, corrige)`;
 
-    // 2) Génération orchestrée Premium (mêmes sections, mais prompts peuvent tenir compte du brouillon)
     const { sections } = await generateBusinessPlanPremium({
       lang,
       ctx,
@@ -257,13 +203,16 @@ router.post("/premium/rewrite", upload.single("file"), async (req, res) => {
       sections,
     });
   } catch (e) {
-    console.error("❌ /generate-business-plan/premium/rewrite error:", e);
+    console.error("/generate-business-plan/rewrite error:", e);
     return res.status(500).json({
       error: "Erreur serveur",
       details: String(e?.message || e),
     });
   }
-});
+}
 
+router.get(["/", "/premium"], premiumHealth);
+router.post(["/", "/premium"], premiumGenerate);
+router.post(["/rewrite", "/premium/rewrite"], upload.single("file"), premiumRewrite);
 
 export default router;

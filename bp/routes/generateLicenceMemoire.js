@@ -1,5 +1,4 @@
-// generateLicenceMemoire.js
-import express from "express";
+﻿import express from "express";
 import multer from "multer";
 import mammoth from "mammoth";
 
@@ -10,53 +9,53 @@ const router = express.Router();
 
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 25 * 1024 * 1024 }, // 25MB
+  limits: { fileSize: 25 * 1024 * 1024 },
 });
 
 async function extractDraftText(file) {
-  if (!file) throw new Error("Aucun fichier brouillon reçu.");
+  if (!file) throw new Error("Aucun fichier brouillon recu.");
   const name = String(file.originalname || "").toLowerCase();
   const mime = String(file.mimetype || "").toLowerCase();
 
-  // DOCX
   if (name.endsWith(".docx") || mime.includes("wordprocessingml")) {
     const r = await mammoth.extractRawText({ buffer: file.buffer });
     return String(r.value || "").trim();
   }
 
-  // TXT
   if (name.endsWith(".txt") || mime.startsWith("text/")) {
     return String(file.buffer.toString("utf-8") || "").trim();
   }
 
-  // PDF: optionnel, via service externe d'extraction (évite pdfjs/pdf-parse en prod)
   if (name.endsWith(".pdf") || mime === "application/pdf") {
     const extractUrl = process.env.ANALYSE_PDF_EXTRACT_URL;
     if (!extractUrl) {
-      throw new Error("Import PDF non activé. Configure ANALYSE_PDF_EXTRACT_URL (service d'extraction) ou utilise un DOCX.");
+      throw new Error(
+        "Import PDF non active. Configure ANALYSE_PDF_EXTRACT_URL (service d'extraction) ou utilise un DOCX."
+      );
     }
+
     const fd = new FormData();
     fd.append("file", new Blob([file.buffer], { type: "application/pdf" }), file.originalname || "draft.pdf");
 
     const resp = await fetch(extractUrl, { method: "POST", body: fd });
     if (!resp.ok) {
       const t = await resp.text().catch(() => "");
-      throw new Error(`Extraction PDF échouée: ${resp.status} ${t.slice(0, 200)}`);
+      throw new Error(`Extraction PDF echouee: ${resp.status} ${t.slice(0, 200)}`);
     }
+
     const j = await resp.json();
     const txt = j?.text || j?.content || "";
     return String(txt || "").trim();
   }
 
-  throw new Error("Format de brouillon non supporté. Utilise .docx ou .txt (PDF seulement si ANALYSE_PDF_EXTRACT_URL est configuré).");
+  throw new Error("Format de brouillon non supporte. Utilise .docx ou .txt (PDF seulement si ANALYSE_PDF_EXTRACT_URL est configure). ");
 }
 
+function memoireHealth(_req, res) {
+  res.json({ ok: true, message: "Endpoint licence-memoire OK. Utilise POST pour generer le PDF." });
+}
 
-router.get("/licence-memoire", (_req, res) => {
-  res.json({ ok: true, message: "✅ Endpoint licence-memoire OK. Utilise POST pour générer le PDF." });
-});
-
-router.post("/licence-memoire", async (req, res) => {
+async function generateMemoire(req, res) {
   req.setTimeout(15 * 60 * 1000);
   res.setTimeout(15 * 60 * 1000);
 
@@ -67,7 +66,6 @@ router.post("/licence-memoire", async (req, res) => {
     const ctx = {
       mode: b.mode === "droit_congolais" ? "droit_congolais" : "standard",
       citationStyle: b.citationStyle === "apa" ? "apa" : "footnotes",
-
       topic: String(b.topic || "").trim(),
       university: String(b.university || "").trim(),
       faculty: String(b.faculty || "").trim(),
@@ -78,19 +76,16 @@ router.post("/licence-memoire", async (req, res) => {
       methodology: String(b.methodology || "doctrinale").trim(),
       plan: String(b.plan || "").trim(),
       lengthPagesTarget: Number(b.lengthPagesTarget || 45),
-
       studentName: String(b.studentName || "").trim(),
       supervisorName: String(b.supervisorName || "").trim(),
     };
 
-    const title = lang === "en" ? `${ctx.topic || "Bachelor Dissertation"}` : `${ctx.topic || "Mémoire de licence"}`;
+    const title = lang === "en" ? `${ctx.topic || "Bachelor Dissertation"}` : `${ctx.topic || "Memoire de licence"}`;
 
     const { plan, sections, sourcesUsed } = await generateLicenceMemoire({ lang, ctx });
 
-    // Attach sources to ctx so the PDF assembler can print footnotes/notes section
     ctx.sourcesUsed = Array.isArray(sourcesUsed) ? sourcesUsed : [];
 
-    // Expose header for frontend (sources list)
     res.setHeader("Access-Control-Expose-Headers", "x-sources-used");
     if (ctx.mode === "droit_congolais" && Array.isArray(sourcesUsed) && sourcesUsed.length) {
       res.setHeader("x-sources-used", JSON.stringify(sourcesUsed.slice(0, 20)));
@@ -100,20 +95,16 @@ router.post("/licence-memoire", async (req, res) => {
 
     return writeLicenceMemoirePdf({ res, title, ctx, plan, sections });
   } catch (e) {
-    console.error("❌ /generate-academic/licence-memoire error:", e);
+    console.error("/generate-memoire error:", e);
     return res.status(500).json({ error: "Erreur serveur", details: String(e?.message || e) });
   }
-});
+}
 
-
-router.options("/licence-memoire/revise", (_req, res) => res.sendStatus(204));
-
-// ✅ Import + correction/enrichissement d'un brouillon (DOCX/TXT/PDF optionnel)
-router.post("/licence-memoire/revise", upload.single("file"), async (req, res) => {
+async function reviseMemoire(req, res) {
   try {
     const b = req.body || {};
     const lang = String(b.language || b.lang || "fr");
-    const title = String(b.title || b.topic || "Mémoire (version corrigée)");
+    const title = String(b.title || b.topic || "Memoire (version corrigee)");
     const ctx = b.ctx ? (typeof b.ctx === "string" ? JSON.parse(b.ctx) : b.ctx) : {};
 
     const draftText = await extractDraftText(req.file);
@@ -131,6 +122,11 @@ router.post("/licence-memoire/revise", upload.single("file"), async (req, res) =
     console.error("reviseLicenceMemoire error:", err);
     return res.status(400).json({ ok: false, error: String(err?.message || err) });
   }
-});
+}
+
+router.get(["/", "/licence-memoire"], memoireHealth);
+router.post(["/", "/licence-memoire"], generateMemoire);
+router.options(["/revise", "/licence-memoire/revise"], (_req, res) => res.sendStatus(204));
+router.post(["/revise", "/licence-memoire/revise"], upload.single("file"), reviseMemoire);
 
 export default router;
