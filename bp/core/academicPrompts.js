@@ -13,6 +13,8 @@
 export function academicSystemPrompt(lang) {
   const isEN = lang === "en";
 
+  const end = String(endMarker || '[[END_SECTION]]').trim();
+
   return isEN
     ? `You are an academic legal writing assistant. Write a rigorous Bachelor-level law dissertation.
 
@@ -56,6 +58,8 @@ export function buildMemoirePlanPrompt({ lang, ctx }) {
   const isEN = lang === "en";
   const topic = ctx?.topic || "Sujet non précisé";
 
+  const end = String(endMarker || '[[END_SECTION]]').trim();
+
   return isEN
     ? `Create a detailed dissertation plan for: "${topic}".
 
@@ -89,7 +93,7 @@ Structure obligatoire (pas de JSON) :
 Le plan doit permettre un mémoire de 70 pages (prévoir suffisamment de sous-sections).`;
 }
 
-export function buildMemoireSectionPrompt({ lang, ctx, sectionTitle, sourcesText }) {
+export function buildMemoireSectionPrompt({ lang, ctx, sectionTitle, sourcesText, endMarker }) {
   const isEN = lang === "en";
   const topic = ctx?.topic || "Sujet non précisé";
   const ps = ctx?.problemStatement || "";
@@ -111,6 +115,8 @@ ${sourcesText}
 User plan:
 ${ctx.plan}
 ` : "";
+
+  const end = String(endMarker || '[[END_SECTION]]').trim();
 
   return isEN
     ? `Write the section: "${sectionTitle}" for a Bachelor law dissertation.
@@ -137,7 +143,12 @@ Formatting rules:
 Sources policy:
 - If SOURCES are provided, base claims on them and create footnotes referencing the relevant source text.
 - If a needed source is missing, write "(source not provided)" and add the corresponding note "source not provided".
-- Never invent legal articles, cases, or bibliographic entries.`
+- Never invent legal articles, cases, or bibliographic entries.
+
+End-of-section marker (mandatory):
+- End your answer with the exact marker: ${end}
+- Write NOTHING after the marker.
+- Ensure there is a final punctuation (., !, ?, …) immediately before the marker.`
     : `Rédige la section : "${sectionTitle}" pour un mémoire de licence en droit.
 
 Contexte :

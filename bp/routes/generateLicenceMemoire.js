@@ -1,4 +1,4 @@
-﻿import express from "express";
+import express from "express";
 import multer from "multer";
 import mammoth from "mammoth";
 
@@ -56,8 +56,8 @@ function memoireHealth(_req, res) {
 }
 
 async function generateMemoire(req, res) {
-  req.setTimeout(15 * 60 * 1000);
-  res.setTimeout(15 * 60 * 1000);
+  req.setTimeout(46 * 60 * 1000);
+  res.setTimeout(46 * 60 * 1000);
 
   try {
     const b = req.body || {};
@@ -75,7 +75,7 @@ async function generateMemoire(req, res) {
       objectives: String(b.objectives || "").trim(),
       methodology: String(b.methodology || "doctrinale").trim(),
       plan: String(b.plan || "").trim(),
-      lengthPagesTarget: Number(b.lengthPagesTarget || 45),
+      lengthPagesTarget: Number(b.lengthPagesTarget || 70),
       studentName: String(b.studentName || "").trim(),
       supervisorName: String(b.supervisorName || "").trim(),
     };
@@ -101,6 +101,9 @@ async function generateMemoire(req, res) {
 }
 
 async function reviseMemoire(req, res) {
+  req.setTimeout(46 * 60 * 1000);
+  res.setTimeout(46 * 60 * 1000);
+
   try {
     const b = req.body || {};
     const lang = String(b.language || b.lang || "fr");
@@ -110,6 +113,9 @@ async function reviseMemoire(req, res) {
     const draftText = await extractDraftText(req.file);
 
     const result = await reviseLicenceMemoireFromDraft({ lang, title, ctx, draftText });
+
+    res.setHeader("Access-Control-Expose-Headers", "x-sources-used");
+    res.setHeader("x-sources-used", JSON.stringify([]));
 
     return writeLicenceMemoirePdf({
       res,
