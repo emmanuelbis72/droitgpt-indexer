@@ -1,24 +1,34 @@
-﻿import express from "express";
-import cors from "cors";
-import dotenv from "dotenv";
-import http from "http";
+import express from 'express';
+import cors from 'cors';
+import dotenv from 'dotenv';
+import http from 'http';
 
-import generatePdfRoute from "./generatePdf.js";
-import generateBusinessPlanRoute from "./routes/generateBusinessPlan.js";
-import generateLicenceMemoireRoute from "./routes/generateLicenceMemoire.js";
+import generatePdfRoute from './generatePdf.js';
+import generateBusinessPlanRoute from './routes/generateBusinessPlan.js';
+import generateLicenceMemoireRoute from './routes/generateLicenceMemoire.js';
 
 dotenv.config();
 
 const app = express();
-app.set("trust proxy", 1);
+app.set('trust proxy', 1);
 
-// -----------------------------
-// ✅ CORS stable (localhost + prod)
-// -----------------------------
+/**
+ * ✅ CORS (stable + dev + prod)
+ * - Fixes: "No 'Access-Control-Allow-Origin' header" from localhost ports (5173/5174/etc)
+ * - Keeps Business Plan routes intact
+ */
 const allowedOriginPatterns = [
-  /^http:\/\/localhost:\d+$/i,
-  /^http:\/\/127\.0\.0\.1:\d+$/i,
-  /^https:\/\/droitgpt-ui\.vercel\.app$/i,
+  // Local dev (Vite ports can change)
+  /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i,
+  /^http:\/\/0\.0\.0\.0(:\d+)?$/i,
+  // Optional LAN dev (if you test from another device on same network)
+  /^http:\/\/192\.168\.\d{1,3}\.\d{1,3}(:\d+)?$/i,
+  /^http:\/\/10\.\d{1,3}\.\d{1,3}\.\d{1,3}(:\d+)?$/i,
+
+  // Vercel (prod + preview)
+  /^https:\/\/droitgpt-ui(-[a-z0-9-]+)?\.vercel\.app$/i,
+
+  // Custom domain
   /^https:\/\/www\.droitgpt\.com$/i,
 ];
 
@@ -32,139 +42,124 @@ const corsOptions = {
     if (isAllowedOrigin(origin)) return cb(null, true);
     return cb(new Error(`CORS blocked for origin: ${origin}`));
   },
-  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: [
-    "Content-Type",
-    "Authorization",
-    "X-Requested-With",
-    "Accept",
-    "Origin",
-  ],
-  // ✅ RAG: on expose aussi x-sources-used
-  exposedHeaders: ["Content-Disposition", "x-sources-used"],
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  // IMPORTANT: do NOT hardcode allowedHeaders; let cors reflect Access-Control-Request-Headers
+  exposedHeaders: ['Content-Disposition', 'x-sources-used'],
   maxAge: 86400,
   optionsSuccessStatus: 204,
   credentials: false,
 };
 
 app.use(cors(corsOptions));
-app.options("*", cors(corsOptions));
+app.options('*', cors(corsOptions));
 
-// -----------------------------
-// ✅ Body parsers
-// -----------------------------
-app.use(express.json({ limit: "15mb" }));
-app.use(express.urlencoded({ extended: true, limit: "15mb" }));
-
-// -----------------------------
-// ✅ Long-request middleware (Mémoire + RAG)
-// (Ne change pas la route, juste les timeouts req/res)
-// -----------------------------
-const LONG_MS = 46 * 60 * 1000;
-
+// Some browsers send extra headers in preflight; echo them back to avoid random failures
 app.use((req, res, next) => {
-  // On applique seulement aux endpoints longs
-  const p = req.path || "";
-  const isAcademic =
-    p.startsWith("/generate-academic") || p.startsWith("/generate-memoire");
+  if (req.method === 'OPTIONS') {
+    const reqHeaders = req.headers['access-control-request-headers'];
+    if (reqHeaders) res.setHeader('Access-Control-Allow-Headers', reqHeaders);
+  }
+  next();
+});
 
-  if (isAcademic) {
+// Body parsers
+app.use(express.json({ limit: '15mb' }));
+app.use(express.urlencoded({ extended: true, limit: '15mb' }));
+
+// ✅ Long-running endpoints (Mémoire + RAG)
+const LONG_MS = 46 * 60 * 1000;
+app.use((req, res, next) => {
+  const p = req.path || '';
+  if (p.startsWith('/generate-academic') || p.startsWith('/generate-memoire')) {
     req.setTimeout(LONG_MS);
     res.setTimeout(LONG_MS);
   }
   next();
 });
 
-// -----------------------------
-// Routes
-// -----------------------------
-app.use("/generate-pdf", generatePdfRoute);
+// Routes (Business Plan stays intact)
+app.use('/generate-pdf', generatePdfRoute);
+app.use('/generate-business-plan', generateBusinessPlanRoute);
+// Keep compatibility if frontend calls /generate-business-plan/premium
+app.use('/generate-business-plan/premium', generateBusinessPlanRoute);
 
-// Business plan (inchangé)
-app.use("/generate-business-plan", generateBusinessPlanRoute);
-// (si ton front appelle /generate-business-plan/premium)
-app.use("/generate-business-plan/premium", generateBusinessPlanRoute);
+app.use('/generate-academic', generateLicenceMemoireRoute);
+app.use('/generate-memoire', generateLicenceMemoireRoute);
 
-// Académique / Mémoire (avec RAG)
-app.use("/generate-academic", generateLicenceMemoireRoute);
-app.use("/generate-memoire", generateLicenceMemoireRoute);
-
-// Download TXT BP
-app.post("/download-business-plan", (req, res) => {
+app.post('/download-business-plan', (req, res) => {
   try {
     const raw = req.body?.content;
-    const content = typeof raw === "string" ? raw : "";
+    const content = typeof raw === 'string' ? raw : '';
 
     if (!content.trim()) {
       return res.status(400).json({
-        error: "INVALID_CONTENT",
+        error: 'INVALID_CONTENT',
         details: "Le champ 'content' est requis pour telecharger le business plan.",
       });
     }
 
     const baseName = (
-      String(req.body?.fileName || req.body?.companyName || "business-plan")
+      String(req.body?.fileName || req.body?.companyName || 'business-plan')
         .trim()
-        .replace(/[^a-zA-Z0-9._-]+/g, "_")
-        .slice(0, 80) || "business-plan"
+        .replace(/[^a-zA-Z0-9._-]+/g, '_')
+        .slice(0, 80) || 'business-plan'
     );
 
-    res.setHeader("Content-Type", "text/plain; charset=utf-8");
-    res.setHeader("Content-Disposition", `attachment; filename="${baseName}.txt"`);
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${baseName}.txt"`);
     return res.status(200).send(content);
   } catch (e) {
     return res.status(500).json({
-      error: "DOWNLOAD_FAILED",
+      error: 'DOWNLOAD_FAILED',
       details: String(e?.message || e),
     });
   }
 });
 
-// Health
-app.get("/", (_req, res) => {
+app.get('/', (_req, res) => {
   res.json({
     ok: true,
-    message: "Service OK (bp)",
+    message: 'Service operationnel.',
     endpoints: [
-      "/generate-business-plan/premium",
-      "/generate-academic/licence-memoire",
-      "/generate-academic/licence-memoire/revise",
-      "/generate-memoire",
+      '/generate-business-plan',
+      '/generate-business-plan/premium',
+      '/generate-memoire',
+      '/generate-academic/licence-memoire',
+      '/generate-academic/licence-memoire/revise',
+      '/download-business-plan',
     ],
   });
 });
 
-// 404
 app.use((req, res) => {
   res.status(404).json({
-    error: "NOT_FOUND",
+    error: 'NOT_FOUND',
     method: req.method,
     path: req.originalUrl,
   });
 });
 
-// Errors
 app.use((err, req, res, _next) => {
-  console.error("Unhandled error:", err);
+  console.error('Unhandled error:', err);
 
   if (res.headersSent) return;
 
-  if (err?.type === "entity.parse.failed") {
-    return res.status(400).json({
-      error: "INVALID_JSON",
-      details: "Corps JSON invalide.",
-    });
-  }
-
-  if (String(err?.message || "").startsWith("CORS blocked for origin:")) {
+  if (String(err?.message || '').startsWith('CORS blocked for origin:')) {
     return res.status(403).json({
-      error: "CORS_BLOCKED",
+      error: 'CORS_BLOCKED',
       details: err.message,
     });
   }
 
+  if (err?.type === 'entity.parse.failed') {
+    return res.status(400).json({
+      error: 'INVALID_JSON',
+      details: 'Corps JSON invalide.',
+    });
+  }
+
   return res.status(500).json({
-    error: "INTERNAL_SERVER_ERROR",
+    error: 'INTERNAL_SERVER_ERROR',
     details: String(err?.message || err),
     path: req.originalUrl,
   });
@@ -172,16 +167,10 @@ app.use((err, req, res, _next) => {
 
 const PORT = process.env.PORT || 5001;
 
-// -----------------------------
-// ✅ IMPORTANT: HTTP server timeouts (Node 22)
-// -----------------------------
+// ✅ IMPORTANT (Render/Node 22): server-level timeouts
 const server = http.createServer(app);
-
-// Empêche Node de couper les requêtes longues (RAG + génération)
 server.requestTimeout = LONG_MS;
 server.headersTimeout = LONG_MS + 5000;
-
-// Keep-alive proxy-friendly
 server.keepAliveTimeout = 70 * 1000;
 
 server.listen(PORT, () => {

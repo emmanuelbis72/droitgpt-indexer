@@ -121,7 +121,7 @@ async function generateSectionWithRetries({
 
     acc = (acc ? acc + "
 
-" : "") + last;
+" : "") + " : "") + last;
 
     const cleaned = stripEndMarker(acc, marker);
 
