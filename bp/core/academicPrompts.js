@@ -13,8 +13,6 @@
 export function academicSystemPrompt(lang) {
   const isEN = lang === "en";
 
-  const end = String(endMarker || '[[END_SECTION]]').trim();
-
   return isEN
     ? `You are an academic legal writing assistant. Write a rigorous Bachelor-level law dissertation.
 
@@ -57,8 +55,6 @@ INTERDICTION D’INVENTER :
 export function buildMemoirePlanPrompt({ lang, ctx }) {
   const isEN = lang === "en";
   const topic = ctx?.topic || "Sujet non précisé";
-
-  const end = String(endMarker || '[[END_SECTION]]').trim();
 
   return isEN
     ? `Create a detailed dissertation plan for: "${topic}".
@@ -116,7 +112,7 @@ User plan:
 ${ctx.plan}
 ` : "";
 
-  const end = String(endMarker || '[[END_SECTION]]').trim();
+  const marker = String(endMarker || "").trim();
 
   return isEN
     ? `Write the section: "${sectionTitle}" for a Bachelor law dissertation.
@@ -140,15 +136,14 @@ Formatting rules:
   - In-text markers: (1), (2), (3)...
   - End of section: "NOTES (FOOTNOTES)" listing each note.
 
+Strict ending rule:
+- End the section with the exact marker: ${marker}
+- Write NOTHING after the marker.
+
 Sources policy:
 - If SOURCES are provided, base claims on them and create footnotes referencing the relevant source text.
 - If a needed source is missing, write "(source not provided)" and add the corresponding note "source not provided".
-- Never invent legal articles, cases, or bibliographic entries.
-
-End-of-section marker (mandatory):
-- End your answer with the exact marker: ${end}
-- Write NOTHING after the marker.
-- Ensure there is a final punctuation (., !, ?, …) immediately before the marker.`
+- Never invent legal articles, cases, or bibliographic entries.`
     : `Rédige la section : "${sectionTitle}" pour un mémoire de licence en droit.
 
 Contexte :
@@ -169,6 +164,10 @@ Règles de forme :
 - Notes de bas de page par défaut :
   - Appels : (1), (2), (3)...
   - Fin de section : "NOTES DE BAS DE PAGE" listant chaque note.
+
+Règle de fin stricte :
+- Termine la section par le marqueur exact : ${marker}
+- N'écris RIEN après le marqueur.
 
 Politique des sources :
 - Si des SOURCES sont fournies, fonder les affirmations dessus et ajouter des notes correspondantes.
