@@ -1,149 +1,125 @@
-import express from "express";
-import cors from "cors";
-import dotenv from "dotenv";
-import http from "http";
-
-import generatePdfRoute from "./generatePdf.js";
-import generateBusinessPlanRoute from "./routes/generateBusinessPlan.js";
-import generateLicenceMemoireRoute from "./routes/generateLicenceMemoire.js";
+﻿import express from 'express';
+import cors from 'cors';
+import dotenv from 'dotenv';
+import generatePdfRoute from './generatePdf.js';
+import generateBusinessPlanRoute from './routes/generateBusinessPlan.js';
+import generateLicenceMemoireRoute from './routes/generateLicenceMemoire.js';
 
 dotenv.config();
 
 const app = express();
-app.set("trust proxy", 1);
 
-/**
- * ✅ CORS FIX (définitif / stable)
- * Objectif: supprimer "No 'Access-Control-Allow-Origin' header" pour www.droitgpt.com + dev
- * - Reflect l'Origin automatiquement (origin: true)
- * - Supporte OPTIONS preflight partout
- * - Ne casse pas l'architecture existante
- */
-const corsOptions = {
-  origin: true, // <-- autorise toutes les origines en reflétant l'Origin (inclut www.droitgpt.com)
-  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  // Laisse cors refléter automatiquement les headers demandés en preflight
-  exposedHeaders: ["Content-Disposition", "x-sources-used", "X-BP-Mode"],
-  maxAge: 86400,
-  optionsSuccessStatus: 204,
-  credentials: false,
-};
+const allowedOriginPatterns = [
+  /^http:\/\/localhost:\d+$/i,
+  /^http:\/\/127\.0\.0\.1:\d+$/i,
+  /^https:\/\/droitgpt-ui\.vercel\.app$/i,
+  /^https:\/\/www\.droitgpt\.com$/i,
+];
 
-app.use(cors(corsOptions));
-app.options("*", cors(corsOptions));
+function isAllowedOrigin(origin) {
+  if (!origin) return true;
+  return allowedOriginPatterns.some((p) => p.test(origin));
+}
 
-// Some browsers send extra headers in preflight; echo them back to avoid random failures
 app.use((req, res, next) => {
-  if (req.method === "OPTIONS") {
-    const reqHeaders = req.headers["access-control-request-headers"];
-    if (reqHeaders) res.setHeader("Access-Control-Allow-Headers", reqHeaders);
+  const origin = req.headers.origin;
+
+  if (isAllowedOrigin(origin)) {
+    if (origin) res.setHeader('Access-Control-Allow-Origin', origin);
+    else res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Vary', 'Origin');
   }
+
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
+  res.setHeader('Access-Control-Max-Age', '86400');
+
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
   next();
 });
 
-// Body parsers
-app.use(express.json({ limit: "15mb" }));
-app.use(express.urlencoded({ extended: true, limit: "15mb" }));
+const PORT = process.env.PORT || 5001;
 
-// ✅ Long-running endpoints (Mémoire + RAG)
-const LONG_MS = 46 * 60 * 1000;
-app.use((req, res, next) => {
-  const p = req.path || "";
-  if (p.startsWith("/generate-academic") || p.startsWith("/generate-memoire")) {
-    req.setTimeout(LONG_MS);
-    res.setTimeout(LONG_MS);
-  }
-  next();
-});
+app.use(cors());
+app.use(express.json({ limit: '10mb' }));
 
-// Routes (Business Plan stays intact)
-app.use("/generate-pdf", generatePdfRoute);
-app.use("/generate-business-plan", generateBusinessPlanRoute);
-// Keep compatibility if frontend calls /generate-business-plan/premium
-app.use("/generate-business-plan/premium", generateBusinessPlanRoute);
+app.use('/generate-pdf', generatePdfRoute);
+app.use('/generate-business-plan', generateBusinessPlanRoute);
+app.use('/generate-academic', generateLicenceMemoireRoute);
+app.use('/generate-memoire', generateLicenceMemoireRoute);
 
-app.use("/generate-academic", generateLicenceMemoireRoute);
-app.use("/generate-memoire", generateLicenceMemoireRoute);
-
-app.post("/download-business-plan", (req, res) => {
+app.post('/download-business-plan', (req, res) => {
   try {
     const raw = req.body?.content;
-    const content = typeof raw === "string" ? raw : "";
+    const content = typeof raw === 'string' ? raw : '';
 
     if (!content.trim()) {
       return res.status(400).json({
-        error: "INVALID_CONTENT",
+        error: 'INVALID_CONTENT',
         details: "Le champ 'content' est requis pour telecharger le business plan.",
       });
     }
 
     const baseName = (
-      String(req.body?.fileName || req.body?.companyName || "business-plan")
+      String(req.body?.fileName || req.body?.companyName || 'business-plan')
         .trim()
-        .replace(/[^a-zA-Z0-9._-]+/g, "_")
-        .slice(0, 80) || "business-plan"
+        .replace(/[^a-zA-Z0-9._-]+/g, '_')
+        .slice(0, 80) || 'business-plan'
     );
 
-    res.setHeader("Content-Type", "text/plain; charset=utf-8");
-    res.setHeader("Content-Disposition", `attachment; filename="${baseName}.txt"`);
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${baseName}.txt"`);
     return res.status(200).send(content);
   } catch (e) {
     return res.status(500).json({
-      error: "DOWNLOAD_FAILED",
+      error: 'DOWNLOAD_FAILED',
       details: String(e?.message || e),
     });
   }
 });
 
-app.get("/", (_req, res) => {
+app.get('/', (_req, res) => {
   res.json({
     ok: true,
-    message: "Service operationnel.",
+    message: 'Serveur de generation PDF operationnel.',
     endpoints: [
-      "/generate-business-plan",
-      "/generate-business-plan/premium",
-      "/generate-memoire",
-      "/generate-academic/licence-memoire",
-      "/generate-academic/licence-memoire/revise",
-      "/download-business-plan",
+      '/generate-business-plan',
+      '/generate-business-plan/premium',
+      '/generate-memoire',
+      '/generate-academic/licence-memoire',
+      '/download-business-plan',
     ],
   });
 });
 
 app.use((req, res) => {
   res.status(404).json({
-    error: "NOT_FOUND",
+    error: 'NOT_FOUND',
     method: req.method,
     path: req.originalUrl,
   });
 });
 
 app.use((err, req, res, _next) => {
-  console.error("Unhandled error:", err);
+  console.error('Unhandled error:', err);
+
   if (res.headersSent) return;
 
-  if (err?.type === "entity.parse.failed") {
+  if (err?.type === 'entity.parse.failed') {
     return res.status(400).json({
-      error: "INVALID_JSON",
-      details: "Corps JSON invalide.",
+      error: 'INVALID_JSON',
+      details: 'Corps JSON invalide.',
     });
   }
 
   return res.status(500).json({
-    error: "INTERNAL_SERVER_ERROR",
+    error: 'INTERNAL_SERVER_ERROR',
     details: String(err?.message || err),
     path: req.originalUrl,
   });
 });
 
-const PORT = process.env.PORT || 5001;
-
-// ✅ IMPORTANT (Render/Node 22): server-level timeouts
-const server = http.createServer(app);
-server.requestTimeout = LONG_MS;
-server.headersTimeout = LONG_MS + 5000;
-server.keepAliveTimeout = 70 * 1000;
-
-server.listen(PORT, () => {
-  console.log(`Service en ligne sur http://localhost:${PORT}`);
+app.listen(PORT, () => {
+  console.log(`PDF Service en ligne sur http://localhost:${PORT}`);
 });
