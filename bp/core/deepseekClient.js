@@ -2,29 +2,18 @@
 // ✅ STRICT PROD: optimize latency by reusing the client + keep-alive + timeouts.
 
 import OpenAI from "openai";
-import { Agent, setGlobalDispatcher } from "undici";
 
 let _client = null;
-let _dispatcherInited = false;
 
+/**
+ * IMPORTANT (Render / Node 22):
+ * - Do NOT import "undici" as a dependency (not installed by default).
+ * - Node 22 already provides global fetch internally backed by undici.
+ * - Keep-alive is handled automatically by the runtime.
+ */
 function initKeepAliveOnce() {
-  // Node fetch uses undici under the hood. A keep-alive dispatcher reduces TLS/handshake overhead
-  // across the MANY sequential calls made by the orchestrator.
-  if (_dispatcherInited) return;
-  _dispatcherInited = true;
-
-  const enabled = String(process.env.HTTP_KEEPALIVE || "1") !== "0";
-  if (!enabled) return;
-
-  try {
-    const agent = new Agent({
-      keepAliveTimeout: Number(process.env.HTTP_KEEPALIVE_TIMEOUT_MS || 60_000),
-      keepAliveMaxTimeout: Number(process.env.HTTP_KEEPALIVE_MAX_TIMEOUT_MS || 120_000),
-    });
-    setGlobalDispatcher(agent);
-  } catch {
-    // If undici config fails, continue without keep-alive (do not crash prod).
-  }
+  // No-op on purpose (avoid hard dependency on undici).
+  return;
 }
 
 export function createDeepSeekClient() {
