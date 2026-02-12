@@ -67,15 +67,20 @@ async function generateMemoire(req, res) {
       mode: b.mode === "droit_congolais" ? "droit_congolais" : "standard",
       citationStyle: b.citationStyle === "apa" ? "apa" : "footnotes",
       topic: String(b.topic || "").trim(),
+      // ✅ Multi-disciplines: when not in congo law mode, use this to steer prompts (ex: Sociologie)
+      discipline: String(b.discipline || b.field || b.faculty || b.department || "").trim(),
       university: String(b.university || "").trim(),
       faculty: String(b.faculty || "").trim(),
       department: String(b.department || "").trim(),
       academicYear: String(b.academicYear || "").trim(),
       problemStatement: String(b.problemStatement || "").trim(),
       objectives: String(b.objectives || "").trim(),
-      methodology: String(b.methodology || "doctrinale").trim(),
+      methodology: String(
+        b.methodology || (b.mode === "droit_congolais" ? "doctrinale" : "qualitative")
+      ).trim(),
       plan: String(b.plan || "").trim(),
-      lengthPagesTarget: Number(b.lengthPagesTarget || 70),
+      // ✅ ensure >= 50 pages; allow UI override; cap to keep generation stable
+      lengthPagesTarget: Math.min(90, Math.max(50, Number(b.lengthPagesTarget || 55))),
       studentName: String(b.studentName || "").trim(),
       supervisorName: String(b.supervisorName || "").trim(),
     };

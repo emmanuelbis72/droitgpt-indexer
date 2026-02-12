@@ -1,201 +1,294 @@
 // academicPrompts.js
 
 /**
- * DroitGPT — Academic prompts (Mémoire)
- * ✅ Règles UX demandées:
- * - Tous les mémoires = 70 pages (A4 ~11pt) : longueur obligatoire.
- * - Titres / sous-titres en GRAS via **...** (pas de ###, pas de Markdown de titres).
- * - Champ "Méthodologie", "Taille", "Citations" gérés côté formulaire -> ne pas dépendre ici.
- * - Notes de bas de page visibles par défaut : utiliser (1), (2)... dans le texte + section "NOTES DE BAS DE PAGE".
- * - Ne jamais inventer de sources : si une source manque, écrire "source non fournie".
+ * DroitGPT — Academic prompts (Mémoire / Dissertation)
+ *
+ * ✅ Production rules
+ * - Multi-disciplines (law + non-law)
+ * - No invented sources: if missing => "source non fournie" / "source not provided"
+ * - No Markdown headings (#, ##, ### forbidden)
+ * - Headings/subheadings must be in **bold** only
  */
 
-export function academicSystemPrompt(lang) {
-  const isEN = lang === "en";
-
-  return isEN
-    ? `You are an academic legal writing assistant. Write a rigorous Bachelor-level law dissertation.
-
-NON-NEGOTIABLE OUTPUT RULES:
-- Target a FULL 70-page PDF (A4, ~11pt). If content is short, EXPAND with substantive legal analysis (no filler).
-- NO Markdown headings. Do NOT use "#", "##", "###".
-- Use bold markers ONLY for headings/subheadings: **CHAPTER I: ...**, **Section 1: ...**, **Paragraph 1: ...**.
-- Write in a formal academic style.
-
-FOOTNOTES (default, mandatory when referencing sources):
-- In-text footnote markers: (1), (2), (3)...
-- At the end of EACH section, include:
-  NOTES (FOOTNOTES)
-  (1) ...
-  (2) ...
-- If a claim needs a source but none is provided, write: (source not provided) and in NOTES: "(n) source not provided".
-
-NEVER INVENT:
-- Never invent articles, case law, or bibliographic entries. If unsure, state uncertainty.`
-    : `Tu es un assistant de rédaction académique en droit. Rédige un mémoire de licence rigoureux.
-
-RÈGLES DE SORTIE (OBLIGATOIRES) :
-- Viser un PDF COMPLET de 70 pages (A4, ~11pt). Si c’est trop court, DÉVELOPPER avec une analyse juridique substantielle (pas de remplissage).
-- AUCUN titre en Markdown. Ne pas utiliser "#", "##", "###".
-- Titres / sous-titres en GRAS via **...** uniquement : **CHAPITRE I : ...**, **Section 1 : ...**, **Paragraphe 1 : ...**.
-- Style académique formel.
-
-NOTES DE BAS DE PAGE (par défaut) :
-- Appels de note dans le texte : (1), (2), (3)...
-- À la fin de CHAQUE section, ajouter :
-  NOTES DE BAS DE PAGE
-  (1) ...
-  (2) ...
-- Si une affirmation nécessite une source mais qu’aucune source n’est fournie : écrire "(source non fournie)" et dans NOTES : "(n) source non fournie".
-
-INTERDICTION D’INVENTER :
-- Ne jamais inventer des articles numérotés, jurisprudences, auteurs ou ouvrages. Si incertain, le dire clairement.`;
+function normalizeDiscipline(ctx = {}) {
+  const d = String(ctx.discipline || ctx.field || ctx.faculty || ctx.department || "").trim();
+  if (!d) return "";
+  return d;
 }
 
-export function buildMemoirePlanPrompt({ lang, ctx }) {
-  const isEN = lang === "en";
-  const topic = ctx?.topic || "Sujet non précisé";
+function isLawDiscipline(ctx = {}) {
+  const d = normalizeDiscipline(ctx).toLowerCase();
+  return (
+    d.includes("droit") ||
+    d.includes("law") ||
+    d.includes("jurid") ||
+    d.includes("juris") ||
+    d.includes("legal")
+  );
+}
 
-  // ✅ Standard “international” structure (academic) while staying compatible with the extractor
-  // (we keep INTRO/PART/CHAP/SECTION/CONCLUSION/BIBLIO/ANNEX patterns).
-  return isEN
+function citationStyleLabel(lang, style) {
+  const s = String(style || "footnotes").toLowerCase();
+  if (lang === "en") {
+    return s === "apa" ? "APA (author-date)" : "Footnotes";
+  }
+  return s === "apa" ? "APA (auteur-date)" : "Notes de bas de page";
+}
+
+function lengthTarget(ctx = {}) {
+  const p = Number(ctx.lengthPagesTarget || 0);
+  if (Number.isFinite(p) && p > 0) return Math.max(50, Math.min(90, p));
+  return 55; // default: >=50 and faster than 70
+}
+
+export function academicSystemPrompt(lang = "fr", ctx = {}) {
+  const isEN = String(lang).toLowerCase() === "en";
+  const discipline = normalizeDiscipline(ctx) || (isEN ? "the requested discipline" : "la discipline demandée");
+  const pages = lengthTarget(ctx);
+  const cite = citationStyleLabel(isEN ? "en" : "fr", ctx.citationStyle);
+
+  const common = isEN
+    ? `You are a senior academic writing assistant.
+Write a rigorous Bachelor-level dissertation in ${discipline}.
+Tone: formal, structured, analytical.
+
+NON-NEGOTIABLE OUTPUT RULES:
+- Target a dissertation long enough to fill ~${pages} pages (A4, ~11pt). If content is short, EXPAND with substantive analysis (no filler, no repetition).
+- NO Markdown headings. Do NOT use #, ##, ###.
+- Use bold markers ONLY for headings/subheadings: **CHAPTER I: ...**, **Section 1: ...**, **Paragraph 1: ...**.
+
+CITATIONS:
+- Default citation style: ${cite}.
+- If a claim needs a source but none is provided, write: (source not provided).
+- NEVER invent statutes, cases, authors, books, or exact statistics.
+`
+    : `Tu es un assistant de rédaction académique senior.
+Rédige un mémoire de licence rigoureux en ${discipline}.
+Ton : académique, structuré, analytique.
+
+RÈGLES DE SORTIE (OBLIGATOIRES) :
+- Viser un mémoire suffisamment long pour remplir ~${pages} pages (A4, ~11pt). Si c’est trop court, DÉVELOPPER avec une analyse substantielle (pas de remplissage, pas de répétition).
+- AUCUN titre en Markdown. Ne pas utiliser #, ##, ###.
+- Titres / sous-titres uniquement en GRAS via **...** : **CHAPITRE I : ...**, **Section 1 : ...**, **Paragraphe 1 : ...**.
+
+CITATIONS :
+- Style par défaut : ${cite}.
+- Si une affirmation nécessite une source mais qu’aucune n’est fournie : écrire (source non fournie).
+- Interdiction d’inventer : lois/articles numérotés, jurisprudences, auteurs, ouvrages, statistiques précises.
+`;
+
+  // Extra guardrails for law (helps prevent law content in non-law topics)
+  if (isLawDiscipline(ctx)) {
+    return common +
+      (isEN
+        ? `
+LAW-SPECIFIC:
+- Use legal reasoning when relevant (norms, doctrine, jurisprudence) BUT do not invent references.
+`
+        : `
+SPÉCIFIQUE DROIT :
+- Utilise un raisonnement juridique (normes, doctrine, jurisprudence) seulement si pertinent, sans jamais inventer de références.
+`);
+  }
+
+  return common +
+    (isEN
+      ? `
+NON-LAW GUARDRAIL:
+- Do NOT turn the dissertation into a law thesis.
+- Do NOT introduce legal codes, statutes, jurisprudence unless the topic explicitly requires it.
+`
+      : `
+GARDE-FOU (HORS DROIT) :
+- Ne transforme PAS le mémoire en mémoire de droit.
+- N’introduis pas de codes/lois/jurisprudences sauf si le sujet l’exige explicitement.
+`);
+}
+
+export function buildMemoirePlanPrompt({ lang = "fr", ctx = {} }) {
+  const isEN = String(lang).toLowerCase() === "en";
+  const topic = String(ctx.topic || "").trim() || (isEN ? "Unspecified topic" : "Sujet non précisé");
+  const discipline = normalizeDiscipline(ctx) || (isEN ? "the requested discipline" : "la discipline demandée");
+  const pages = lengthTarget(ctx);
+
+  const baseRules = isEN
     ? `Create a detailed dissertation plan for: "${topic}".
+Discipline: ${discipline}.
 
 Format rules:
 - No Markdown headings.
-- Use bold markers for headings only: **ABSTRACT**, **GENERAL INTRODUCTION**, **PART I**, **CHAPTER I**, **Section 1**, etc.
+- Use bold markers for headings only: **GENERAL INTRODUCTION**, **PART I**, **CHAPTER I**, **Section 1**, etc.
 
-Required structure (no JSON):
-- **ABSTRACT (draft)**
-- **LIST OF ABBREVIATIONS (draft)**
-- **GENERAL INTRODUCTION** (context, problem statement, research questions, objectives, hypotheses, methodology, scope/limits)
-- **PART I** (Foundations: 2 chapters; each chapter with 2–3 sections)
-- **PART II** (Analysis & proposals: 2 chapters; each chapter with 2–3 sections)
-- **GENERAL CONCLUSION** (answers, limits, recommendations)
-- **BIBLIOGRAPHY (draft)**
-- **ANNEXES (draft)**
-
-The plan must be suitable for a FULL 70-page dissertation: include enough sub-sections to avoid short content.`
+The plan must be suitable for ~${pages} pages (include enough sections/subsections).
+Return plain text (no JSON).`
     : `Élabore un plan détaillé de mémoire pour : "${topic}".
+Discipline : ${discipline}.
 
 Règles de forme :
 - Pas de titres en Markdown.
-- Utiliser le GRAS uniquement pour les titres : **RÉSUMÉ**, **INTRODUCTION GÉNÉRALE**, **PARTIE I**, **CHAPITRE I**, **Section 1**, etc.
+- Utiliser le GRAS uniquement pour les titres : **INTRODUCTION GÉNÉRALE**, **PARTIE I**, **CHAPITRE I**, **Section 1**, etc.
 
-Structure obligatoire (pas de JSON) :
-- **RÉSUMÉ (brouillon)**
-- **LISTE DES SIGLES ET ABRÉVIATIONS (brouillon)**
-- **INTRODUCTION GÉNÉRALE** (contexte, problématique, questions, objectifs, hypothèses, méthodologie, délimitation)
-- **PARTIE I** (Fondements : 2 chapitres ; chaque chapitre avec 2–3 sections)
-- **PARTIE II** (Analyse & propositions : 2 chapitres ; chaque chapitre avec 2–3 sections)
-- **CONCLUSION GÉNÉRALE** (réponses, limites, recommandations)
-- **BIBLIOGRAPHIE (brouillon)**
-- **ANNEXES (brouillon)**
+Le plan doit permettre ~${pages} pages (prévoir suffisamment de sous-sections).
+Retourne du texte (pas de JSON).`;
 
-Le plan doit permettre un mémoire COMPLET de 70 pages : prévoir assez de sous-sections pour éviter un contenu trop court.`;
+  // Law plan template (classic)
+  if (isLawDiscipline(ctx)) {
+    return baseRules +
+      (isEN
+        ? `
+
+Required structure:
+- **GENERAL INTRODUCTION** (context, problem statement, objectives, research questions, methodology, scope)
+- **PART I** (2 chapters; each chapter with 2–3 sections)
+- **PART II** (2 chapters; each chapter with 2–3 sections)
+- **GENERAL CONCLUSION**
+- **BIBLIOGRAPHY**
+- **ANNEXES**`
+        : `
+
+Structure obligatoire :
+- **INTRODUCTION GÉNÉRALE** (contexte, problématique, objectifs, questions, méthodologie, délimitation)
+- **PARTIE I** (2 chapitres ; chaque chapitre avec 2–3 sections)
+- **PARTIE II** (2 chapitres ; chaque chapitre avec 2–3 sections)
+- **CONCLUSION GÉNÉRALE**
+- **BIBLIOGRAPHIE**
+- **ANNEXES**`);
+  }
+
+  // Non-law plan template (research oriented)
+  return baseRules +
+    (isEN
+      ? `
+
+Required structure:
+- **GENERAL INTRODUCTION** (background, problem statement, objectives, research questions/hypotheses, methodology)
+- **THEORETICAL / CONCEPTUAL FRAMEWORK**
+- **METHODOLOGY** (design, population/sample, data collection, analysis, ethics/limitations)
+- **RESULTS / FINDINGS** (organized by themes)
+- **DISCUSSION** (interpretation, implications)
+- **GENERAL CONCLUSION & RECOMMENDATIONS**
+- **REFERENCES**
+- **APPENDICES**`
+      : `
+
+Structure obligatoire :
+- **INTRODUCTION GÉNÉRALE** (contexte, problématique, objectifs, questions/hypothèses, méthodologie)
+- **CADRE THÉORIQUE / CONCEPTUEL**
+- **MÉTHODOLOGIE** (design, population/échantillon, collecte, analyse, éthique/limites)
+- **RÉSULTATS / CONSTATS** (par thèmes)
+- **DISCUSSION** (interprétation, implications)
+- **CONCLUSION GÉNÉRALE & RECOMMANDATIONS**
+- **RÉFÉRENCES**
+- **ANNEXES**`);
 }
 
-export function buildMemoireSectionPrompt({ lang, ctx, sectionTitle, sourcesText, endMarker, targetWords }) {
-  const isEN = lang === "en";
-  const topic = ctx?.topic || "Sujet non précisé";
-  const ps = ctx?.problemStatement || "";
-  const obj = ctx?.objectives || "";
+export function buildMemoireSectionPrompt({ lang = "fr", ctx = {}, sectionTitle, sourcesText, endMarker }) {
+  const isEN = String(lang).toLowerCase() === "en";
+  const topic = String(ctx.topic || "").trim() || (isEN ? "Unspecified topic" : "Sujet non précisé");
+  const discipline = normalizeDiscipline(ctx) || (isEN ? "the requested discipline" : "la discipline demandée");
+  const ps = String(ctx.problemStatement || "").trim();
+  const obj = String(ctx.objectives || "").trim();
+  const meth = String(ctx.methodology || "").trim();
+  const pages = lengthTarget(ctx);
 
-  // Mode label (UI-facing) — do not expose internal tech words to the user
-  const mode =
-    ctx?.mode === "qdrantLaw" ? (isEN ? "Congolese law mode" : "Mode droit congolais") : isEN ? "Standard mode" : "Mode standard";
+  const perSectionWords = Number(ctx.__sectionWordsTarget || 0);
+  const wordsHint = perSectionWords > 0
+    ? (isEN ? `Target length: ~${perSectionWords} words (adjust as needed).` : `Longueur cible : ~${perSectionWords} mots (ajuste si nécessaire).`)
+    : (isEN ? `Target length: develop enough to contribute to ~${pages} pages total.` : `Longueur : développer suffisamment pour contribuer à ~${pages} pages au total.`);
 
   const sourcesBlock = sourcesText
-    ? `
-
-SOURCES (use as evidence; do not invent):
-${sourcesText}
-`
+    ? `\n\nSOURCES (use as evidence; do not invent):\n${sourcesText}\n`
     : "";
-  const planHint = ctx?.plan ? `
 
-User plan:
-${ctx.plan}
-` : "";
+  const planHint = ctx.plan
+    ? `\n\nPlan (reference):\n${ctx.plan}\n`
+    : "";
 
   const marker = String(endMarker || "").trim();
-  const target = Number(targetWords || 0);
-  const targetLine = target
-    ? isEN
-      ? `Target length for THIS section: about ${target}–${Math.round(target * 1.15)} words (not less).`
-      : `Longueur cible pour CETTE section : environ ${target}–${Math.round(target * 1.15)} mots (pas moins).`
-    : "";
+
+  // Footnotes requirement only when footnotes mode (keeps APA compatibility)
+  const citeStyle = String(ctx.citationStyle || "footnotes").toLowerCase();
+  const footnotesBlock = citeStyle === "apa"
+    ? (isEN
+        ? `\nCITATION FORMAT:\n- Use APA author-date style when referencing provided sources (no invented references).\n- If a needed source is missing: write (source not provided).\n`
+        : `\nFORMAT DE CITATION :\n- Utilise APA (auteur-date) si tu cites des sources fournies (sans inventer).\n- Si une source manque : écrire (source non fournie).\n`)
+    : (isEN
+        ? `\nFOOTNOTES (default):\n- In-text markers: (1), (2), (3)...\n- End of section: "NOTES (FOOTNOTES)" listing each note.\n- If source missing: write (source not provided) and add the note "source not provided".\n`
+        : `\nNOTES DE BAS DE PAGE (par défaut) :\n- Appels dans le texte : (1), (2), (3)...\n- Fin de section : "NOTES DE BAS DE PAGE" listant chaque note.\n- Si source manquante : écrire (source non fournie) et ajouter la note correspondante.\n`);
+
+  const analysisGuidance = isLawDiscipline(ctx)
+    ? (isEN
+        ? `Write for a law dissertation: definitions, legal framework (only if sources/known), doctrinal debate (only if provided), practical issues, structured mini-conclusion.`
+        : `Écris pour un mémoire en droit : définitions, cadre juridique (sans inventer), débat doctrinal (si fourni), difficultés pratiques, mini-conclusion structurée.`)
+    : (isEN
+        ? `Write for a ${discipline} dissertation: definitions, conceptual/theoretical framing, methodology alignment, analysis of mechanisms and evidence, implications, structured mini-conclusion.`
+        : `Écris pour un mémoire en ${discipline} : définitions, cadre conceptuel/théorique, cohérence méthodologique, analyse des mécanismes et des preuves, implications, mini-conclusion structurée.`);
 
   return isEN
-    ? `Write the section: "${sectionTitle}" for a Bachelor law dissertation.
+    ? `Write the section: "${sectionTitle}" for a Bachelor dissertation in ${discipline}.
 
 Context:
 - Topic: ${topic}
 - Problem statement: ${ps}
 - Objectives: ${obj}
-- Mode: ${mode}
+- Methodology: ${meth}
 ${planHint}${sourcesBlock}
 
-Length requirement:
-- This dissertation must reach a FULL 70 pages overall. Do NOT be overly concise.
-${targetLine ? `- ${targetLine}` : ""}
-- Write a complete section with: definitions, doctrinal views (only if provided), legal/constitutional analysis, practical issues, and a structured mini-conclusion.
+Length:
+- ${wordsHint}
+- Do NOT be overly concise. Expand with substantive analysis.
 
 Formatting rules:
 - No Markdown headings (#, ##, ### prohibited).
-- Headings/subheadings must be bold with **...**:
-  **CHAPTER/CHAPITRE...**, **Section...**, **Paragraph...**
-- Use footnotes by default:
-  - In-text markers: (1), (2), (3)...
-  - End of section: "NOTES (FOOTNOTES)" listing each note.
+- Headings/subheadings must be bold with **...**.
+
+${analysisGuidance}
+${footnotesBlock}
 
 Strict ending rule:
 - End the section with the exact marker: ${marker}
 - Write NOTHING after the marker.
 
 Sources policy:
-- If SOURCES are provided, base claims on them and create footnotes referencing the relevant source text.
-- If a needed source is missing, write "(source not provided)" and add the corresponding note "source not provided".
-- Never invent legal articles, cases, or bibliographic entries.`
-    : `Rédige la section : "${sectionTitle}" pour un mémoire de licence en droit.
+- Use provided SOURCES if present; otherwise stay generic and mark missing citations as (source not provided).
+- Never invent laws/cases/authors/books/statistics.`
+    : `Rédige la section : "${sectionTitle}" pour un mémoire de licence en ${discipline}.
 
 Contexte :
 - Sujet : ${topic}
 - Problématique : ${ps}
 - Objectifs : ${obj}
-- Mode : ${mode}
+- Méthodologie : ${meth}
 ${planHint}${sourcesBlock}
 
-Exigence de longueur :
-- Le mémoire doit atteindre un TOTAL de 70 pages. Ne sois pas trop bref.
-${targetLine ? `- ${targetLine}` : ""}
-- Produis une section complète : définitions, points doctrinaux (seulement si fournis), analyse constitutionnelle/juridique, difficultés pratiques, mini-conclusion structurée.
+Longueur :
+- ${wordsHint}
+- Ne sois pas trop bref. Développe avec une analyse substantielle.
 
 Règles de forme :
-- Interdiction d’utiliser des titres Markdown (#, ##, ###).
-- Titres / sous-titres en GRAS via **...** :
-  **CHAPITRE...**, **Section...**, **Paragraphe...**
-- Notes de bas de page par défaut :
-  - Appels : (1), (2), (3)...
-  - Fin de section : "NOTES DE BAS DE PAGE" listant chaque note.
+- Interdiction des titres Markdown (#, ##, ###).
+- Titres / sous-titres en GRAS via **...**.
+
+${analysisGuidance}
+${footnotesBlock}
 
 Règle de fin stricte :
 - Termine la section par le marqueur exact : ${marker}
 - N'écris RIEN après le marqueur.
 
 Politique des sources :
-- Si des SOURCES sont fournies, fonder les affirmations dessus et ajouter des notes correspondantes.
-- Si une source manque : écrire "(source non fournie)" et ajouter la note "source non fournie".
-- Ne jamais inventer des articles numérotés, jurisprudences, auteurs ou ouvrages.`;
+- Utilise les SOURCES si elles existent ; sinon reste générique et marque les citations manquantes par (source non fournie).
+- Ne jamais inventer lois/jurisprudences/auteurs/ouvrages/statistiques.`;
 }
 
-
 export function buildMemoireRevisionPrompt({ lang = "fr", ctx = {}, title = "", sectionTitle = "Révision", draftChunk = "" }) {
+  const isEN = String(lang).toLowerCase() === "en";
   const c = ctx || {};
-  const topic = c.topic || title || "Mémoire";
+  const topic = String(c.topic || title || "Mémoire").trim();
+  const discipline = normalizeDiscipline(c) || (isEN ? "the requested discipline" : "la discipline demandée");
 
-  if (String(lang).toLowerCase().startsWith("en")) {
-    return `You are revising a draft dissertation. Improve language, structure, and depth while preserving meaning.
+  if (isEN) {
+    return `You are revising a draft dissertation in ${discipline}. Improve language, structure, and depth while preserving meaning.
 
 Context:
 - Topic: ${topic}
@@ -203,21 +296,20 @@ Context:
 
 TASK:
 - Correct grammar, spelling, style, and clarity.
-- Enrich with deeper explanations, better transitions, and academic tone.
-- Do NOT invent references, laws, cases, statistics. If you need a citation, write "(source not provided)" and add it in the footnotes.
+- Improve structure (better transitions, clear headings in **bold**), and deepen analysis.
+- Do NOT invent references, laws, cases, statistics. If you need a citation, write "(source not provided)".
 - Keep content faithful to the draft; you may reorganize for clarity.
 
 FORMAT:
 - No Markdown headings (#, ##, ###).
 - Headings/subheadings in bold via **...**.
-- Footnotes: markers (1), (2), ... and end with "NOTES (FOOTNOTES)".
 
 DRAFT TO REVISE:
 ${draftChunk}
 `;
   }
 
-  return `Tu es un relecteur académique et un rédacteur. Tu révises un mémoire brouillon pour le corriger et l’enrichir, tout en gardant le fond.
+  return `Tu es un relecteur académique et rédacteur. Tu révises un brouillon de mémoire en ${discipline} pour le corriger et l’enrichir, tout en gardant le fond.
 
 Contexte :
 - Sujet : ${topic}
@@ -225,21 +317,18 @@ Contexte :
 
 TÂCHE :
 - Corriger orthographe, grammaire, ponctuation, style.
-- Améliorer la structure (transitions, cohérence, titres), enrichir par des explications et une analyse plus profonde.
-- Ne pas inventer de références, lois, jurisprudences, chiffres. Si une source est nécessaire : écrire "(source non fournie)" et l’ajouter dans les notes.
+- Améliorer la structure (transitions, cohérence, titres en **gras**), enrichir par des explications et une analyse plus profonde.
+- Ne pas inventer de références, lois, jurisprudences, chiffres. Si une source est nécessaire : écrire "(source non fournie)".
 - Rester fidèle au contenu du brouillon ; tu peux réorganiser pour clarifier.
 
 FORMAT :
 - Interdiction des titres Markdown (#, ##, ###).
 - Titres/sous-titres en gras via **...**.
-- Notes: appels (1), (2), (3) ... et finir par "NOTES DE BAS DE PAGE".
 
 BROUILLON À RÉVISER :
 ${draftChunk}
 `;
 }
 
-
 // ✅ Backward-compat alias
 export const buildSectionPrompt = buildMemoireSectionPrompt;
-

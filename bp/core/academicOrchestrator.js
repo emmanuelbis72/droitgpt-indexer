@@ -78,16 +78,10 @@ async function generateSectionWithRetries({
   passagesText,
   temperature,
   maxTokensPerSection,
-  targetWords,
 }) {
-  // Retries are expensive (extra model calls). Keep minimal in production.
-  const attempts = Number(process.env.ACAD_SECTION_RETRIES || 1);
+  const attempts = Number(process.env.ACAD_SECTION_RETRIES || 2);
   const minChars = Number(process.env.ACAD_MIN_SECTION_CHARS || 2400);
   const hardMax = Number(process.env.ACAD_HARD_MAX_TOKENS || 6500);
-
-  // Continuations are also expensive. Keep to 1 by default.
-  const maxContinuations = Number(process.env.ACAD_MAX_CONTINUES_PER_SECTION || 1);
-  let usedContinuations = 0;
 
   // FAST guardrails (avoid too many extra calls)
   const longEnoughChars = Number(process.env.ACAD_LONG_ENOUGH_CHARS || 3200);
@@ -112,12 +106,11 @@ async function generateSectionWithRetries({
       sectionTitle: title,
       sourcesText: passagesText,
       endMarker: marker,
-      targetWords,
     });
 
     const content = await deepseekChat({
       messages: [
-        { role: "system", content: academicSystemPrompt(lang) },
+        { role: "system", content: academicSystemPrompt(lang, ctx) },
         { role: "user", content: prompt },
       ],
       temperature,
@@ -144,19 +137,13 @@ async function generateSectionWithRetries({
       return ensureNiceEnding(cleaned);
     }
 
-    // Otherwise: do ONE continuation attempt (bounded by env) in this loop iteration
-    if (usedContinuations >= maxContinuations) {
-      // Best effort: finalize locally to avoid extra latency.
-      return ensureNiceEnding(trimToLastPunct(cleaned));
-    }
-    usedContinuations += 1;
-
+    // Otherwise: do ONE continuation attempt in this loop iteration
     const tail = cleaned.slice(-900);
     const continuePrompt = buildContinuePrompt({ lang, title, marker, tail });
 
     const cont = await deepseekChat({
       messages: [
-        { role: "system", content: academicSystemPrompt(lang) },
+        { role: "system", content: academicSystemPrompt(lang, ctx) },
         { role: "user", content: continuePrompt },
       ],
       temperature,
@@ -229,7 +216,6 @@ function extractWritingUnits(planText, lang) {
 
     const match = isEN
       ? up.startsWith("GENERAL INTRO") ||
-        up.startsWith("ABSTRACT") ||
         up.startsWith("INTRO") ||
         up.startsWith("PART") ||
         up.startsWith("CHAPTER") ||
@@ -238,8 +224,6 @@ function extractWritingUnits(planText, lang) {
         up.startsWith("BIBLIO") ||
         up.startsWith("ANNEX")
       : up.startsWith("INTRO") ||
-        up.startsWith("RÉSUM") ||
-        up.startsWith("RESUM") ||
         up.startsWith("PARTIE") ||
         up.startsWith("CHAP") ||
         up.startsWith("SECTION") ||
@@ -254,36 +238,36 @@ function extractWritingUnits(planText, lang) {
     return isEN
       ? [
           "GENERAL INTRODUCTION",
-          "CHAPTER I: Concepts, Definition and Theoretical Framework",
-          "Section 1: The concept of the rule of law",
-          "Section 2: Principles and indicators",
-          "CHAPTER II: Constitutional foundations in the DRC",
-          "Section 1: Supremacy of the Constitution and legality",
-          "Section 2: Separation of powers and checks and balances",
-          "CHAPTER III: Institutional implementation challenges",
-          "Section 1: Judiciary independence and effectiveness",
-          "Section 2: Constitutional justice and enforcement",
-          "CHAPTER IV: Practical challenges and prospects",
-          "Section 1: Rights protection in times of crisis",
-          "Section 2: Governance, accountability and reforms",
+          "CHAPTER I: Literature Review and Theoretical Framework",
+          "Section 1: Key concepts and definitions",
+          "Section 2: Theoretical approaches and research model",
+          "CHAPTER II: Research Methodology",
+          "Section 1: Design, population, sampling",
+          "Section 2: Data collection and analysis plan",
+          "CHAPTER III: Results / Findings",
+          "Section 1: Descriptive results",
+          "Section 2: Thematic/analytical results",
+          "CHAPTER IV: Discussion and Recommendations",
+          "Section 1: Interpretation and comparison with literature",
+          "Section 2: Practical implications and recommendations",
           "GENERAL CONCLUSION",
           "BIBLIOGRAPHY (draft)",
           "ANNEXES (draft)",
         ]
       : [
           "INTRODUCTION GÉNÉRALE",
-          "CHAPITRE I : Notion et théorie de l’État de droit",
-          "Section 1 : Définition et approches doctrinales",
-          "Section 2 : Principes et indicateurs",
-          "CHAPITRE II : Fondements constitutionnels en RDC",
-          "Section 1 : Suprématie de la Constitution et légalité",
-          "Section 2 : Séparation des pouvoirs et contre-pouvoirs",
-          "CHAPITRE III : Obstacles institutionnels à l’effectivité",
-          "Section 1 : Indépendance et efficacité de la justice",
-          "Section 2 : Justice constitutionnelle et exécution",
-          "CHAPITRE IV : Défis pratiques et perspectives",
-          "Section 1 : Droits fondamentaux en période de crise",
-          "Section 2 : Gouvernance, redevabilité et réformes",
+          "CHAPITRE I : Revue de littérature et cadre théorique",
+          "Section 1 : Concepts clés et définitions",
+          "Section 2 : Approches théoriques et modèle d’analyse",
+          "CHAPITRE II : Méthodologie de recherche",
+          "Section 1 : Design, population, échantillonnage",
+          "Section 2 : Collecte des données et plan d’analyse",
+          "CHAPITRE III : Résultats / constats",
+          "Section 1 : Résultats descriptifs",
+          "Section 2 : Résultats analytiques / thématiques",
+          "CHAPITRE IV : Discussion et recommandations",
+          "Section 1 : Interprétation et confrontation à la littérature",
+          "Section 2 : Implications et recommandations",
           "CONCLUSION GÉNÉRALE",
           "BIBLIOGRAPHIE (brouillon)",
           "ANNEXES (brouillon)",
@@ -325,7 +309,7 @@ export async function reviseLicenceMemoireFromDraft({
   const planPrompt = buildMemoirePlanPrompt({ lang, ctx, topic: ctx?.topic || title });
   const plan = await deepseekChat({
     messages: [
-      { role: "system", content: academicSystemPrompt(lang) },
+      { role: "system", content: academicSystemPrompt(lang, ctx) },
       { role: "user", content: planPrompt },
     ],
     temperature,
@@ -350,7 +334,7 @@ export async function reviseLicenceMemoireFromDraft({
 
     const content = await deepseekChat({
       messages: [
-        { role: "system", content: academicSystemPrompt(lang) },
+        { role: "system", content: academicSystemPrompt(lang, ctx) },
         { role: "user", content: prompt },
       ],
       temperature,
@@ -374,7 +358,12 @@ export async function reviseLicenceMemoireFromDraft({
 export async function generateLicenceMemoire({ lang, ctx }) {
   const temperature = Number(process.env.ACAD_TEMPERATURE || 0.35);
   const safeCtx = { ...(ctx || {}) };
-  safeCtx.lengthPagesTarget = 70;
+
+  // ✅ Pages target (production): ensure >= 50 pages, allow override via ctx/env
+  const targetFromCtx = Number(safeCtx.lengthPagesTarget || 0);
+  const targetFromEnv = Number(process.env.ACAD_PAGES_TARGET || 55);
+  const pagesTarget = Math.max(50, Math.min(90, targetFromCtx || targetFromEnv || 55));
+  safeCtx.lengthPagesTarget = pagesTarget;
 
   const isCongoLawMode = ["droit_congolais", "qdrantLaw", "congo_law", "droitcongolais"].includes(
     String(safeCtx.mode || "").trim()
@@ -384,7 +373,7 @@ export async function generateLicenceMemoire({ lang, ctx }) {
   if (!plan) {
     plan = await deepseekChat({
       messages: [
-        { role: "system", content: academicSystemPrompt(lang) },
+        { role: "system", content: academicSystemPrompt(lang, safeCtx) },
         { role: "user", content: buildMemoirePlanPrompt({ lang, ctx: safeCtx }) },
       ],
       temperature,
@@ -394,61 +383,21 @@ export async function generateLicenceMemoire({ lang, ctx }) {
 
   const sectionTitles = extractWritingUnits(plan, lang);
 
-  // =========================================================
-  // ⚡ SPEED (production): the main driver is total output length + sequential calls.
-  // We:
-  // 1) Allocate token budgets by section *type* (intro/conclusion shorter, chapters heavier)
-  // 2) Generate sections with a small concurrency pool (default=2) while keeping final order
-  // =========================================================
+  // Used by prompts to keep sections realistically sized while reaching target pages.
+  // Typical page ≈ 300–330 words (12pt, 1.5 spacing). We use 320 as a pragmatic target.
+  const wordsTargetTotal = Math.max(16000, pagesTarget * 320);
+  safeCtx.__sectionWordsTarget = Math.max(700, Math.round(wordsTargetTotal / Math.max(sectionTitles.length, 1)));
+
   const tokensPerPage = Number(process.env.ACAD_TOKENS_PER_PAGE || 650);
-  const totalBudgetTokens = 70 * tokensPerPage;
-
+  const totalBudget = pagesTarget * tokensPerPage;
+  const perSectionBudget = Math.floor(totalBudget / Math.max(sectionTitles.length, 1));
   const hardMaxTokensPerSection = Number(process.env.ACAD_MAX_TOKENS_PER_SECTION || 4200);
-  const minTokensPerSection = Number(process.env.ACAD_MIN_TOKENS_PER_SECTION || 1500);
+  const maxTokensPerSection = Math.max(1800, Math.min(hardMaxTokensPerSection, perSectionBudget));
 
-  const weightFor = (t) => {
-    const up = String(t || "").toUpperCase();
-    if (up.includes("BIBLIO")) return 0.25;
-    if (up.includes("ANNEX")) return 0.35;
-    if (up.includes("RESUME") || up.includes("ABSTRACT")) return 0.45;
-    if (up.includes("INTRO")) return 0.65;
-    if (up.includes("CONCLUSION")) return 0.65;
-    if (up.startsWith("PART")) return 0.85;
-    if (up.startsWith("CHAPTER") || up.startsWith("CHAP")) return 1.15;
-    if (up.startsWith("SECTION")) return 1.0;
-    return 0.95;
-  };
-
-  const weights = sectionTitles.map(weightFor);
-  const weightSum = weights.reduce((a, b) => a + (Number(b) || 0), 0) || 1;
-
-  const budgetForIndex = (i) => {
-    const w = Number(weights[i] || 1);
-    const raw = Math.floor((totalBudgetTokens * w) / weightSum);
-    return Math.max(minTokensPerSection, Math.min(hardMaxTokensPerSection, raw));
-  };
-
-  // Rough token->words heuristic (kept simple on purpose)
-  const targetWordsForTokens = (tokens) => Math.max(450, Math.floor(Number(tokens || 0) * 0.75));
-
-  const concurrency = Math.max(1, Number(process.env.ACAD_CONCURRENCY || 2));
-
+  const sections = [];
   const sourcesUsed = [];
-  const results = new Array(sectionTitles.length);
 
-  // Small promise pool to avoid overloading the LLM / Render instance
-  const runPool = async (items, worker) => {
-    let idx = 0;
-    const runners = new Array(Math.min(concurrency, items.length)).fill(null).map(async () => {
-      while (idx < items.length) {
-        const cur = idx++;
-        await worker(items[cur], cur);
-      }
-    });
-    await Promise.all(runners);
-  };
-
-  await runPool(sectionTitles, async (title, i) => {
+  for (const title of sectionTitles) {
     let passagesText = "";
     if (isCongoLawMode) {
       const { sources, passages } = await searchCongoLawSources({
@@ -459,9 +408,6 @@ export async function generateLicenceMemoire({ lang, ctx }) {
       passagesText = formatPassagesForPrompt(passages);
     }
 
-    const maxTokensPerSection = budgetForIndex(i);
-    const targetWords = targetWordsForTokens(maxTokensPerSection);
-
     const content = await generateSectionWithRetries({
       lang,
       ctx: { ...safeCtx, plan },
@@ -469,33 +415,37 @@ export async function generateLicenceMemoire({ lang, ctx }) {
       passagesText,
       temperature,
       maxTokensPerSection,
-      targetWords,
     });
 
-    results[i] = { title, content };
-  });
-
-  const sections = results.filter(Boolean);
+    sections.push({ title, content });
+  }
 
   const totalChars = sections.reduce((acc, s) => acc + String(s?.content || "").length, 0);
-  const minTotalChars = Number(process.env.ACAD_MIN_TOTAL_CHARS || 140000);
+  // Rough char heuristic: ~2000 chars per page (varies widely). Use dynamic minimum.
+  const minTotalChars = Number(process.env.ACAD_MIN_TOTAL_CHARS || Math.round(pagesTarget * 2000));
   if (totalChars < minTotalChars) {
-    const extras = [
-      "ANNEXE A : Tableaux et indicateurs (brouillon)",
-      "ANNEXE B : Jurisprudence et décisions pertinentes (brouillon)",
-      "ANNEXE C : Textes légaux cités (brouillon)",
-      "ANNEXE D : Synthèse et recommandations opérationnelles (brouillon)",
-    ];
+    // ✅ Annexes must match the discipline. Law-specific annexes only in Congo law mode.
+    const extras = isCongoLawMode
+      ? [
+          "ANNEXE A : Tableau des textes légaux cités (brouillon)",
+          "ANNEXE B : Jurisprudence et décisions pertinentes (brouillon)",
+          "ANNEXE C : Commentaire doctrinal et notes de bas de page (brouillon)",
+          "ANNEXE D : Synthèse et recommandations opérationnelles (brouillon)",
+        ]
+      : [
+          "ANNEXE A : Outils de collecte (questionnaire / guide d'entretien) (brouillon)",
+          "ANNEXE B : Grille d'analyse et variables / indicateurs (brouillon)",
+          "ANNEXE C : Tableau de résultats (exemples) (brouillon)",
+          "ANNEXE D : Glossaire, limites et recommandations (brouillon)",
+        ];
     for (const t of extras) {
-      const extraTokens = Math.min(hardMaxTokensPerSection, Math.max(minTokensPerSection, 2200));
       const content = await generateSectionWithRetries({
         lang,
         ctx: { ...safeCtx, plan },
         title: t,
         passagesText: "",
         temperature,
-        maxTokensPerSection: extraTokens,
-        targetWords: targetWordsForTokens(extraTokens),
+        maxTokensPerSection,
       });
       sections.push({ title: t, content });
     }
