@@ -1,3 +1,4 @@
+import { PassThrough } from "stream";
 // business-plan-service/core/pdfAssembler.js
 import PDFDocument from "pdfkit";
 
@@ -1564,12 +1565,9 @@ function renderLineChart(doc, { title, labels, values }, styles) {
   doc.moveDown(2);
 }
 
-
 // =========================
 // ASYNC JOB SUPPORT: build PDF as Buffer (no HTTP response needed)
 // =========================
-// This helper lets the backend generate the PDF fully in-memory for /jobs/:id/download
-// without keeping the original HTTP request open.
 export async function buildBusinessPlanPdfPremiumBuffer({ title, ctx, sections }) {
   return new Promise((resolve, reject) => {
     try {
