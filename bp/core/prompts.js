@@ -160,11 +160,11 @@ ${draftBlock(lang, ctx)}
     executive_summary:
       lang === "en"
         ? `${ctxBlock}
-Write the Executive Summary (900–1200 words).
+Write the Executive Summary (650–900 words).
 Include: problem, solution, market logic (no fake stats), business model, traction, edge, risks, funding ask, milestones.
 Tone: investor-grade, concise.`
         : `${ctxBlock}
-Rédige l’Executive Summary (900–1200 mots).
+Rédige l’Executive Summary (650–900 mots).
 Inclure: problème, solution, logique de marché (sans stats inventées), modèle, traction, avantage, risques, financement, jalons.
 Ton: investisseur, concis.`,
 
@@ -176,14 +176,14 @@ Write Market Analysis:
 - sizing logic (ranges + assumptions)
 - trends & local realities
 - competitive landscape
-Length: 900–1400 words.`
+Length: 650–1000 words.`
         : `${ctxBlock}
 Rédige l’Analyse du marché:
 - segmentation
 - dimensionnement (fourchettes + hypothèses)
 - tendances & réalités locales
 - concurrence
-Longueur: 900–1400 mots.`,
+Longueur: 650–1000 mots.`,
 
     business_model:
       lang === "en"
@@ -194,7 +194,7 @@ Write the Business Model section:
 - unit economics assumptions
 - distribution
 - partnerships
-Length: 800–1200 words.`
+Length: 600–900 words.`
         : `${ctxBlock}
 Rédige le Modèle économique:
 - revenus
@@ -202,7 +202,7 @@ Rédige le Modèle économique:
 - unit economics (haut niveau)
 - distribution
 - partenariats
-Longueur: 800–1200 mots.`,
+Longueur: 600–900 mots.`,
 
     canvas_json:
       lang === "en"
@@ -274,7 +274,7 @@ Write Go-To-Market Strategy:
 - partnerships
 - timeline (next 12–18 months)
 - KPIs (list)
-Length: 900–1400 words.`
+Length: 600–900 words.`
         : `${ctxBlock}
 Rédige la Stratégie Go-To-Market:
 - canaux
@@ -283,7 +283,7 @@ Rédige la Stratégie Go-To-Market:
 - partenariats
 - calendrier (12–18 mois)
 - KPIs (liste)
-Longueur: 900–1400 mots.`,
+Longueur: 600–900 mots.`,
 
     kpi_calendar_json:
       lang === "en"
@@ -328,7 +328,7 @@ Write Operations Plan:
 - logistics
 - compliance
 - scalability
-Length: 900–1400 words.`
+Length: 650–1000 words.`
         : `${ctxBlock}
 Rédige le Plan d’opérations:
 - chaîne de valeur
@@ -337,14 +337,14 @@ Rédige le Plan d’opérations:
 - logistique
 - conformité
 - passage à l’échelle
-Longueur: 900–1400 mots.`,
+Longueur: 650–1000 mots.`,
 
     risks:
       lang === "en"
         ? `${ctxBlock}
-Write Risks & Mitigation (800–1200 words). Provide practical actions.`
+Write Risks & Mitigation (600–900 words). Provide practical actions.`
         : `${ctxBlock}
-Rédige Risques & mitigations (800–1200 mots). Mitigations pratiques.`,
+Rédige Risques & mitigations (600–900 mots). Mitigations pratiques.`,
 
     financials_json:
       lang === "en"

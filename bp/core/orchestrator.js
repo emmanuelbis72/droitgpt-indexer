@@ -12,14 +12,45 @@ import { systemPrompt, sectionPrompt, SECTION_ORDER } from "./prompts.js";
 export async function generateBusinessPlanPremium({ lang, ctx, lite = false }) {
   const temperature = Number(process.env.BP_TEMPERATURE || 0.25);
 
-  // ✅ Default raised for better content; you can override in env
-  // Recommended: 4200–6000 for speed, 7000–9000 for max detail
-  const maxSectionTokens = Number(process.env.BP_MAX_SECTION_TOKENS || 5200);
+  /**
+   * ⚡ SPEED (production): the biggest latency driver is output length.
+   * - We reduce default max_tokens and reduce/avoid expensive CONTINUE/JSON retries.
+   * - Env vars still allow "max detail" when needed.
+   */
+  const maxSectionTokensDefault = Number(process.env.BP_MAX_SECTION_TOKENS || 3600);
 
-  // ✅ Fast + safe defaults (override via env)
-  const sectionRetries = Number(process.env.BP_SECTION_RETRIES || 1); // max "CONTINUE" calls
-  const minSectionChars = Number(process.env.BP_MIN_SECTION_CHARS || 900); // avoid too-short sections
-  const longEnoughChars = Number(process.env.BP_LONG_ENOUGH_CHARS || 2200); // if reached, avoid extra CONTINUE
+  // Text continuation (extra LLM calls) => keep to 0 by default
+  const sectionRetries = Number(process.env.BP_SECTION_RETRIES || 0);
+
+  // JSON retries (extra LLM calls) => keep to 1 by default
+  const jsonRetries = Number(process.env.BP_JSON_RETRIES || 1);
+
+  // Lower thresholds => fewer CONTINUE calls => faster, while still avoiding broken endings
+  const minSectionChars = Number(process.env.BP_MIN_SECTION_CHARS || 650);
+  const longEnoughChars = Number(process.env.BP_LONG_ENOUGH_CHARS || 1500);
+
+  // Per-section token budgets (still overridable via env)
+  const sectionMaxTokens = (key) => {
+    const k = String(key || "").toLowerCase();
+
+    // JSON sections: smaller is enough (strict schema)
+    if (["financials_json", "canvas_json", "swot_json", "kpi_calendar_json"].includes(k)) {
+      return Math.min(maxSectionTokensDefault, Number(process.env.BP_MAX_TOKENS_JSON || 2600));
+    }
+
+    // Executive summary is usually heavier
+    if (k === "executive_summary") {
+      return Math.min(maxSectionTokensDefault, Number(process.env.BP_MAX_TOKENS_EXEC || 3800));
+    }
+
+    // Mid sections
+    if (["market_analysis", "go_to_market", "operations"].includes(k)) {
+      return Math.min(maxSectionTokensDefault, Number(process.env.BP_MAX_TOKENS_MID || 3400));
+    }
+
+    // Default text
+    return Math.min(maxSectionTokensDefault, Number(process.env.BP_MAX_TOKENS_TEXT || 3200));
+  };
 
   // ✅ Mode lite rapide
   const order = lite
@@ -38,8 +69,8 @@ export async function generateBusinessPlanPremium({ lang, ctx, lite = false }) {
         lang,
         ctx,
         temperature,
-        max_tokens: maxSectionTokens,
-        retries: Number(process.env.BP_JSON_RETRIES || 2),
+        max_tokens: sectionMaxTokens(key),
+        retries: jsonRetries,
       });
 
       const obj = safeJsonParse(extractJsonBlock(raw));
@@ -70,7 +101,7 @@ export async function generateBusinessPlanPremium({ lang, ctx, lite = false }) {
       lang,
       ctx,
       temperature,
-      max_tokens: maxSectionTokens,
+      max_tokens: sectionMaxTokens(key),
       retries: sectionRetries,
       minChars: minSectionChars,
       longEnoughChars,
@@ -106,9 +137,9 @@ async function generateTextSectionWithContinuation({
   ctx,
   temperature,
   max_tokens,
-  retries = 1,
-  minChars = 900,
-  longEnoughChars = 2200,
+  retries = 0,
+  minChars = 650,
+  longEnoughChars = 1500,
 }) {
   const marker = `[[END_SECTION:${key}]]`;
 
