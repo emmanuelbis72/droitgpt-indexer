@@ -1,5 +1,4 @@
 import express from 'express';
-import cors from 'cors';
 import dotenv from 'dotenv';
 import generatePdfRoute from './generatePdf.js';
 import generateBusinessPlanRoute from './routes/generateBusinessPlan.js';
@@ -9,6 +8,10 @@ dotenv.config();
 
 const app = express();
 
+/* =========================================================
+   CORS (single source of truth)
+   - No duplicate CORS middleware
+========================================================= */
 const allowedOriginPatterns = [
   /^http:\/\/localhost:\d+$/i,
   /^http:\/\/127\.0\.0\.1:\d+$/i,
@@ -17,6 +20,7 @@ const allowedOriginPatterns = [
 ];
 
 function isAllowedOrigin(origin) {
+  // Allow non-browser calls (curl, powershell, server-to-server)
   if (!origin) return true;
   return allowedOriginPatterns.some((p) => p.test(origin));
 }
@@ -25,8 +29,11 @@ app.use((req, res, next) => {
   const origin = req.headers.origin;
 
   if (isAllowedOrigin(origin)) {
+    // If Origin is present, echo it back (best practice for credentials)
     if (origin) res.setHeader('Access-Control-Allow-Origin', origin);
     else res.setHeader('Access-Control-Allow-Origin', '*');
+
+    // Prevent cache poisoning across origins
     res.setHeader('Vary', 'Origin');
   }
 
@@ -41,14 +48,16 @@ app.use((req, res, next) => {
 
 const PORT = process.env.PORT || 5001;
 
-app.use(cors());
+// Body parsing
 app.use(express.json({ limit: '10mb' }));
 
+// Routes
 app.use('/generate-pdf', generatePdfRoute);
 app.use('/generate-business-plan', generateBusinessPlanRoute);
 app.use('/generate-academic', generateLicenceMemoireRoute);
 app.use('/generate-memoire', generateLicenceMemoireRoute);
 
+// Download helper (TXT)
 app.post('/download-business-plan', (req, res) => {
   try {
     const raw = req.body?.content;
@@ -79,6 +88,7 @@ app.post('/download-business-plan', (req, res) => {
   }
 });
 
+// Health
 app.get('/', (_req, res) => {
   res.json({
     ok: true,
@@ -86,6 +96,9 @@ app.get('/', (_req, res) => {
     endpoints: [
       '/generate-business-plan',
       '/generate-business-plan/premium',
+      '/generate-business-plan/premium?async=1',
+      '/generate-business-plan/premium/jobs/:id',
+      '/generate-business-plan/premium/jobs/:id/result',
       '/generate-memoire',
       '/generate-academic/licence-memoire',
       '/download-business-plan',
@@ -93,6 +106,7 @@ app.get('/', (_req, res) => {
   });
 });
 
+// 404
 app.use((req, res) => {
   res.status(404).json({
     error: 'NOT_FOUND',
@@ -101,6 +115,7 @@ app.use((req, res) => {
   });
 });
 
+// Error handler
 app.use((err, req, res, _next) => {
   console.error('Unhandled error:', err);
 
