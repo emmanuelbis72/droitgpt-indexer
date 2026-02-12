@@ -1563,3 +1563,28 @@ function renderLineChart(doc, { title, labels, values }, styles) {
   doc.stroke();
   doc.moveDown(2);
 }
+
+
+// =========================
+// ASYNC JOB SUPPORT: build PDF as Buffer (no HTTP response needed)
+// =========================
+// This helper lets the backend generate the PDF fully in-memory for /jobs/:id/download
+// without keeping the original HTTP request open.
+export async function buildBusinessPlanPdfPremiumBuffer({ title, ctx, sections }) {
+  return new Promise((resolve, reject) => {
+    try {
+      const pass = new PassThrough();
+      // writeBusinessPlanPdfPremium expects an Express-like response with setHeader()
+      pass.setHeader = () => {};
+
+      const chunks = [];
+      pass.on("data", (c) => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)));
+      pass.on("error", reject);
+      pass.on("end", () => resolve(Buffer.concat(chunks)));
+
+      writeBusinessPlanPdfPremium({ res: pass, title, ctx, sections });
+    } catch (e) {
+      reject(e);
+    }
+  });
+}

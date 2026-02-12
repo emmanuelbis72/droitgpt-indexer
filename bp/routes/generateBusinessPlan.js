@@ -1,8 +1,13 @@
-﻿import express from "express";
+import express from "express";
 import multer from "multer";
 import path from "path";
+import crypto from "crypto";
+
 import { generateBusinessPlanPremium } from "../core/orchestrator.js";
-import { writeBusinessPlanPdfPremium } from "../core/pdfAssembler.js";
+import {
+  writeBusinessPlanPdfPremium,
+  buildBusinessPlanPdfPremiumBuffer,
+} from "../core/pdfAssembler.js";
 import {
   normalizeLang,
   normalizeDocType,
@@ -14,7 +19,9 @@ const router = express.Router();
 
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: Number(process.env.BP_DRAFT_MAX_BYTES || 15 * 1024 * 1024) },
+  limits: {
+    fileSize: Number(process.env.BP_DRAFT_MAX_BYTES || 15 * 1024 * 1024),
+  },
 });
 
 function safeFilenameBase(name) {
@@ -27,7 +34,10 @@ function safeFilenameBase(name) {
 function truncateText(s, maxChars) {
   const t = String(s || "").replace(/\u0000/g, "");
   if (t.length <= maxChars) return t;
-  return t.slice(0, maxChars) + `\n\n[...TRONQUE: ${t.length - maxChars} caracteres...]`;
+  return (
+    t.slice(0, maxChars) +
+    `\n\n[...TRONQUE: ${t.length - maxChars} caracteres...]`
+  );
 }
 
 async function extractDraftTextFromUpload(file) {
@@ -73,11 +83,14 @@ async function extractDraftTextFromUpload(file) {
 function premiumHealth(_req, res) {
   res.json({
     ok: true,
-    message: "Endpoint premium OK. Utilise POST pour generer le business plan (pdf/json).",
+    message:
+      "Endpoint premium OK. Utilise POST pour generer le business plan (pdf/json).",
+    asyncMode:
+      "Ajoute ?async=1 pour recevoir un jobId puis utilise /jobs/:id/status et /jobs/:id/download",
     example: {
       method: "POST",
-      url: "/generate-business-plan/premium",
-      body: { lang: "fr", companyName: "TEST", output: "json" },
+      url: "/generate-business-plan/premium?async=1",
+      body: { lang: "fr", companyName: "TEST" },
     },
   });
 }
@@ -85,6 +98,7 @@ function premiumHealth(_req, res) {
 async function premiumGenerate(req, res) {
   try {
     const b = req.body || {};
+    const asyncMode = String(req.query?.async || "") === "1";
 
     if (b?.test === true) {
       return res.json({ ok: true, message: "Route premium OK (test mode)" });
@@ -118,6 +132,70 @@ async function premiumGenerate(req, res) {
     const output = String(b.output || "pdf").toLowerCase();
     const lite = Boolean(b.lite);
 
+    // ----------------------------
+    // ✅ ASYNC JOB MODE
+    // ----------------------------
+    if (asyncMode) {
+      const jobId =
+        (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}_${Math.random()}`)
+          .toString()
+          .replace(/-/g, "");
+
+      const filename = `${safeFilenameBase(ctx.companyName)}_BusinessPlan_Premium.pdf`;
+
+      // job store is created in server.js (app.locals.jobs)
+      const jobs = req.app.locals.jobs;
+      if (!jobs) {
+        return res.status(500).json({
+          error: "JOBS_NOT_AVAILABLE",
+          details:
+            "Le job store n'est pas initialisé. Vérifie server.js (app.locals.jobs).",
+        });
+      }
+
+      jobs.set(jobId, {
+        id: jobId,
+        status: "queued",
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        filename,
+        buffer: null,
+        error: "",
+      });
+
+      // respond immediately
+      res.json({ jobId });
+
+      // run generation in background (same process)
+      (async () => {
+        const j = jobs.get(jobId);
+        if (!j) return;
+        j.status = "running";
+        j.updatedAt = Date.now();
+
+        try {
+          const { sections } = await generateBusinessPlanPremium({ lang, ctx, lite });
+          const pdfBuffer = await buildBusinessPlanPdfPremiumBuffer({
+            title,
+            ctx,
+            sections,
+          });
+          j.buffer = pdfBuffer;
+          j.status = "done";
+          j.updatedAt = Date.now();
+        } catch (e) {
+          j.error = String(e?.message || e);
+          j.status = "failed";
+          j.updatedAt = Date.now();
+        }
+      })();
+
+      return;
+    }
+
+    // ----------------------------
+    // ✅ SYNC MODE (existant)
+    // ----------------------------
     const { sections, fullText } = await generateBusinessPlanPremium({
       lang,
       ctx,
@@ -128,12 +206,7 @@ async function premiumGenerate(req, res) {
       return res.json({ title, lang, ctx, lite, sections, fullText });
     }
 
-    return writeBusinessPlanPdfPremium({
-      res,
-      title,
-      ctx,
-      sections,
-    });
+    return writeBusinessPlanPdfPremium({ res, title, ctx, sections });
   } catch (e) {
     console.error("/generate-business-plan error:", e);
     return res.status(500).json({
@@ -153,12 +226,16 @@ async function premiumRewrite(req, res) {
     if (req.file) draftText = await extractDraftTextFromUpload(req.file);
     else draftText = String(b.text || "");
 
-    draftText = truncateText(draftText, Number(process.env.BP_DRAFT_MAX_CHARS || 14000)).trim();
+    draftText = truncateText(
+      draftText,
+      Number(process.env.BP_DRAFT_MAX_CHARS || 14000)
+    ).trim();
 
     if (!draftText) {
       return res.status(400).json({
         error: "BROUILLON_VIDE",
-        details: "Importe un fichier (PDF/DOCX/TXT) OU colle le texte du brouillon dans le champ 'text'.",
+        details:
+          "Importe un fichier (PDF/DOCX/TXT) OU colle le texte du brouillon dans le champ 'text'.",
       });
     }
 
@@ -196,12 +273,7 @@ async function premiumRewrite(req, res) {
     });
 
     res.setHeader("X-BP-Mode", "rewrite");
-    return writeBusinessPlanPdfPremium({
-      res,
-      title,
-      ctx,
-      sections,
-    });
+    return writeBusinessPlanPdfPremium({ res, title, ctx, sections });
   } catch (e) {
     console.error("/generate-business-plan/rewrite error:", e);
     return res.status(500).json({
