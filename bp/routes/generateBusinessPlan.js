@@ -1,13 +1,9 @@
-import express from "express";
+﻿import express from "express";
 import multer from "multer";
 import path from "path";
-import crypto from "crypto";
 
 import { generateBusinessPlanPremium } from "../core/orchestrator.js";
-import {
-  writeBusinessPlanPdfPremium,
-  buildBusinessPlanPdfPremiumBuffer,
-} from "../core/pdfAssembler.js";
+import { writeBusinessPlanPdfPremium } from "../core/pdfAssembler.js";
 import {
   normalizeLang,
   normalizeDocType,
@@ -51,8 +47,9 @@ async function extractDraftTextFromUpload(file) {
       const out = await mammoth.extractRawText({ buffer: file.buffer });
       return String(out?.value || "");
     } catch (e) {
+      const msg = String(e?.message || e);
       throw new Error(
-        `DOCX_EXTRACT_FAILED: ${String(e?.message || e)}. Installe 'mammoth' (npm i mammoth) ou colle le texte.`
+        `DOCX_EXTRACT_FAILED: ${msg}. Installe 'mammoth' (npm i mammoth) ou colle le texte.`
       );
     }
   }
@@ -64,8 +61,9 @@ async function extractDraftTextFromUpload(file) {
       const data = await pdfParse(file.buffer);
       return String(data?.text || "");
     } catch (e) {
+      const msg = String(e?.message || e);
       throw new Error(
-        `PDF_EXTRACT_FAILED: ${String(e?.message || e)}. Installe 'pdf-parse' (npm i pdf-parse) ou exporte en DOCX/TXT.`
+        `PDF_EXTRACT_FAILED: ${msg}. Installe 'pdf-parse' (npm i pdf-parse) ou exporte en DOCX/TXT.`
       );
     }
   }
@@ -73,18 +71,25 @@ async function extractDraftTextFromUpload(file) {
   return file.buffer.toString("utf-8");
 }
 
-router.get(["/", "/premium"], (_req, res) => {
+function premiumHealth(_req, res) {
   res.json({
     ok: true,
-    message: "Endpoint premium OK.",
-    asyncMode: "POST /generate-business-plan/premium?async=1 -> jobId, puis /jobs/:id/status et /jobs/:id/download",
+    message: "Endpoint premium OK. Utilise POST pour generer le business plan (pdf/json).",
+    example: {
+      method: "POST",
+      url: "/generate-business-plan/premium",
+      body: { lang: "fr", companyName: "TEST", output: "json" },
+    },
   });
-});
+}
 
-router.post(["/", "/premium"], async (req, res) => {
+async function premiumGenerate(req, res) {
   try {
     const b = req.body || {};
-    const asyncMode = String(req.query?.async || "") === "1";
+
+    if (b?.test === true) {
+      return res.json({ ok: true, message: "Route premium OK (test mode)" });
+    }
 
     const lang = normalizeLang(b.lang || process.env.BP_LANG_DEFAULT || "fr");
 
@@ -114,64 +119,22 @@ router.post(["/", "/premium"], async (req, res) => {
     const output = String(b.output || "pdf").toLowerCase();
     const lite = Boolean(b.lite);
 
-    // -------- ASYNC JOB MODE --------
-    if (asyncMode) {
-      const jobId = (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}${Math.random().toString(16).slice(2)}`)
-        .replace(/-/g, "");
-      const filename = `${safeFilenameBase(ctx.companyName)}_BusinessPlan_Premium.pdf`;
-
-      req.app.locals.jobs.set(jobId, {
-        id: jobId,
-        status: "queued",
-        createdAt: Date.now(),
-        updatedAt: Date.now(),
-        filename,
-        buffer: null,
-        error: "",
-      });
-
-      // Respond immediately
-      res.json({ jobId });
-
-      // Generate in the background (same process)
-      (async () => {
-        const j = req.app.locals.jobs.get(jobId);
-        if (!j) return;
-
-        j.status = "running";
-        j.updatedAt = Date.now();
-
-        try {
-          const { sections, fullText } = await generateBusinessPlanPremium({ lang, ctx, lite });
-
-          if (output === "json") {
-            // In async mode, JSON output is stored as a PDF is expected by the UI.
-            // Keep it simple: still generate PDF; JSON mode should be used in sync.
-          }
-
-          const pdfBuffer = await buildBusinessPlanPdfPremiumBuffer({ title, ctx, sections });
-
-          j.buffer = pdfBuffer;
-          j.status = "done";
-          j.updatedAt = Date.now();
-        } catch (e) {
-          j.error = String(e?.message || e);
-          j.status = "failed";
-          j.updatedAt = Date.now();
-        }
-      })();
-
-      return;
-    }
-
-    // -------- SYNC MODE (existing) --------
-    const { sections, fullText } = await generateBusinessPlanPremium({ lang, ctx, lite });
+    const { sections, fullText } = await generateBusinessPlanPremium({
+      lang,
+      ctx,
+      lite,
+    });
 
     if (output === "json") {
       return res.json({ title, lang, ctx, lite, sections, fullText });
     }
 
-    return writeBusinessPlanPdfPremium({ res, title, ctx, sections });
+    return writeBusinessPlanPdfPremium({
+      res,
+      title,
+      ctx,
+      sections,
+    });
   } catch (e) {
     console.error("/generate-business-plan error:", e);
     return res.status(500).json({
@@ -179,12 +142,12 @@ router.post(["/", "/premium"], async (req, res) => {
       details: String(e?.message || e),
     });
   }
-});
+}
 
-// Optional: rewrite endpoint (kept if your UI uses it)
-router.post(["/rewrite", "/premium/rewrite"], upload.single("file"), async (req, res) => {
+async function premiumRewrite(req, res) {
   try {
     const b = req.body || {};
+
     const lang = normalizeLang(b.lang || process.env.BP_LANG_DEFAULT || "fr");
 
     let draftText = "";
@@ -196,7 +159,7 @@ router.post(["/rewrite", "/premium/rewrite"], upload.single("file"), async (req,
     if (!draftText) {
       return res.status(400).json({
         error: "BROUILLON_VIDE",
-        details: "Importe un fichier (PDF/DOCX/TXT) OU colle le texte du brouillon dans 'text'.",
+        details: "Importe un fichier (PDF/DOCX/TXT) OU colle le texte du brouillon dans le champ 'text'.",
       });
     }
 
@@ -216,7 +179,6 @@ router.post(["/rewrite", "/premium/rewrite"], upload.single("file"), async (req,
       risks: safeStr(b.risks, 2500),
       finAssumptions: safeStr(b.finAssumptions, 3500),
       fundingAsk: safeStr(b.fundingAsk, 2500),
-
       draftText,
       rewriteNotes: safeStr(b.notes || "", 2500),
       mode: "rewrite",
@@ -228,10 +190,19 @@ router.post(["/rewrite", "/premium/rewrite"], upload.single("file"), async (req,
         ? `${safeName} - Business Plan (Premium, Revised)`
         : `${safeName} - Plan d'affaires (Premium, corrige)`;
 
-    const { sections } = await generateBusinessPlanPremium({ lang, ctx, lite: false });
+    const { sections } = await generateBusinessPlanPremium({
+      lang,
+      ctx,
+      lite: false,
+    });
 
     res.setHeader("X-BP-Mode", "rewrite");
-    return writeBusinessPlanPdfPremium({ res, title, ctx, sections });
+    return writeBusinessPlanPdfPremium({
+      res,
+      title,
+      ctx,
+      sections,
+    });
   } catch (e) {
     console.error("/generate-business-plan/rewrite error:", e);
     return res.status(500).json({
@@ -239,6 +210,10 @@ router.post(["/rewrite", "/premium/rewrite"], upload.single("file"), async (req,
       details: String(e?.message || e),
     });
   }
-});
+}
+
+router.get(["/", "/premium"], premiumHealth);
+router.post(["/", "/premium"], premiumGenerate);
+router.post(["/rewrite", "/premium/rewrite"], upload.single("file"), premiumRewrite);
 
 export default router;
