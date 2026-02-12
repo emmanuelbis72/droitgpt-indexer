@@ -4,20 +4,19 @@ import { systemPrompt, sectionPrompt, SECTION_ORDER } from "./prompts.js";
 
 /**
  * Premium orchestration:
- * - Generates each section
+ * - Generates each section (sequential for determinism + resource control)
  * - JSON sections are parsed + normalized (especially financials)
- * - Text sections are protected against truncation (END marker + smart auto-continue)
- * - Fast mode: continue ONLY when truly necessary (reduces generation time)
+ * - Text sections are protected against truncation (END marker + smart local cleanup)
+ * - SPEED: reduce output length + avoid extra IA calls (CONTINUE / retries)
  */
 export async function generateBusinessPlanPremium({ lang, ctx, lite = false }) {
-  const temperature = Number(process.env.BP_TEMPERATURE || 0.25);
+  const temperature = Number(process.env.BP_TEMPERATURE || 0.2);
 
   /**
-   * ⚡ SPEED (production): the biggest latency driver is output length.
-   * - We reduce default max_tokens and reduce/avoid expensive CONTINUE/JSON retries.
-   * - Env vars still allow "max detail" when needed.
+   * ⚡ SPEED (production): biggest latency driver is output length (tokens).
+   * Keep env overrides for "max detail".
    */
-  const maxSectionTokensDefault = Number(process.env.BP_MAX_SECTION_TOKENS || 3600);
+  const maxSectionTokensDefault = Number(process.env.BP_MAX_SECTION_TOKENS || 2800);
 
   // Text continuation (extra LLM calls) => keep to 0 by default
   const sectionRetries = Number(process.env.BP_SECTION_RETRIES || 0);
@@ -25,36 +24,49 @@ export async function generateBusinessPlanPremium({ lang, ctx, lite = false }) {
   // JSON retries (extra LLM calls) => keep to 1 by default
   const jsonRetries = Number(process.env.BP_JSON_RETRIES || 1);
 
-  // Lower thresholds => fewer CONTINUE calls => faster, while still avoiding broken endings
-  const minSectionChars = Number(process.env.BP_MIN_SECTION_CHARS || 650);
-  const longEnoughChars = Number(process.env.BP_LONG_ENOUGH_CHARS || 1500);
+  /**
+   * Lower thresholds => fewer CONTINUE calls => faster
+   * (still protects against broken endings with local cleanup)
+   */
+  const minSectionChars = Number(process.env.BP_MIN_SECTION_CHARS || 450);
+  const longEnoughChars = Number(process.env.BP_LONG_ENOUGH_CHARS || 1100);
 
   // Per-section token budgets (still overridable via env)
   const sectionMaxTokens = (key) => {
     const k = String(key || "").toLowerCase();
 
-    // JSON sections: smaller is enough (strict schema)
+    // JSON sections: smaller is enough (strict schema + compact tables)
     if (["financials_json", "canvas_json", "swot_json", "kpi_calendar_json"].includes(k)) {
-      return Math.min(maxSectionTokensDefault, Number(process.env.BP_MAX_TOKENS_JSON || 2600));
+      return Math.min(maxSectionTokensDefault, Number(process.env.BP_MAX_TOKENS_JSON || 1900));
     }
 
-    // Executive summary is usually heavier
+    // Executive summary: concise, standard (should NOT be huge)
     if (k === "executive_summary") {
-      return Math.min(maxSectionTokensDefault, Number(process.env.BP_MAX_TOKENS_EXEC || 3800));
+      return Math.min(maxSectionTokensDefault, Number(process.env.BP_MAX_TOKENS_EXEC || 2000));
     }
 
-    // Mid sections
+    // Market / GTM / Ops: mid
     if (["market_analysis", "go_to_market", "operations"].includes(k)) {
-      return Math.min(maxSectionTokensDefault, Number(process.env.BP_MAX_TOKENS_MID || 3400));
+      return Math.min(maxSectionTokensDefault, Number(process.env.BP_MAX_TOKENS_MID || 2200));
+    }
+
+    // Competition can be shorter
+    if (k === "competition_analysis") {
+      return Math.min(maxSectionTokensDefault, Number(process.env.BP_MAX_TOKENS_COMP || 1800));
+    }
+
+    // Risks + funding ask: keep compact
+    if (["risks", "funding_ask", "strategic_partnerships"].includes(k)) {
+      return Math.min(maxSectionTokensDefault, Number(process.env.BP_MAX_TOKENS_SHORT || 1700));
     }
 
     // Default text
-    return Math.min(maxSectionTokensDefault, Number(process.env.BP_MAX_TOKENS_TEXT || 3200));
+    return Math.min(maxSectionTokensDefault, Number(process.env.BP_MAX_TOKENS_TEXT || 2000));
   };
 
-  // ✅ Mode lite rapide
+  // ✅ Mode lite rapide (still international-structure-compatible)
   const order = lite
-    ? ["canvas_json", "swot_json", "kpi_calendar_json", "financials_json", "funding_ask"]
+    ? ["executive_summary", "canvas_json", "swot_json", "financials_json", "funding_ask"]
     : SECTION_ORDER;
 
   const sections = [];
@@ -138,8 +150,8 @@ async function generateTextSectionWithContinuation({
   temperature,
   max_tokens,
   retries = 0,
-  minChars = 650,
-  longEnoughChars = 1500,
+  minChars = 450,
+  longEnoughChars = 1100,
 }) {
   const marker = `[[END_SECTION:${key}]]`;
 
@@ -170,35 +182,31 @@ async function generateTextSectionWithContinuation({
     const severeTrunc = isSeverelyTruncated(cleaned);
 
     // ✅ Accept conditions (FAST):
-    // - If marker present and either not truncated OR already long enough
-    // - OR marker missing but already long enough and not severely truncated
-    // Also enforce minChars only when content is short
     const ok =
       (hasMarker && (longEnough || (!likelyTrunc && len >= minChars))) ||
       (!hasMarker && longEnough && !severeTrunc);
 
     if (ok) {
-      // If the model left a messy ending, fix locally (0 extra IA calls)
       const fixed = finalizeText(cleaned, { longEnough, likelyTrunc, severeTrunc });
       return fixed.trim();
     }
 
-    // If too short, or severely truncated, attempt CONTINUE
-    const shouldContinue =
-      len < minChars || severeTrunc || (!hasMarker && !longEnough);
+    // CONTINUE only when really necessary (extra IA call)
+    const shouldContinue = len < minChars || severeTrunc || (!hasMarker && !longEnough);
 
     if (!shouldContinue) {
-      // Accept as-is (best effort)
       return finalizeText(cleaned, { longEnough, likelyTrunc, severeTrunc }).trim();
     }
 
-    // CONTINUE: provide tail for continuity
     const tail = cleaned.slice(-900);
     prompt = buildContinuePrompt({ key, lang, marker, tail });
   }
 
-  // Final fallback: return whatever we have
-  return finalizeText(stripEndMarker(acc, marker), { longEnough: true, likelyTrunc: true, severeTrunc: true }).trim();
+  return finalizeText(stripEndMarker(acc, marker), {
+    longEnough: true,
+    likelyTrunc: true,
+    severeTrunc: true,
+  }).trim();
 }
 
 function buildTextPromptWithEndMarker({ lang, key, ctx, marker }) {
@@ -243,17 +251,13 @@ function stripEndMarker(text, marker) {
 function isLikelyTruncated(text) {
   const s = String(text || "").trim();
   if (!s) return true;
-  // Ends with proper punctuation?
   const endsOk = /[.!?…»)\]]\s*$/.test(s);
-  // Ends with colon/dash = suspicious
   const endsBad = /[:\-–—]\s*$/.test(s);
-  // Mid-word cut (rough)
   const last = s.slice(-120);
   const midWord = /[A-Za-zÀ-ÿ]{2,}$/.test(last) && !endsOk;
   return !endsOk || endsBad || midWord;
 }
 
-// More strict detector: used to decide whether we must "CONTINUE"
 function isSeverelyTruncated(text) {
   const s = String(text || "").trim();
   if (!s) return true;
@@ -261,7 +265,6 @@ function isSeverelyTruncated(text) {
   const tail = s.slice(-220);
   const hasPunctNearEnd = /[.!?…»)\]]/.test(tail);
 
-  // strong signs: ends with colon/dash OR ends mid-word AND no punctuation in last ~220 chars
   const endsBad = /[:\-–—]\s*$/.test(s);
   const endsOk = /[.!?…»)\]]\s*$/.test(s);
   const midWord = /[A-Za-zÀ-ÿ]{2,}$/.test(s.slice(-40)) && !endsOk;
@@ -273,14 +276,11 @@ function finalizeText(text, { longEnough, likelyTrunc, severeTrunc }) {
   let s = String(text || "").trim();
   if (!s) return s;
 
-  // If clearly messy ending and content is long enough, cut to last punctuation (fast local fix)
   if ((severeTrunc || likelyTrunc) && longEnough) {
     s = trimToLastSentenceEnd(s, 500) || s;
   }
 
-  // Ensure final punctuation
   s = ensureNiceEnding(s);
-
   return s;
 }
 
@@ -288,15 +288,9 @@ function trimToLastSentenceEnd(text, lookback = 500) {
   const s = String(text || "");
   const start = Math.max(0, s.length - lookback);
   const chunk = s.slice(start);
-  // find last punctuation in chunk
-  const idx = Math.max(
-    chunk.lastIndexOf("."),
-    chunk.lastIndexOf("!"),
-    chunk.lastIndexOf("?"),
-    chunk.lastIndexOf("…")
-  );
+  const idx = Math.max(chunk.lastIndexOf("."), chunk.lastIndexOf("!"), chunk.lastIndexOf("?"), chunk.lastIndexOf("…"));
   if (idx === -1) return null;
-  return (s.slice(0, start + idx + 1)).trim();
+  return s.slice(0, start + idx + 1).trim();
 }
 
 function ensureNiceEnding(text) {
@@ -310,7 +304,7 @@ function ensureNiceEnding(text) {
    ✅ JSON generation with retry (no markers)
 ========================================================= */
 
-async function generateJsonSectionWithRetry({ key, lang, ctx, temperature, max_tokens, retries = 2 }) {
+async function generateJsonSectionWithRetry({ key, lang, ctx, temperature, max_tokens, retries = 1 }) {
   let prompt = sectionPrompt({ lang, sectionKey: key, ctx });
 
   for (let attempt = 0; attempt <= retries; attempt++) {
@@ -332,7 +326,6 @@ ${sectionPrompt({ lang, sectionKey: key, ctx })}
 
 RÈGLES JSON STRICTES (OBLIGATOIRES):
 - Réponds UNIQUEMENT avec du JSON valide.
-- Si tu utilises un bloc, utilise \`\`\`json ... \`\`\`.
 - Aucun texte avant/après le JSON.
 - Pas de commentaires, pas de trailing commas.
 `.trim();
@@ -347,15 +340,15 @@ RÈGLES JSON STRICTES (OBLIGATOIRES):
 
 function titleFromKey(key, lang) {
   const fr = {
-    executive_summary: "Executive Summary",
+    executive_summary: "Résumé exécutif",
     market_analysis: "Analyse du marché",
     competition_analysis: "Analyse concurrentielle",
     business_model: "Modèle économique",
     canvas_json: "Business Model Canvas",
     swot_json: "Analyse SWOT",
-    go_to_market: "Stratégie Go-To-Market",
+    go_to_market: "Stratégie Go-To-Market (Marketing & Ventes)",
     strategic_partnerships: "Partenariats stratégiques",
-    kpi_calendar_json: "Calendrier et Indicateurs Clés de Performance (KPIs)",
+    kpi_calendar_json: "Plan d’exécution & KPIs",
     operations: "Plan d’opérations",
     risks: "Risques & mitigations",
     financials_json: "Plan financier (Tableaux)",
@@ -369,9 +362,9 @@ function titleFromKey(key, lang) {
     business_model: "Business Model",
     canvas_json: "Business Model Canvas",
     swot_json: "SWOT Analysis",
-    go_to_market: "Go-To-Market Strategy",
+    go_to_market: "Go-To-Market (Marketing & Sales)",
     strategic_partnerships: "Strategic Partnerships",
-    kpi_calendar_json: "Execution Calendar & Key Performance Indicators (KPIs)",
+    kpi_calendar_json: "Execution Plan & KPIs",
     operations: "Operations Plan",
     risks: "Risks & Mitigation",
     financials_json: "Financial Plan (Tables)",
@@ -382,10 +375,7 @@ function titleFromKey(key, lang) {
 }
 
 function assembleText({ lang, ctx, sections }) {
-  const header =
-    lang === "en"
-      ? `${ctx.companyName}\nBUSINESS PLAN (Premium)\n`
-      : `${ctx.companyName}\nPLAN D’AFFAIRES (Premium)\n`;
+  const header = lang === "en" ? `${ctx.companyName}\nBUSINESS PLAN (Premium)\n` : `${ctx.companyName}\nPLAN D’AFFAIRES (Premium)\n`;
 
   const toc = sections.map((s, i) => `${i + 1}. ${s.title}`).join("\n");
 
@@ -412,17 +402,14 @@ function safeJsonParse(raw) {
   }
 }
 
-// deepseek may return ```json ... ``` or raw json
 function extractJsonBlock(s) {
   const txt = String(s || "").trim();
-  const m =
-    txt.match(/```json\s*([\s\S]*?)\s*```/i) ||
-    txt.match(/```\s*([\s\S]*?)\s*```/);
+  const m = txt.match(/```json\s*([\s\S]*?)\s*```/i) || txt.match(/```\s*([\s\S]*?)\s*```/);
   return m ? String(m[1] || "").trim() : txt;
 }
 
 /* -------------------------
-   Normalizers (robust production)
+   Normalizers (robust production) — UNCHANGED
 ------------------------- */
 function isObj(o) {
   return !!o && typeof o === "object" && !Array.isArray(o);
@@ -459,7 +446,7 @@ function normalizeSwot(obj, ctx, lang) {
 
 function normalizeKpiCalendar(obj, ctx, lang) {
   const d = isObj(obj) ? obj : {};
-  const calendrier = Array.isArray(d.calendrier || d.calendar) ? (d.calendrier || d.calendar) : [];
+  const calendrier = Array.isArray(d.calendrier || d.calendar) ? d.calendrier || d.calendar : [];
   const kpis = Array.isArray(d.kpis) ? d.kpis : [];
 
   const out = {
@@ -485,8 +472,6 @@ function normalizeKpiCalendar(obj, ctx, lang) {
 
 function normalizeFinancials(obj, ctx) {
   const fin0 = isObj(obj) ? obj : {};
-
-  // Canonical years: Y1..Y5
   const years = ["Y1", "Y2", "Y3", "Y4", "Y5"];
   const currency = String(fin0.currency || "USD").trim() || "USD";
 
@@ -497,12 +482,10 @@ function normalizeFinancials(obj, ctx) {
         const r = isObj(row) ? { ...row } : {};
         const out = { label: String(r.label || "").trim(), __format: String(r.__format || defaultFormat) };
 
-        // Map any year-like keys to Y1..Y5
         for (const [k, v] of Object.entries(r)) {
           const y = normalizeYearKey(k);
           if (y) out[y] = parseNumber(v);
         }
-        // Ensure all years present
         for (const y of years) {
           if (out[y] === undefined) out[y] = 0;
         }
@@ -566,7 +549,6 @@ function normalizeFinancials(obj, ctx) {
     scenarios,
   };
 
-  // If the model still returned all zeros, fallback to a minimal built model
   const rev = findRow(fin.pnl, ["revenue", "ventes", "chiffre"]);
   const hasNonZero = rev ? years.some((y) => Number(rev[y] || 0) > 0) : false;
 
@@ -581,23 +563,19 @@ function normalizeYearKey(key) {
   const k = String(key || "").trim().toLowerCase();
   if (!k) return null;
 
-  // y1, y 1, year1, year 1
   let m = k.match(/^y\s*([1-9])$/);
   if (m) return `Y${m[1]}`;
   m = k.match(/^year\s*([1-9])$/);
   if (m) return `Y${m[1]}`;
 
-  // "1".."9"
   m = k.match(/^([1-9])$/);
   if (m) return `Y${m[1]}`;
 
-  // "y1:" etc
   m = k.match(/^y\s*([1-9])[^0-9]*/);
   if (m) return `Y${m[1]}`;
   m = k.match(/^year\s*([1-9])[^0-9]*/);
   if (m) return `Y${m[1]}`;
 
-  // "Year 1" / "YEAR 1"
   m = k.match(/^year\s+([1-9])$/);
   if (m) return `Y${m[1]}`;
 
@@ -609,13 +587,10 @@ function parseNumber(v) {
   const s = String(v ?? "").trim();
   if (!s) return 0;
 
-  // percent
   const cleaned = s.replace(/[^\d,.\-]/g, "").replace(/\s+/g, "");
 
-  // Support "1,234,567" / "1.234.567" / "1234,56" (best effort)
   let num = 0;
   if (cleaned.includes(",") && cleaned.includes(".")) {
-    // assume commas are thousands separators
     num = Number(cleaned.replace(/,/g, ""));
   } else if (cleaned.includes(",") && !cleaned.includes(".")) {
     const parts = cleaned.split(",");
@@ -634,9 +609,7 @@ function toArr(v) {
 }
 
 function ensureRow(table, label, years, fmt) {
-  const exists =
-    Array.isArray(table) &&
-    table.some((r) => String(r?.label || "").toLowerCase() === String(label).toLowerCase());
+  const exists = Array.isArray(table) && table.some((r) => String(r?.label || "").toLowerCase() === String(label).toLowerCase());
   if (exists) return;
   const row = { label, __format: fmt };
   for (const y of years) row[y] = 0;
@@ -656,8 +629,7 @@ function findRow(rows, needles) {
 function buildFallbackFinancials({ ctx, currency = "USD", years }) {
   const ys = Array.isArray(years) && years.length ? years : ["Y1", "Y2", "Y3", "Y4", "Y5"];
 
-  // Very conservative baseline model (keeps service usable even if AI fails)
-  const baseRevenueY1 = 120000; // adjust conservative
+  const baseRevenueY1 = 120000;
   const growth = [1, 1.35, 1.7, 2.05, 2.45];
   const revenue = ys.map((_, i) => Math.round(baseRevenueY1 * growth[i]));
   const cogs = revenue.map((r) => Math.round(r * 0.45));
@@ -678,7 +650,7 @@ function buildFallbackFinancials({ ctx, currency = "USD", years }) {
   ];
 
   const balance_sheet = [
-    rowFrom("Cash", revenue.map((r, i) => Math.max(0, (r - cogs[i] - opex[i]) - capex[i] + financing[i])), ys, "money"),
+    rowFrom("Cash", revenue.map((r, i) => Math.max(0, r - cogs[i] - opex[i] - capex[i] + financing[i])), ys, "money"),
     rowFrom("Inventory", revenue.map((r) => Math.round(r * 0.05)), ys, "money"),
     rowFrom("Total Assets", revenue.map((r) => Math.round(r * 0.40)), ys, "money"),
     rowFrom("Total Liabilities", revenue.map((r) => Math.round(r * 0.18)), ys, "money"),
@@ -718,7 +690,9 @@ function buildFallbackFinancials({ ctx, currency = "USD", years }) {
 
 function rowFrom(label, arr, years, fmt) {
   const r = { label, __format: fmt };
-  years.forEach((y, i) => { r[y] = Number(arr[i] || 0); });
+  years.forEach((y, i) => {
+    r[y] = Number(arr[i] || 0);
+  });
   return r;
 }
 
@@ -768,7 +742,6 @@ function fallbackTextSection({ key, lang, ctx }) {
         ].join("\n");
   }
 
-  // Default fallback for other text sections: summarize user-provided fields
   const blocks = [
     ctx?.product ? (isEN ? "Product/Service" : "Produit/Service") + ": " + ctx.product : null,
     ctx?.customers ? (isEN ? "Customers" : "Clients") + ": " + ctx.customers : null,
@@ -809,10 +782,7 @@ function buildFallbackCanvas({ ctx, lang }) {
     ]),
     propositions_de_valeur: bullets([
       product
-        ? (isEN ? "Natural / premium offering" : "Offre premium") +
-          ": " +
-          product.slice(0, 140) +
-          (product.length > 140 ? "…" : "")
+        ? (isEN ? "Natural / premium offering" : "Offre premium") + ": " + product.slice(0, 140) + (product.length > 140 ? "…" : "")
         : isEN
         ? "High-quality, reliable delivery"
         : "Qualité élevée et livraison fiable",
@@ -825,9 +795,16 @@ function buildFallbackCanvas({ ctx, lang }) {
       isEN ? "Loyalty & retention programs" : "Fidélisation & rétention",
     ]),
     canaux: bullets([isEN ? "Retail & distributors" : "Retail & distributeurs", isEN ? "Direct sales (B2B)" : "Vente directe (B2B)", isEN ? "Digital & partnerships" : "Digital & partenariats"]),
-    segments_clients: bullets([customers ? customers.slice(0, 160) + (customers.length > 160 ? "…" : "") : isEN ? "Urban households & B2B buyers" : "Ménages urbains & acheteurs B2B", isEN ? "Institutional accounts" : "Comptes institutionnels"]),
+    segments_clients: bullets([
+      customers ? customers.slice(0, 160) + (customers.length > 160 ? "…" : "") : isEN ? "Urban households & B2B buyers" : "Ménages urbains & acheteurs B2B",
+      isEN ? "Institutional accounts" : "Comptes institutionnels",
+    ]),
     structure_de_couts: bullets([isEN ? "Inputs / raw materials" : "Intrants / matières premières", isEN ? "Labor & operations" : "Main-d’œuvre & opérations", isEN ? "Logistics & distribution" : "Logistique & distribution", isEN ? "Marketing & compliance" : "Marketing & conformité"]),
-    sources_de_revenus: bullets([bm ? bm.slice(0, 170) + (bm.length > 170 ? "…" : "") : isEN ? "Product sales / contracts" : "Ventes / contrats", isEN ? "B2B recurring supply" : "Approvisionnement récurrent B2B", isEN ? "Wholesale / reseller margins" : "Grossistes / marges revendeurs"]),
+    sources_de_revenus: bullets([
+      bm ? bm.slice(0, 170) + (bm.length > 170 ? "…" : "") : isEN ? "Product sales / contracts" : "Ventes / contrats",
+      isEN ? "B2B recurring supply" : "Approvisionnement récurrent B2B",
+      isEN ? "Wholesale / reseller margins" : "Grossistes / marges revendeurs",
+    ]),
   };
 }
 
@@ -856,7 +833,7 @@ function looksLikeJsonText(txt) {
 
 function formatFundingAskFromJson(obj, lang) {
   const isEN = lang === "en";
-  const root = (obj && typeof obj === "object") ? obj : {};
+  const root = obj && typeof obj === "object" ? obj : {};
   const bf = root.besoin_financement || root.funding_need || root.funding_ask || {};
   const uf = root.utilisation_des_fonds || root.use_of_funds || root.utilisation_fonds || {};
 
@@ -870,29 +847,23 @@ function formatFundingAskFromJson(obj, lang) {
   const lines = [];
 
   lines.push(isEN ? "## Funding Need" : "## Besoin de financement");
-  lines.push(isEN
-    ? `- Total: **${money(bf.montant_total, cur)}**`
-    : `- Montant total : **${money(bf.montant_total, cur)}**`
-  );
+  lines.push(isEN ? `- Total: **${money(bf.montant_total, cur)}**` : `- Montant total : **${money(bf.montant_total, cur)}**`);
 
   if (bf.objectif_principal) {
-    lines.push(isEN
-      ? `- Objective: ${bf.objectif_principal}`
-      : `- Objectif : ${bf.objectif_principal}`
-    );
+    lines.push(isEN ? `- Objective: ${bf.objectif_principal}` : `- Objectif : ${bf.objectif_principal}`);
   }
 
   if (Array.isArray(bf.options_structure)) {
     lines.push("");
     lines.push(isEN ? "### Structure options" : "### Options de structure");
-    bf.options_structure.forEach(o => lines.push(`- ${o}`));
+    bf.options_structure.forEach((o) => lines.push(`- ${o}`));
   }
 
   lines.push("");
   lines.push(isEN ? "## Use of Funds" : "## Utilisation des fonds");
 
   if (Array.isArray(uf.postes)) {
-    uf.postes.forEach(p => {
+    uf.postes.forEach((p) => {
       lines.push(`- ${p.poste}: **${money(p.montant, cur)}**`);
     });
   }
