@@ -78,10 +78,16 @@ async function generateSectionWithRetries({
   passagesText,
   temperature,
   maxTokensPerSection,
+  targetWords,
 }) {
-  const attempts = Number(process.env.ACAD_SECTION_RETRIES || 2);
+  // Retries are expensive (extra model calls). Keep minimal in production.
+  const attempts = Number(process.env.ACAD_SECTION_RETRIES || 1);
   const minChars = Number(process.env.ACAD_MIN_SECTION_CHARS || 2400);
   const hardMax = Number(process.env.ACAD_HARD_MAX_TOKENS || 6500);
+
+  // Continuations are also expensive. Keep to 1 by default.
+  const maxContinuations = Number(process.env.ACAD_MAX_CONTINUES_PER_SECTION || 1);
+  let usedContinuations = 0;
 
   // FAST guardrails (avoid too many extra calls)
   const longEnoughChars = Number(process.env.ACAD_LONG_ENOUGH_CHARS || 3200);
@@ -106,6 +112,7 @@ async function generateSectionWithRetries({
       sectionTitle: title,
       sourcesText: passagesText,
       endMarker: marker,
+      targetWords,
     });
 
     const content = await deepseekChat({
@@ -137,7 +144,13 @@ async function generateSectionWithRetries({
       return ensureNiceEnding(cleaned);
     }
 
-    // Otherwise: do ONE continuation attempt in this loop iteration
+    // Otherwise: do ONE continuation attempt (bounded by env) in this loop iteration
+    if (usedContinuations >= maxContinuations) {
+      // Best effort: finalize locally to avoid extra latency.
+      return ensureNiceEnding(trimToLastPunct(cleaned));
+    }
+    usedContinuations += 1;
+
     const tail = cleaned.slice(-900);
     const continuePrompt = buildContinuePrompt({ lang, title, marker, tail });
 
@@ -216,6 +229,7 @@ function extractWritingUnits(planText, lang) {
 
     const match = isEN
       ? up.startsWith("GENERAL INTRO") ||
+        up.startsWith("ABSTRACT") ||
         up.startsWith("INTRO") ||
         up.startsWith("PART") ||
         up.startsWith("CHAPTER") ||
@@ -224,6 +238,8 @@ function extractWritingUnits(planText, lang) {
         up.startsWith("BIBLIO") ||
         up.startsWith("ANNEX")
       : up.startsWith("INTRO") ||
+        up.startsWith("RÉSUM") ||
+        up.startsWith("RESUM") ||
         up.startsWith("PARTIE") ||
         up.startsWith("CHAP") ||
         up.startsWith("SECTION") ||
@@ -378,16 +394,61 @@ export async function generateLicenceMemoire({ lang, ctx }) {
 
   const sectionTitles = extractWritingUnits(plan, lang);
 
+  // =========================================================
+  // ⚡ SPEED (production): the main driver is total output length + sequential calls.
+  // We:
+  // 1) Allocate token budgets by section *type* (intro/conclusion shorter, chapters heavier)
+  // 2) Generate sections with a small concurrency pool (default=2) while keeping final order
+  // =========================================================
   const tokensPerPage = Number(process.env.ACAD_TOKENS_PER_PAGE || 650);
-  const totalBudget = 70 * tokensPerPage;
-  const perSectionBudget = Math.floor(totalBudget / Math.max(sectionTitles.length, 1));
+  const totalBudgetTokens = 70 * tokensPerPage;
+
   const hardMaxTokensPerSection = Number(process.env.ACAD_MAX_TOKENS_PER_SECTION || 4200);
-  const maxTokensPerSection = Math.max(1800, Math.min(hardMaxTokensPerSection, perSectionBudget));
+  const minTokensPerSection = Number(process.env.ACAD_MIN_TOKENS_PER_SECTION || 1500);
 
-  const sections = [];
+  const weightFor = (t) => {
+    const up = String(t || "").toUpperCase();
+    if (up.includes("BIBLIO")) return 0.25;
+    if (up.includes("ANNEX")) return 0.35;
+    if (up.includes("RESUME") || up.includes("ABSTRACT")) return 0.45;
+    if (up.includes("INTRO")) return 0.65;
+    if (up.includes("CONCLUSION")) return 0.65;
+    if (up.startsWith("PART")) return 0.85;
+    if (up.startsWith("CHAPTER") || up.startsWith("CHAP")) return 1.15;
+    if (up.startsWith("SECTION")) return 1.0;
+    return 0.95;
+  };
+
+  const weights = sectionTitles.map(weightFor);
+  const weightSum = weights.reduce((a, b) => a + (Number(b) || 0), 0) || 1;
+
+  const budgetForIndex = (i) => {
+    const w = Number(weights[i] || 1);
+    const raw = Math.floor((totalBudgetTokens * w) / weightSum);
+    return Math.max(minTokensPerSection, Math.min(hardMaxTokensPerSection, raw));
+  };
+
+  // Rough token->words heuristic (kept simple on purpose)
+  const targetWordsForTokens = (tokens) => Math.max(450, Math.floor(Number(tokens || 0) * 0.75));
+
+  const concurrency = Math.max(1, Number(process.env.ACAD_CONCURRENCY || 2));
+
   const sourcesUsed = [];
+  const results = new Array(sectionTitles.length);
 
-  for (const title of sectionTitles) {
+  // Small promise pool to avoid overloading the LLM / Render instance
+  const runPool = async (items, worker) => {
+    let idx = 0;
+    const runners = new Array(Math.min(concurrency, items.length)).fill(null).map(async () => {
+      while (idx < items.length) {
+        const cur = idx++;
+        await worker(items[cur], cur);
+      }
+    });
+    await Promise.all(runners);
+  };
+
+  await runPool(sectionTitles, async (title, i) => {
     let passagesText = "";
     if (isCongoLawMode) {
       const { sources, passages } = await searchCongoLawSources({
@@ -398,6 +459,9 @@ export async function generateLicenceMemoire({ lang, ctx }) {
       passagesText = formatPassagesForPrompt(passages);
     }
 
+    const maxTokensPerSection = budgetForIndex(i);
+    const targetWords = targetWordsForTokens(maxTokensPerSection);
+
     const content = await generateSectionWithRetries({
       lang,
       ctx: { ...safeCtx, plan },
@@ -405,10 +469,13 @@ export async function generateLicenceMemoire({ lang, ctx }) {
       passagesText,
       temperature,
       maxTokensPerSection,
+      targetWords,
     });
 
-    sections.push({ title, content });
-  }
+    results[i] = { title, content };
+  });
+
+  const sections = results.filter(Boolean);
 
   const totalChars = sections.reduce((acc, s) => acc + String(s?.content || "").length, 0);
   const minTotalChars = Number(process.env.ACAD_MIN_TOTAL_CHARS || 140000);
@@ -420,13 +487,15 @@ export async function generateLicenceMemoire({ lang, ctx }) {
       "ANNEXE D : Synthèse et recommandations opérationnelles (brouillon)",
     ];
     for (const t of extras) {
+      const extraTokens = Math.min(hardMaxTokensPerSection, Math.max(minTokensPerSection, 2200));
       const content = await generateSectionWithRetries({
         lang,
         ctx: { ...safeCtx, plan },
         title: t,
         passagesText: "",
         temperature,
-        maxTokensPerSection,
+        maxTokensPerSection: extraTokens,
+        targetWords: targetWordsForTokens(extraTokens),
       });
       sections.push({ title: t, content });
     }

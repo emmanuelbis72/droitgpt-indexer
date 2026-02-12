@@ -56,40 +56,46 @@ export function buildMemoirePlanPrompt({ lang, ctx }) {
   const isEN = lang === "en";
   const topic = ctx?.topic || "Sujet non précisé";
 
+  // ✅ Standard “international” structure (academic) while staying compatible with the extractor
+  // (we keep INTRO/PART/CHAP/SECTION/CONCLUSION/BIBLIO/ANNEX patterns).
   return isEN
     ? `Create a detailed dissertation plan for: "${topic}".
 
 Format rules:
 - No Markdown headings.
-- Use bold markers for headings only: **GENERAL INTRODUCTION**, **PART I**, **CHAPTER I**, **Section 1**, etc.
+- Use bold markers for headings only: **ABSTRACT**, **GENERAL INTRODUCTION**, **PART I**, **CHAPTER I**, **Section 1**, etc.
 
 Required structure (no JSON):
-- **GENERAL INTRODUCTION**
-- **PART I** (2 chapters; each chapter with 2–3 sections)
-- **PART II** (2 chapters; each chapter with 2–3 sections)
-- **GENERAL CONCLUSION**
-- **BIBLIOGRAPHY**
-- **ANNEXES**
+- **ABSTRACT (draft)**
+- **LIST OF ABBREVIATIONS (draft)**
+- **GENERAL INTRODUCTION** (context, problem statement, research questions, objectives, hypotheses, methodology, scope/limits)
+- **PART I** (Foundations: 2 chapters; each chapter with 2–3 sections)
+- **PART II** (Analysis & proposals: 2 chapters; each chapter with 2–3 sections)
+- **GENERAL CONCLUSION** (answers, limits, recommendations)
+- **BIBLIOGRAPHY (draft)**
+- **ANNEXES (draft)**
 
-The plan must be suitable for a 70-page dissertation (include enough sections/subsections).`
+The plan must be suitable for a FULL 70-page dissertation: include enough sub-sections to avoid short content.`
     : `Élabore un plan détaillé de mémoire pour : "${topic}".
 
 Règles de forme :
 - Pas de titres en Markdown.
-- Utiliser le GRAS uniquement pour les titres : **INTRODUCTION GÉNÉRALE**, **PARTIE I**, **CHAPITRE I**, **Section 1**, etc.
+- Utiliser le GRAS uniquement pour les titres : **RÉSUMÉ**, **INTRODUCTION GÉNÉRALE**, **PARTIE I**, **CHAPITRE I**, **Section 1**, etc.
 
 Structure obligatoire (pas de JSON) :
-- **INTRODUCTION GÉNÉRALE**
-- **PARTIE I** (2 chapitres ; chaque chapitre avec 2–3 sections)
-- **PARTIE II** (2 chapitres ; chaque chapitre avec 2–3 sections)
-- **CONCLUSION GÉNÉRALE**
-- **BIBLIOGRAPHIE**
-- **ANNEXES**
+- **RÉSUMÉ (brouillon)**
+- **LISTE DES SIGLES ET ABRÉVIATIONS (brouillon)**
+- **INTRODUCTION GÉNÉRALE** (contexte, problématique, questions, objectifs, hypothèses, méthodologie, délimitation)
+- **PARTIE I** (Fondements : 2 chapitres ; chaque chapitre avec 2–3 sections)
+- **PARTIE II** (Analyse & propositions : 2 chapitres ; chaque chapitre avec 2–3 sections)
+- **CONCLUSION GÉNÉRALE** (réponses, limites, recommandations)
+- **BIBLIOGRAPHIE (brouillon)**
+- **ANNEXES (brouillon)**
 
-Le plan doit permettre un mémoire de 70 pages (prévoir suffisamment de sous-sections).`;
+Le plan doit permettre un mémoire COMPLET de 70 pages : prévoir assez de sous-sections pour éviter un contenu trop court.`;
 }
 
-export function buildMemoireSectionPrompt({ lang, ctx, sectionTitle, sourcesText, endMarker }) {
+export function buildMemoireSectionPrompt({ lang, ctx, sectionTitle, sourcesText, endMarker, targetWords }) {
   const isEN = lang === "en";
   const topic = ctx?.topic || "Sujet non précisé";
   const ps = ctx?.problemStatement || "";
@@ -113,6 +119,12 @@ ${ctx.plan}
 ` : "";
 
   const marker = String(endMarker || "").trim();
+  const target = Number(targetWords || 0);
+  const targetLine = target
+    ? isEN
+      ? `Target length for THIS section: about ${target}–${Math.round(target * 1.15)} words (not less).`
+      : `Longueur cible pour CETTE section : environ ${target}–${Math.round(target * 1.15)} mots (pas moins).`
+    : "";
 
   return isEN
     ? `Write the section: "${sectionTitle}" for a Bachelor law dissertation.
@@ -126,7 +138,8 @@ ${planHint}${sourcesBlock}
 
 Length requirement:
 - This dissertation must reach a FULL 70 pages overall. Do NOT be overly concise.
-- Write a complete section with: definitions, doctrinal views (only if provided), constitutional/legal analysis, practical issues, and structured mini-conclusion.
+${targetLine ? `- ${targetLine}` : ""}
+- Write a complete section with: definitions, doctrinal views (only if provided), legal/constitutional analysis, practical issues, and a structured mini-conclusion.
 
 Formatting rules:
 - No Markdown headings (#, ##, ### prohibited).
@@ -155,6 +168,7 @@ ${planHint}${sourcesBlock}
 
 Exigence de longueur :
 - Le mémoire doit atteindre un TOTAL de 70 pages. Ne sois pas trop bref.
+${targetLine ? `- ${targetLine}` : ""}
 - Produis une section complète : définitions, points doctrinaux (seulement si fournis), analyse constitutionnelle/juridique, difficultés pratiques, mini-conclusion structurée.
 
 Règles de forme :
