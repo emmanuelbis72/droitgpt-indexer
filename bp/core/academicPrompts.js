@@ -119,7 +119,9 @@ Format rules:
 - No Markdown headings.
 - Use bold markers for headings only: **GENERAL INTRODUCTION**, **PART I**, **CHAPTER I**, **Section 1**, etc.
 
-The plan must be suitable for ~${pages} pages (include enough sections/subsections).
+The plan must be suitable for ~${pages} pages.
+- Keep it efficient: no redundant/filler sections.
+- Prefer fewer but stronger subsections with clear objectives.
 Return plain text (no JSON).`
     : `Élabore un plan détaillé de mémoire pour : "${topic}".
 Discipline : ${discipline}.
@@ -128,7 +130,9 @@ Règles de forme :
 - Pas de titres en Markdown.
 - Utiliser le GRAS uniquement pour les titres : **INTRODUCTION GÉNÉRALE**, **PARTIE I**, **CHAPITRE I**, **Section 1**, etc.
 
-Le plan doit permettre ~${pages} pages (prévoir suffisamment de sous-sections).
+Le plan doit permettre ~${pages} pages.
+- Structure efficace : pas de sections redondantes / blabla.
+- Préfère moins de sous-sections, mais solides, avec objectifs clairs.
 Retourne du texte (pas de JSON).`;
 
   // Law plan template (classic)
@@ -236,7 +240,9 @@ ${planHint}${sourcesBlock}
 
 Length:
 - ${wordsHint}
-- Do NOT be overly concise. Expand with substantive analysis.
+- Be concise and dense: avoid filler/blabla.
+- Prefer short paragraphs and clear reasoning.
+- Stay within the target word range.
 
 Formatting rules:
 - No Markdown headings (#, ##, ### prohibited).

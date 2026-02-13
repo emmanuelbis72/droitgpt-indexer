@@ -79,12 +79,12 @@ async function generateSectionWithRetries({
   temperature,
   maxTokensPerSection,
 }) {
-  const attempts = Number(process.env.ACAD_SECTION_RETRIES || 2);
-  const minChars = Number(process.env.ACAD_MIN_SECTION_CHARS || 2400);
+  const attempts = Number(process.env.ACAD_SECTION_RETRIES || 1); // faster
+  const minChars = Number(process.env.ACAD_MIN_SECTION_CHARS || 1600);
   const hardMax = Number(process.env.ACAD_HARD_MAX_TOKENS || 6500);
 
   // FAST guardrails (avoid too many extra calls)
-  const longEnoughChars = Number(process.env.ACAD_LONG_ENOUGH_CHARS || 3200);
+  const longEnoughChars = Number(process.env.ACAD_LONG_ENOUGH_CHARS || 2200);
 
   const sectionId = slugifyTitle(title);
   const marker = `[[END_SECTION:${sectionId}]]`;
@@ -359,10 +359,11 @@ export async function generateLicenceMemoire({ lang, ctx }) {
   const temperature = Number(process.env.ACAD_TEMPERATURE || 0.35);
   const safeCtx = { ...(ctx || {}) };
 
-  // ✅ Pages target (production): ensure >= 50 pages, allow override via ctx/env
+  // ✅ Pages target (fast): default 40 pages (concise, no filler); allow override via ctx/env
   const targetFromCtx = Number(safeCtx.lengthPagesTarget || 0);
-  const targetFromEnv = Number(process.env.ACAD_PAGES_TARGET || 55);
-  const pagesTarget = Math.max(50, Math.min(90, targetFromCtx || targetFromEnv || 55));
+  const targetFromEnv = Number(process.env.ACAD_PAGES_TARGET || 40);
+  // clamp: 30..60 (fast + stable)
+  const pagesTarget = Math.max(30, Math.min(60, targetFromCtx || targetFromEnv || 40));
   safeCtx.lengthPagesTarget = pagesTarget;
 
   const isCongoLawMode = ["droit_congolais", "qdrantLaw", "congo_law", "droitcongolais"].includes(
@@ -384,15 +385,15 @@ export async function generateLicenceMemoire({ lang, ctx }) {
   const sectionTitles = extractWritingUnits(plan, lang);
 
   // Used by prompts to keep sections realistically sized while reaching target pages.
-  // Typical page ≈ 300–330 words (12pt, 1.5 spacing). We use 320 as a pragmatic target.
-  const wordsTargetTotal = Math.max(16000, pagesTarget * 320);
-  safeCtx.__sectionWordsTarget = Math.max(700, Math.round(wordsTargetTotal / Math.max(sectionTitles.length, 1)));
+  // Fast profile: ~260–290 words/page in typical university formatting.
+  const wordsTargetTotal = Math.max(9000, Math.round(pagesTarget * 270));
+  safeCtx.__sectionWordsTarget = Math.max(450, Math.round(wordsTargetTotal / Math.max(sectionTitles.length, 1)));
 
-  const tokensPerPage = Number(process.env.ACAD_TOKENS_PER_PAGE || 650);
+  const tokensPerPage = Number(process.env.ACAD_TOKENS_PER_PAGE || 520); // faster default
   const totalBudget = pagesTarget * tokensPerPage;
   const perSectionBudget = Math.floor(totalBudget / Math.max(sectionTitles.length, 1));
   const hardMaxTokensPerSection = Number(process.env.ACAD_MAX_TOKENS_PER_SECTION || 4200);
-  const maxTokensPerSection = Math.max(1800, Math.min(hardMaxTokensPerSection, perSectionBudget));
+  const maxTokensPerSection = Math.max(1200, Math.min(hardMaxTokensPerSection, perSectionBudget));
 
   const sections = [];
   const sourcesUsed = [];
@@ -402,7 +403,7 @@ export async function generateLicenceMemoire({ lang, ctx }) {
     if (isCongoLawMode) {
       const { sources, passages } = await searchCongoLawSources({
         query: `${safeCtx.topic || ""}\n${title}`,
-        limit: 8,
+        limit: 6,
       });
       (sources || []).forEach((s) => sourcesUsed.push(s));
       passagesText = formatPassagesForPrompt(passages);
@@ -422,7 +423,7 @@ export async function generateLicenceMemoire({ lang, ctx }) {
 
   const totalChars = sections.reduce((acc, s) => acc + String(s?.content || "").length, 0);
   // Rough char heuristic: ~2000 chars per page (varies widely). Use dynamic minimum.
-  const minTotalChars = Number(process.env.ACAD_MIN_TOTAL_CHARS || Math.round(pagesTarget * 2000));
+  const minTotalChars = Number(process.env.ACAD_MIN_TOTAL_CHARS || Math.round(pagesTarget * 1600));
   if (totalChars < minTotalChars) {
     // ✅ Annexes must match the discipline. Law-specific annexes only in Congo law mode.
     const extras = isCongoLawMode
