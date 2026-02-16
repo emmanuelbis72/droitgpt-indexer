@@ -11,7 +11,24 @@ export function writeNgoProjectPdfPremium({ res, title, ctx, sections }) {
     bufferPages: true,
   });
 
+  // Pipe early, but keep the process crash-proof if PDF generation fails mid-stream.
   doc.pipe(res);
+
+  // If the PDFKit stream errors, avoid crashing the whole Render instance.
+  doc.on("error", (err) => {
+    console.error("[NGO][PDF] PDFKit error", err);
+    try {
+      if (!res.headersSent) res.statusCode = 500;
+      res.end();
+    } catch (_) {}
+  });
+
+  // If the client disconnects, stop writing.
+  res.on("close", () => {
+    try {
+      doc.end();
+    } catch (_) {}
+  });
 
   // ---- Blank-page protection (same concept as BP pdfAssembler)
   let __pageIndex = 0;
@@ -455,8 +472,31 @@ function renderTable(doc, { title, headers, colFracs, rows, styles }) {
   doc.moveDown(1.2);
   applyFont(doc, styles.small);
 
+  // Defensive cell normalization:
+  // - rows may be arrays of primitives
+  // - or objects (we'll render Object.values)
+  // - cells may be { text: "..." } depending on upstream formatting
+  const cellText = (v) => {
+    if (v === null || v === undefined) return "";
+    if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") return String(v);
+    if (Array.isArray(v)) return v.map(cellText).filter(Boolean).join(" • ");
+    if (typeof v === "object") {
+      if (typeof v.text === "string" || typeof v.text === "number") return String(v.text);
+      if (typeof v.label === "string" || typeof v.label === "number") return String(v.label);
+      if (typeof v.value === "string" || typeof v.value === "number") return String(v.value);
+      if (typeof v.name === "string" || typeof v.name === "number") return String(v.name);
+      try {
+        const s = JSON.stringify(v);
+        return s && s !== "{}" ? s : "";
+      } catch {
+        return "";
+      }
+    }
+    return "";
+  };
+
   const rowHeight = 34; // base; text wraps inside
-  for (const r of rows || []) {
+  for (const r0 of rows || []) {
     ensureSpace(doc, rowHeight + 8);
 
     const y0 = doc.y;
@@ -464,10 +504,12 @@ function renderTable(doc, { title, headers, colFracs, rows, styles }) {
     doc.rect(x, y0 - 2, w, rowHeight).strokeOpacity(0.12).stroke();
     doc.restore();
 
+    const r = Array.isArray(r0) ? r0 : (r0 && typeof r0 === "object" ? Object.values(r0) : [r0]);
+
     let x0 = x;
     for (let i = 0; i < headers.length; i++) {
       const cellW = colW[i];
-      const txt = String(r?.[i] ?? "");
+      const txt = cellText(r?.[i]);
       doc.text(txt, x0 + 6, y0 + 2, { width: cellW - 10, height: rowHeight - 4 });
       x0 += cellW;
     }

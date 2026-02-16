@@ -91,12 +91,24 @@ router.get("/premium/jobs/:id/result", (req, res) => {
     return res.status(500).json({ error: "JOB_RESULT_MISSING" });
   }
 
-  return writeNgoProjectPdfPremium({
-    res,
-    title: result.title,
-    ctx: result.ctx,
-    sections: result.sections,
-  });
+  try {
+    return writeNgoProjectPdfPremium({
+      res,
+      title: result.title,
+      ctx: result.ctx,
+      sections: result.sections,
+    });
+  } catch (e) {
+    console.error("[NGO] PDF generation failed", e);
+    if (!res.headersSent) {
+      return res.status(500).json({ error: e?.message || String(e) });
+    }
+    try {
+      return res.end();
+    } catch (_) {
+      return;
+    }
+  }
 });
 
 /**
