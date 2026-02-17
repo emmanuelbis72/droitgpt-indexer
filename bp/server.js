@@ -15,8 +15,9 @@ const app = express();
 const allowedOriginPatterns = [
   /^http:\/\/localhost:\d+$/i,
   /^http:\/\/127\.0\.0\.1:\d+$/i,
-  /^https:\/\/droitgpt-ui\.vercel\.app$/i,
+  /^https:\/\/droitgpt-ui(\-[a-z0-9-]+)?\.vercel\.app$/i,
   /^https:\/\/www\.droitgpt\.com$/i,
+  /^https:\/\/droitgpt\.com$/i,
 ];
 
 function isAllowedOrigin(origin) {

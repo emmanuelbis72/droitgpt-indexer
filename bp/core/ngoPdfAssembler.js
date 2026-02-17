@@ -1,15 +1,8 @@
 // bp/core/ngoPdfAssembler.js
-// ✅ Minimal production hardening:
-// - Keep existing public API: writeNgoProjectPdfPremium({res,title,ctx,sections})
-// - Add buildNgoProjectPdfBufferPremium(...) to allow async jobs to pre-build PDF
-
 import PDFDocument from "pdfkit";
 import { PassThrough } from "stream";
 
-/**
- * Build PDF as Buffer (used by async job mode).
- * This prevents /result from doing heavy work (reduces 500 + avoids JOB_NOT_FOUND after crash).
- */
+
 export async function buildNgoProjectPdfBufferPremium({ title, ctx, sections }) {
   return new Promise((resolve, reject) => {
     const doc = new PDFDocument({
@@ -20,11 +13,12 @@ export async function buildNgoProjectPdfBufferPremium({ title, ctx, sections }) 
 
     const stream = new PassThrough();
     const chunks = [];
+
     stream.on("data", (c) => chunks.push(c));
     stream.on("end", () => resolve(Buffer.concat(chunks)));
     stream.on("error", reject);
-    doc.on("error", reject);
 
+    doc.on("error", reject);
     doc.pipe(stream);
 
     try {
@@ -32,16 +26,11 @@ export async function buildNgoProjectPdfBufferPremium({ title, ctx, sections }) 
       doc.end();
     } catch (e) {
       reject(e);
-      try {
-        doc.end();
-      } catch (_) {}
+      try { doc.end(); } catch (_) {}
     }
   });
 }
 
-/**
- * Stream PDF directly to HTTP response (sync mode or fallback).
- */
 export function writeNgoProjectPdfPremium({ res, title, ctx, sections }) {
   res.setHeader("Content-Type", "application/pdf");
   res.setHeader("Content-Disposition", `attachment; filename="${sanitizeFilename(title)}.pdf"`);
@@ -52,8 +41,10 @@ export function writeNgoProjectPdfPremium({ res, title, ctx, sections }) {
     bufferPages: true,
   });
 
+  // Pipe early, but keep the process crash-proof if PDF generation fails mid-stream.
   doc.pipe(res);
 
+  // If the PDFKit stream errors, avoid crashing the whole Render instance.
   doc.on("error", (err) => {
     console.error("[NGO][PDF] PDFKit error", err);
     try {
@@ -62,7 +53,7 @@ export function writeNgoProjectPdfPremium({ res, title, ctx, sections }) {
     } catch (_) {}
   });
 
-  // If client disconnects, stop.
+  // If the client disconnects, stop writing.
   res.on("close", () => {
     try {
       doc.end();
@@ -70,80 +61,15 @@ export function writeNgoProjectPdfPremium({ res, title, ctx, sections }) {
   });
 
   renderNgoProjectPdf(doc, { title, ctx, sections });
+
   doc.end();
 }
 
-/* =========================================================
-   Shared renderer
-========================================================= */
-function renderNgoProjectPdf(doc, { title, ctx, sections }) {
-  // ---- Blank-page protection
-  let __pageIndex = 0;
-  const __pageHasBody = new Set();
-  const __touch = () => __pageHasBody.add(__pageIndex);
-  let __suppressTouch = false;
-
-  doc.on("pageAdded", () => {
-    __pageIndex += 1;
-  });
-
-  const __origText = doc.text.bind(doc);
-  doc.text = function (...args) {
-    const s = args?.[0];
-    if (!__suppressTouch && s !== undefined && s !== null && String(s).trim().length > 0) {
-      __touch();
-    }
-    return __origText(...args);
-  };
-
-  doc.__setSuppressTouch = (v) => {
-    __suppressTouch = !!v;
-  };
-
-  const styles = {
-    title: { font: "Helvetica-Bold", size: 22 },
-    h1: { font: "Helvetica-Bold", size: 16 },
-    h2: { font: "Helvetica-Bold", size: 12 },
-    body: { font: "Helvetica", size: 10.5, lineGap: 3.2 },
-    small: { font: "Helvetica", size: 9, lineGap: 2.6 },
-  };
-
-  const safeSections = Array.isArray(sections) ? sections : [];
-  const headerLeft = String(ctx?.organization || "ONG").trim() || "ONG";
-  const footerLeft = String(ctx?.projectTitle || title || "Projet").trim();
-
-  // 1) Cover
-  renderCover(doc, title, ctx, styles);
-
-  // 2) TOC placeholder
-  const tocPageIndex = doc.bufferedPageRange().count;
-  doc.addPage();
-  renderTOCPlaceholder(doc, styles);
-
-  // 3) Sections + TOC entries
-  const toc = [];
-  for (const s of safeSections) {
-    const secTitle = (s?.title || "").trim() || s?.key || "Section";
-    doc.addPage();
-
-    const startPageNumber = getCurrentPageNumber(doc);
-    toc.push({ title: secTitle, page: startPageNumber });
-
-    renderSection(doc, secTitle, s, styles);
-  }
-
-  // 4) Fill TOC
-  fillTOC(doc, tocPageIndex, toc, styles);
-
-  // 5) headers/footers
-  renderAllHeadersFooters(doc, { headerLeft, footerLeft, styles });
-
-  // 6) Remove trailing blank pages
-  removeTrailingBlankPages(doc, __pageHasBody);
-}
-
+/* =========================
+   Cover + TOC
+========================= */
 function renderCover(doc, title, ctx, styles) {
-  doc.__setSuppressTouch?.(true);
+  if (typeof doc.__setSuppressTouch === "function") doc.__setSuppressTouch(true);
 
   const x = doc.page.margins.left;
   const w = doc.page.width - doc.page.margins.left - doc.page.margins.right;
@@ -156,14 +82,14 @@ function renderCover(doc, title, ctx, styles) {
   doc.moveDown(1.2);
   doc.font("Helvetica").fontSize(11).text(
     [
-      `Organisation: ${ctx?.organization || ""}`,
-      `Pays: ${ctx?.country || ""}`,
-      `Zone: ${ctx?.provinceCity || ""}`,
-      `Secteur: ${ctx?.sector || ""}`,
-      ctx?.donorStyle ? `Style bailleur: ${ctx.donorStyle}` : "",
-      ctx?.durationMonths ? `Durée: ${ctx.durationMonths} mois` : "",
-      ctx?.startDate ? `Démarrage: ${ctx.startDate}` : "",
-      ctx?.budgetTotal ? `Budget total: ${ctx.budgetTotal}` : "",
+      `Organisation: ${ctx.organization || ""}`,
+      `Pays: ${ctx.country || ""}`,
+      `Zone: ${ctx.provinceCity || ""}`,
+      `Secteur: ${ctx.sector || ""}`,
+      ctx.donorStyle ? `Style bailleur: ${ctx.donorStyle}` : "",
+      ctx.durationMonths ? `Durée: ${ctx.durationMonths} mois` : "",
+      ctx.startDate ? `Démarrage: ${ctx.startDate}` : "",
+      ctx.budgetTotal ? `Budget total: ${ctx.budgetTotal}` : "",
     ]
       .filter(Boolean)
       .join("\n"),
@@ -178,7 +104,7 @@ function renderCover(doc, title, ctx, styles) {
     { width: w }
   );
 
-  doc.__setSuppressTouch?.(false);
+  if (typeof doc.__setSuppressTouch === "function") doc.__setSuppressTouch(false);
 }
 
 function renderTOCPlaceholder(doc, styles) {
@@ -199,6 +125,7 @@ function fillTOC(doc, tocPageIndex, toc, styles) {
   doc.moveDown(0.6);
 
   applyFont(doc, styles.body);
+
   const x = doc.page.margins.left;
   const w = doc.page.width - doc.page.margins.left - doc.page.margins.right;
 
@@ -212,6 +139,9 @@ function fillTOC(doc, tocPageIndex, toc, styles) {
   }
 }
 
+/* =========================
+   Sections renderer
+========================= */
 function renderSection(doc, title, sectionObj, styles) {
   applyFont(doc, styles.h1);
   doc.text(String(title || ""));
@@ -220,16 +150,21 @@ function renderSection(doc, title, sectionObj, styles) {
   const key = String(sectionObj?.key || "").trim();
   const metaJson = sectionObj?.meta?.json;
 
+  // JSON tables
   if (metaJson && typeof metaJson === "object") {
     renderJsonBlock(doc, key, metaJson, styles);
     return;
   }
 
+  // Text
   applyFont(doc, styles.body);
   const content = String(sectionObj?.content || "").trim();
   doc.text(content || "—");
 }
 
+/* =========================
+   JSON renderers (tables)
+========================= */
 function renderJsonBlock(doc, key, obj, styles) {
   if (key === "stakeholder_analysis_json") return renderStakeholders(doc, obj, styles);
   if (key === "logframe_json") return renderLogframe(doc, obj, styles);
@@ -239,6 +174,7 @@ function renderJsonBlock(doc, key, obj, styles) {
   if (key === "budget_json") return renderBudget(doc, obj, styles);
   if (key === "workplan_json") return renderWorkplan(doc, obj, styles);
 
+  // Fallback: pretty JSON
   applyFont(doc, styles.small);
   doc.text(JSON.stringify(obj, null, 2));
 }
@@ -257,13 +193,14 @@ function renderStakeholders(doc, obj, styles) {
   renderTable(doc, {
     title: "Matrice des parties prenantes",
     headers: ["Partie prenante", "Type", "Intérêt", "Influence", "Rôle", "Stratégie d’engagement"],
-    colFracs: [0.18, 0.1, 0.08, 0.08, 0.22, 0.34],
+    colFracs: [0.18, 0.10, 0.08, 0.08, 0.22, 0.34],
     rows: tableRows,
     styles,
   });
 }
 
 function renderLogframe(doc, obj, styles) {
+  // Flatten: impact + outcomes + outputs
   const rows = [];
 
   if (obj?.impact?.statement) {
@@ -290,176 +227,181 @@ function renderLogframe(doc, obj, styles) {
         "Output",
         out?.statement || "",
         joinIndicators(out?.indicators),
-        joinAssumptions(out?.assumptions),
+        "",
       ]);
     }
   }
 
   renderTable(doc, {
     title: "Cadre logique (LogFrame) — synthèse",
-    headers: ["Niveau", "Énoncé", "Indicateurs & Sources", "Hypothèses / Risques"],
-    colFracs: [0.12, 0.38, 0.3, 0.2],
+    headers: ["Niveau", "Énoncé", "Indicateurs (baseline/target/MoV)", "Hypothèses"],
+    colFracs: [0.12, 0.38, 0.34, 0.16],
     rows,
     styles,
   });
 }
 
 function renderME(doc, obj, styles) {
-  const items = Array.isArray(obj?.indicators) ? obj.indicators : [];
-  const rows = items.map((i) => [
-    i?.indicator || "",
-    i?.definition || "",
-    i?.data_source || "",
-    i?.frequency || "",
-    i?.responsible || "",
+  const rows = Array.isArray(obj?.me_framework) ? obj.me_framework : [];
+  const tableRows = rows.map((r) => [
+    r?.indicator || "",
+    r?.baseline || "",
+    r?.target || "",
+    r?.frequency || "",
+    r?.data_source || "",
+    r?.collection_method || "",
+    r?.responsible || "",
   ]);
 
   renderTable(doc, {
-    title: "Plan de suivi-évaluation (M&E) — indicateurs",
-    headers: ["Indicateur", "Définition", "Source", "Fréquence", "Responsable"],
-    colFracs: [0.22, 0.28, 0.2, 0.15, 0.15],
-    rows,
+    title: "Plan Suivi-Évaluation (M&E) — cadre",
+    headers: ["Indicateur", "Baseline", "Cible", "Fréquence", "Source", "Méthode", "Responsable"],
+    colFracs: [0.20, 0.10, 0.10, 0.10, 0.16, 0.18, 0.16],
+    rows: tableRows,
     styles,
   });
 }
 
 function renderSDGs(doc, obj, styles) {
-  const rows = Array.isArray(obj?.sdgs) ? obj.sdgs : [];
-  const tableRows = rows.map((s) => [s?.sdg || "", s?.targets || "", s?.contribution || "", s?.indicators || ""]);
+  const sdgs = Array.isArray(obj?.sdgs) ? obj.sdgs : [];
+  const rows = [];
+
+  for (const s of sdgs) {
+    const targets = Array.isArray(s?.targets) ? s.targets : [];
+    for (const t of targets) {
+      rows.push([
+        s?.sdg || "",
+        t?.target || "",
+        t?.contribution || "",
+        Array.isArray(t?.project_indicators) ? t.project_indicators.join("; ") : "",
+      ]);
+    }
+  }
 
   renderTable(doc, {
     title: "Alignement ODD (SDGs)",
-    headers: ["ODD", "Cibles", "Contribution", "Indicateurs"],
-    colFracs: [0.1, 0.22, 0.38, 0.3],
-    rows: tableRows,
+    headers: ["SDG", "Target", "Contribution", "Indicateurs projet"],
+    colFracs: [0.12, 0.20, 0.38, 0.30],
+    rows,
     styles,
   });
 }
 
 function renderRisks(doc, obj, styles) {
   const rows = Array.isArray(obj?.risks) ? obj.risks : [];
-  const tableRows = rows.map((r) => [r?.risk || "", r?.probability || "", r?.impact || "", r?.mitigation || "", r?.owner || ""]);
+  const tableRows = rows.map((r) => [
+    r?.risk || "",
+    r?.category || "",
+    r?.probability || "",
+    r?.impact || "",
+    r?.mitigation || "",
+    r?.owner || "",
+  ]);
 
   renderTable(doc, {
     title: "Matrice des risques",
-    headers: ["Risque", "Prob.", "Impact", "Mesures de mitigation", "Responsable"],
-    colFracs: [0.28, 0.08, 0.08, 0.4, 0.16],
+    headers: ["Risque", "Catégorie", "Probabilité", "Impact", "Mitigation", "Owner"],
+    colFracs: [0.26, 0.12, 0.10, 0.10, 0.30, 0.12],
     rows: tableRows,
     styles,
   });
 }
 
 function renderBudget(doc, obj, styles) {
-  const rows = Array.isArray(obj?.lines) ? obj.lines : [];
-  const tableRows = rows.map((l) => [
-    l?.category || "",
-    l?.item || "",
-    String(l?.quantity ?? ""),
-    String(l?.unit_cost ?? ""),
-    String(l?.total ?? ""),
-    l?.notes || "",
-  ]);
+  const currency = String(obj?.currency || "USD");
+  const direct = Array.isArray(obj?.direct_costs) ? obj.direct_costs : [];
 
-  renderTable(doc, {
-    title: "Budget détaillé",
-    headers: ["Catégorie", "Ligne", "Qté", "Coût unitaire", "Total", "Notes"],
-    colFracs: [0.16, 0.28, 0.08, 0.12, 0.12, 0.24],
-    rows: tableRows,
-    styles,
-  });
+  // Render each category separately for readability
+  for (const cat of direct) {
+    const catName = String(cat?.category || "Catégorie");
+    const items = Array.isArray(cat?.items) ? cat.items : [];
+    const rows = items.map((it) => [
+      it?.line_item || "",
+      it?.unit || "",
+      it?.qty || "",
+      it?.unit_cost || "",
+      it?.total_cost || "",
+      it?.notes || "",
+    ]);
+
+    renderTable(doc, {
+      title: `Budget — ${catName} (${currency})`,
+      headers: ["Ligne", "Unité", "Qté", "Coût unitaire", "Total", "Notes"],
+      colFracs: [0.30, 0.10, 0.08, 0.14, 0.12, 0.26],
+      rows,
+      styles,
+    });
+  }
+
+  // Totals
+  const totals = obj?.totals || {};
+  const indirect = obj?.indirect_costs || {};
+  const summaryRows = [
+    { label: "Total direct", value: totals?.direct_total || "" },
+    { label: "Coûts indirects (taux)", value: indirect?.rate || "" },
+    { label: "Coûts indirects (montant)", value: indirect?.amount || "" },
+    { label: "Total général", value: totals?.grand_total || "" },
+  ];
+
+  renderKeyValue(doc, "Résumé budget", summaryRows, styles);
 }
 
 function renderWorkplan(doc, obj, styles) {
-  const rows = Array.isArray(obj?.activities) ? obj.activities : [];
-  const tableRows = rows.map((a) => [
+  const duration = Number(obj?.duration_months || 12);
+  const activities = Array.isArray(obj?.activities) ? obj.activities : [];
+
+  const rows = activities.map((a) => [
     a?.activity || "",
-    a?.month_1 || "",
-    a?.month_2 || "",
-    a?.month_3 || "",
-    a?.month_4 || "",
-    a?.month_5 || "",
-    a?.month_6 || "",
+    a?.component || "",
+    String(a?.start_month ?? ""),
+    String(a?.end_month ?? ""),
+    Array.isArray(a?.milestones) ? a.milestones.join("; ") : "",
   ]);
 
   renderTable(doc, {
-    title: "Chronogramme (extrait 6 mois)",
-    headers: ["Activité", "M1", "M2", "M3", "M4", "M5", "M6"],
-    colFracs: [0.4, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1],
-    rows: tableRows,
+    title: `Chronogramme (Workplan) — ${duration} mois`,
+    headers: ["Activité", "Composante", "Début", "Fin", "Jalons"],
+    colFracs: [0.32, 0.16, 0.08, 0.08, 0.36],
+    rows,
     styles,
   });
 }
 
-function applyFont(doc, style) {
-  doc.font(style.font).fontSize(style.size);
-  if (style.lineGap !== undefined) doc.lineGap(style.lineGap);
-  return doc;
-}
+/* =========================
+   Table utilities
+========================= */
+function renderKeyValue(doc, title, rows, styles) {
+  doc.moveDown(0.7);
+  applyFont(doc, styles.h2).text(title);
+  doc.moveDown(0.25);
 
-function drawDivider(doc) {
   const x = doc.page.margins.left;
   const w = doc.page.width - doc.page.margins.left - doc.page.margins.right;
-  const y = doc.y + 8;
-  doc.moveTo(x, y).lineTo(x + w, y).lineWidth(1).strokeColor("#E5E7EB").stroke();
-  doc.moveDown(1.2);
-}
 
-function getCurrentPageNumber(doc) {
-  const range = doc.bufferedPageRange();
-  return range.start + range.count;
-}
+  const yH = doc.y;
+  doc.save();
+  doc.rect(x, yH, w, 18).fillOpacity(0.06).fill("#000000");
+  doc.restore();
 
-function ensureSpace(doc, needed) {
-  const bottom = doc.page.height - doc.page.margins.bottom;
-  if (doc.y + needed > bottom) doc.addPage();
-}
+  applyFont(doc, { font: "Helvetica-Bold", size: 9.2 });
+  doc.text("Clé", x + 8, yH + 4, { width: w * 0.45 - 10 });
+  doc.text("Valeur", x + 8 + w * 0.45, yH + 4, { width: w * 0.55 - 10 });
 
-function makeDots(left, right, maxDots) {
-  const dotsCount = Math.max(5, Math.min(maxDots, maxDots - Math.floor((left.length + right.length) / 2)));
-  return ".".repeat(dotsCount);
-}
+  doc.moveDown(1.1);
+  applyFont(doc, styles.small);
 
-function renderAllHeadersFooters(doc, { headerLeft, footerLeft, styles }) {
-  const range = doc.bufferedPageRange();
-  for (let i = range.start; i < range.start + range.count; i++) {
-    doc.switchToPage(i);
-    const pageNo = i + 1;
+  for (const r of rows || []) {
+    ensureSpace(doc, 28);
+    const y0 = doc.y;
 
-    doc.font("Helvetica").fontSize(8).fillColor("#6B7280");
-    doc.text(headerLeft, doc.page.margins.left, 22, { align: "left" });
+    doc.save();
+    doc.rect(x, y0 - 2, w, 16).strokeOpacity(0.12).stroke();
+    doc.restore();
 
-    doc.text(footerLeft, doc.page.margins.left, doc.page.height - 34, { align: "left" });
-    doc.text(String(pageNo), doc.page.width - doc.page.margins.right - 20, doc.page.height - 34, {
-      width: 20,
-      align: "right",
-    });
+    doc.text(String(r?.label || ""), x + 8, y0 + 2, { width: w * 0.45 - 10 });
+    doc.text(String(r?.value || ""), x + 8 + w * 0.45, y0 + 2, { width: w * 0.55 - 10 });
 
-    doc.fillColor("#000000");
-    applyFont(doc, styles.body);
-  }
-}
-
-function removeTrailingBlankPages(doc, pageHasBodySet) {
-  try {
-    const range = doc.bufferedPageRange();
-    const total = range.count;
-    if (total <= 1) return;
-
-    let lastIdx = total - 1;
-    while (lastIdx > 0) {
-      if (pageHasBodySet.has(lastIdx)) break;
-      lastIdx -= 1;
-    }
-
-    const pagesToRemove = total - 1 - lastIdx;
-    if (pagesToRemove <= 0) return;
-
-    for (let k = 0; k < pagesToRemove; k++) {
-      doc._pageBuffer.pop();
-      doc._pageBufferStart = Math.min(doc._pageBufferStart, doc._pageBuffer.length);
-    }
-  } catch (e) {
-    console.error("[NGO][PDF] removeTrailingBlankPages failed", e);
+    doc.moveDown(1.05);
   }
 }
 
@@ -477,6 +419,7 @@ function renderTable(doc, { title, headers, colFracs, rows, styles }) {
   const headerY = doc.y;
   ensureSpace(doc, 24);
 
+  // Header bar
   doc.save();
   doc.rect(x, headerY, w, 18).fillOpacity(0.06).fill("#000000");
   doc.restore();
@@ -486,13 +429,20 @@ function renderTable(doc, { title, headers, colFracs, rows, styles }) {
   let cx = x;
   for (let i = 0; i < headers.length; i++) {
     const hw = colW[i];
-    doc.text(String(headers[i] || ""), cx + 6, headerY + 4, { width: hw - 10, align: "left" });
+    doc.text(String(headers[i] || ""), cx + 6, headerY + 4, {
+      width: hw - 10,
+      align: "left",
+    });
     cx += hw;
   }
 
   doc.moveDown(1.2);
   applyFont(doc, styles.small);
 
+  // Defensive cell normalization:
+  // - rows may be arrays of primitives
+  // - or objects (we'll render Object.values)
+  // - cells may be { text: "..." } depending on upstream formatting
   const cellText = (v) => {
     if (v === null || v === undefined) return "";
     if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") return String(v);
@@ -512,15 +462,16 @@ function renderTable(doc, { title, headers, colFracs, rows, styles }) {
     return "";
   };
 
-  const rowHeight = 34;
+  const rowHeight = 34; // base; text wraps inside
   for (const r0 of rows || []) {
     ensureSpace(doc, rowHeight + 8);
+
     const y0 = doc.y;
     doc.save();
     doc.rect(x, y0 - 2, w, rowHeight).strokeOpacity(0.12).stroke();
     doc.restore();
 
-    const r = Array.isArray(r0) ? r0 : r0 && typeof r0 === "object" ? Object.values(r0) : [r0];
+    const r = Array.isArray(r0) ? r0 : (r0 && typeof r0 === "object" ? Object.values(r0) : [r0]);
 
     let x0 = x;
     for (let i = 0; i < headers.length; i++) {
@@ -534,33 +485,210 @@ function renderTable(doc, { title, headers, colFracs, rows, styles }) {
   }
 }
 
-function normalizeFracs(colFracs, n) {
-  const fr = Array.isArray(colFracs) ? colFracs.slice(0, n) : [];
-  while (fr.length < n) fr.push(1 / n);
-  const sum = fr.reduce((a, b) => a + (Number(b) || 0), 0) || 1;
-  return fr.map((x) => (Number(x) || 0) / sum);
+function normalizeFracs(fracs, n) {
+  const arr = Array.isArray(fracs) ? fracs.slice(0, n) : [];
+  while (arr.length < n) arr.push(1 / n);
+  const sum = arr.reduce((a, b) => a + (Number(b) || 0), 0) || 1;
+  return arr.map((v) => (Number(v) || 0) / sum);
 }
 
-function joinIndicators(indicators) {
-  const arr = Array.isArray(indicators) ? indicators : [];
+function joinIndicators(list) {
+  const arr = Array.isArray(list) ? list : [];
   return arr
-    .map((i) => {
-      const ind = i?.indicator || "";
-      const src = i?.source || "";
-      return [ind, src].filter(Boolean).join(" — ");
+    .slice(0, 6)
+    .map((it) => {
+      const name = it?.name ? String(it.name) : "";
+      const base = [
+        name,
+        it?.baseline ? `Baseline: ${it.baseline}` : "",
+        it?.target ? `Cible: ${it.target}` : "",
+        it?.means_of_verification ? `MoV: ${it.means_of_verification}` : "",
+      ]
+        .filter(Boolean)
+        .join(" | ");
+      return base;
     })
     .filter(Boolean)
     .join("\n");
 }
 
-function joinAssumptions(assumptions) {
-  const arr = Array.isArray(assumptions) ? assumptions : [];
-  return arr.map((a) => String(a || "")).filter(Boolean).join("\n");
+function joinAssumptions(list) {
+  const arr = Array.isArray(list) ? list : [];
+  return arr.slice(0, 6).map((s) => `• ${String(s || "")}`).join("\n");
 }
 
+/* =========================
+   Header/footer + cleanup
+========================= */
+function renderAllHeadersFooters(doc, { headerLeft, footerLeft, styles }) {
+  const range = doc.bufferedPageRange();
+  const pageCount = range.count;
+
+  for (let i = range.start; i < range.start + range.count; i++) {
+    doc.switchToPage(i);
+    renderHeaderFooter(doc, {
+      headerLeft,
+      headerRight: "CONFIDENTIEL",
+      footerLeft,
+      pageNumber: i + 1,
+      pageCount,
+      styles,
+    });
+  }
+}
+
+function renderHeaderFooter(doc, { headerLeft, headerRight, footerLeft, pageNumber, pageCount, styles }) {
+  if (typeof doc.__setSuppressTouch === "function") doc.__setSuppressTouch(true);
+
+  const x = doc.page.margins.left;
+  const w = doc.page.width - doc.page.margins.left - doc.page.margins.right;
+
+  // header line
+  doc.save();
+  doc.moveTo(x, 38).lineTo(x + w, 38).strokeOpacity(0.12).stroke();
+  doc.restore();
+
+  applyFont(doc, { font: "Helvetica", size: 9 });
+  doc.text(String(headerLeft || ""), x, 24, { width: w * 0.6, align: "left" });
+  doc.text(String(headerRight || ""), x + w * 0.6, 24, { width: w * 0.4, align: "right" });
+
+  // footer line
+  const y = doc.page.height - 42;
+  doc.save();
+  doc.moveTo(x, y).lineTo(x + w, y).strokeOpacity(0.12).stroke();
+  doc.restore();
+
+  applyFont(doc, { font: "Helvetica", size: 9 });
+  doc.text(String(footerLeft || ""), x, y + 8, { width: w * 0.7, align: "left" });
+  doc.text(`${pageNumber}/${pageCount}`, x + w * 0.7, y + 8, { width: w * 0.3, align: "right" });
+
+  if (typeof doc.__setSuppressTouch === "function") doc.__setSuppressTouch(false);
+}
+
+function removeTrailingBlankPages(doc, pageHasBodySet) {
+  const range = doc.bufferedPageRange();
+  const total = range.count;
+
+  // Remove blank pages only at the end
+  let lastIdx = total - 1;
+  while (lastIdx >= 0) {
+    const hasBody = pageHasBodySet.has(lastIdx);
+    if (hasBody) break;
+    doc.switchToPage(lastIdx);
+    doc.deletePage(lastIdx);
+    lastIdx -= 1;
+  }
+}
+
+/* =========================
+   Helpers
+========================= */
 function sanitizeFilename(name) {
   return String(name || "document")
     .trim()
-    .replace(/[^a-zA-Z0-9._-]+/g, "_")
-    .slice(0, 100);
+    .slice(0, 90)
+    .replace(/[^a-zA-Z0-9._-]+/g, "_");
+}
+
+function applyFont(doc, style) {
+  doc.font(style.font).fontSize(style.size);
+  if (style.lineGap !== undefined) doc.lineGap(style.lineGap);
+}
+
+function ensureSpace(doc, needed) {
+  const bottom = doc.page.height - doc.page.margins.bottom;
+  if (doc.y + needed > bottom) doc.addPage();
+}
+
+function drawDivider(doc) {
+  doc.moveDown(0.35);
+  const x = doc.page.margins.left;
+  const w = doc.page.width - doc.page.margins.left - doc.page.margins.right;
+  doc.save();
+  doc.moveTo(x, doc.y).lineTo(x + w, doc.y).strokeOpacity(0.15).stroke();
+  doc.restore();
+  doc.moveDown(0.7);
+}
+
+function getCurrentPageNumber(doc) {
+  const r = doc.bufferedPageRange();
+  return r.start + r.count;
+}
+
+function makeDots(left, right, max = 90) {
+  const L = String(left || "").length;
+  const R = String(right || "").length;
+  const dots = Math.max(2, Math.min(max, 90 - L - R));
+  return ".".repeat(dots);
+}
+
+
+
+function renderNgoProjectPdf(doc, { title, ctx, sections }) {
+// ---- Blank-page protection (same concept as BP pdfAssembler)
+let __pageIndex = 0;
+const __pageHasBody = new Set();
+const __touch = () => __pageHasBody.add(__pageIndex);
+let __suppressTouch = false;
+
+doc.on("pageAdded", () => {
+  __pageIndex += 1;
+});
+
+const __origText = doc.text.bind(doc);
+doc.text = function (...args) {
+  const s = args?.[0];
+  if (!__suppressTouch && s !== undefined && s !== null && String(s).trim().length > 0) {
+    __touch();
+  }
+  return __origText(...args);
+};
+
+doc.__touch = __touch;
+doc.__setSuppressTouch = (v) => {
+  __suppressTouch = !!v;
+};
+
+const styles = {
+  title: { font: "Helvetica-Bold", size: 22 },
+  h1: { font: "Helvetica-Bold", size: 16 },
+  h2: { font: "Helvetica-Bold", size: 12 },
+  body: { font: "Helvetica", size: 10.5, lineGap: 3.2 },
+  small: { font: "Helvetica", size: 9, lineGap: 2.6 },
+};
+
+const safeSections = Array.isArray(sections) ? sections : [];
+const headerLeft = String(ctx?.organization || "ONG").trim() || "ONG";
+const footerLeft = String(ctx?.projectTitle || title || "Projet").trim();
+
+// 1) Cover
+renderCover(doc, title, ctx, styles);
+
+// 2) TOC placeholder
+const tocPageIndex = doc.bufferedPageRange().count;
+doc.addPage();
+renderTOCPlaceholder(doc, styles);
+
+// 3) Sections + TOC entries
+const toc = [];
+for (const s of safeSections) {
+  const secTitle = (s?.title || "").trim() || s?.key || "Section";
+  doc.addPage();
+
+  const startPageNumber = getCurrentPageNumber(doc);
+  toc.push({ title: secTitle, page: startPageNumber });
+
+  renderSection(doc, secTitle, s, styles);
+}
+
+// 4) Fill TOC
+fillTOC(doc, tocPageIndex, toc, styles);
+
+// 5) headers/footers
+renderAllHeadersFooters(doc, { headerLeft, footerLeft, styles });
+
+// 6) Remove trailing blank pages
+removeTrailingBlankPages(doc, __pageHasBody);
+
+doc.end();
 }
