@@ -2,17 +2,33 @@
 import express from "express";
 import crypto from "crypto";
 import { generateNgoProjectPremium } from "../core/ngoOrchestrator.js";
-import { writeNgoProjectPdfPremium } from "../core/ngoPdfAssembler.js";
+import { buildNgoProjectPdfBufferPremium, writeNgoProjectPdfPremium } from "../core/ngoPdfAssembler.js";
 import { normalizeLang, safeStr } from "../core/sanitize.js";
 
 const router = express.Router();
 
 /* =========================================================
-   ✅ JOB MODE + Anti-concurrency lock (same pattern as BP)
+   ✅ JOB MODE + Anti-concurrency lock
+
+   Root cause of your errors:
+   - JOB_NOT_FOUND: jobs are stored only in RAM (Map). On Render, an instance can restart
+     (deploy, sleep/wake, memory pressure, crash). When that happens the Map is cleared.
+     Frontend keeps polling a jobId that no longer exists => 404 JOB_NOT_FOUND.
+   - 500 + "Cannot read properties of undefined (reading 'text')" on client: triggered after
+     the backend returns 500/404 and the client tries to parse an unexpected body.
+
+   Minimal fix:
+   - During async generation, pre-build the PDF buffer and store it in the job.
+   - /result becomes a lightweight response that ONLY streams the already-built PDF.
+   - If job is gone (instance restarted), frontend will show a clear error.
 ========================================================= */
+
 const JOB_TTL_MS = Number(process.env.NGO_JOB_TTL_MS || 1000 * 60 * 60); // 1h
 const MAX_JOBS = Number(process.env.NGO_MAX_JOBS || 25);
-const jobs = new Map(); // id -> { status, createdAt, startedAt, doneAt, error, result }
+
+// id -> { status, createdAt, startedAt, doneAt, error, pdf: { title, bytes, mime } }
+const jobs = new Map();
+
 let generationInFlight = false;
 
 function now() {
@@ -86,29 +102,19 @@ router.get("/premium/jobs/:id/result", (req, res) => {
   if (j.status !== "done") {
     return res.status(409).json({ error: "JOB_NOT_READY", status: j.status });
   }
-  const result = j.result;
-  if (!result?.sections || !result?.ctx || !result?.title) {
-    return res.status(500).json({ error: "JOB_RESULT_MISSING" });
+
+  // ✅ Preferred path: stream stored PDF
+  if (j.pdf?.bytes && Buffer.isBuffer(j.pdf.bytes)) {
+    res.setHeader("Content-Type", j.pdf.mime || "application/pdf");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${sanitizeFilename(j.pdf.title || "ngo_project")}.pdf"`
+    );
+    return res.status(200).send(j.pdf.bytes);
   }
 
-  try {
-    return writeNgoProjectPdfPremium({
-      res,
-      title: result.title,
-      ctx: result.ctx,
-      sections: result.sections,
-    });
-  } catch (e) {
-    console.error("[NGO] PDF generation failed", e);
-    if (!res.headersSent) {
-      return res.status(500).json({ error: e?.message || String(e) });
-    }
-    try {
-      return res.end();
-    } catch (_) {
-      return;
-    }
-  }
+  // Fallback: if pdf missing, do not crash; return explicit error
+  return res.status(500).json({ error: "JOB_PDF_MISSING" });
 });
 
 /**
@@ -186,12 +192,17 @@ router.post("/premium", async (req, res) => {
 
       try {
         const result = await generateNgoProjectPremium({ lang, ctx, lite });
-        j.status = "done";
-        j.result = {
+        const sections = result?.sections || [];
+
+        // ✅ Build PDF once, store bytes
+        const pdfBytes = await buildNgoProjectPdfBufferPremium({
           title,
           ctx,
-          sections: result?.sections || [],
-        };
+          sections,
+        });
+
+        j.status = "done";
+        j.pdf = { title, bytes: pdfBytes, mime: "application/pdf" };
         j.doneAt = now();
       } catch (e) {
         j.status = "error";
@@ -233,3 +244,10 @@ router.post("/premium", async (req, res) => {
 });
 
 export default router;
+
+function sanitizeFilename(name) {
+  return String(name || "document")
+    .trim()
+    .replace(/[^a-zA-Z0-9._-]+/g, "_")
+    .slice(0, 100);
+}
