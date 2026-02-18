@@ -7,47 +7,6 @@ import {
   NGO_LITE_ORDER,
 } from "./ngoPrompts.js";
 
-
-// =========================================================
-// DeepSeek call wrapper (Render/network hardening)
-// - Retries on transient SDK/network failures (incl. TypeError: reading 'text')
-// - Keeps error message stable + logs full stack server-side
-// =========================================================
-async function deepseekChatWithRetry({ messages, temperature, max_tokens, retries = 2, baseDelayMs = 1500 }) {
-  let lastErr = null;
-  for (let attempt = 0; attempt <= retries; attempt++) {
-    try {
-      return await deepseekChat({ messages, temperature, max_tokens });
-    } catch (e) {
-      lastErr = e;
-      const msg = String(e?.message || e);
-
-      // Log the full error for Render logs (stack is critical)
-      console.error("[NGO][DeepSeek] call failed", { attempt, msg, stack: e?.stack });
-
-      // Retry ONLY on likely-transient conditions (SDK/network)
-      const isTransient =
-        msg.includes("Cannot read properties of undefined (reading 'text')") ||
-        msg.includes("fetch") ||
-        msg.includes("network") ||
-        msg.includes("ECONNRESET") ||
-        msg.includes("ETIMEDOUT") ||
-        msg.includes("EAI_AGAIN") ||
-        msg.includes("503") ||
-        msg.includes("502");
-
-      if (!isTransient || attempt === retries) break;
-
-      const delay = baseDelayMs * (attempt + 1);
-      await new Promise((r) => setTimeout(r, delay));
-    }
-  }
-
-  // Re-throw a clean error message (frontend-friendly)
-  const finalMsg = String(lastErr?.message || lastErr || "DeepSeek error");
-  throw new Error(finalMsg);
-}
-
 export async function generateNgoProjectPremium({ lang, ctx, lite = false }) {
   const temperature = Number(process.env.NGO_TEMPERATURE || 0.25);
 
@@ -141,15 +100,20 @@ async function generateTextSectionWithContinuation({
 
   let acc = "";
   for (let attempt = 0; attempt <= retries; attempt++) {
-    const raw = await deepseekChatWithRetry({
-      messages: [
-        { role: "system", content: ngoSystemPrompt(lang) },
-        { role: "user", content: prompt },
-      ],
-      temperature,
-      max_tokens,
-      retries: 2,
-    });
+    let raw = "";
+    try {
+      raw = await deepseekChat({
+        messages: [
+          { role: "system", content: ngoSystemPrompt(lang) },
+          { role: "user", content: prompt },
+        ],
+        temperature,
+        max_tokens,
+      });
+    } catch (e) {
+      console.error("[NGO] deepseekChat failed (text section)", { key, msg: String(e?.message || e), stack: e?.stack });
+      throw new Error(`NGO_SECTION_FAILED:${key}::${String(e?.message || e)}`);
+    }
 
     const chunk = String(raw || "").trim();
     if (chunk) acc = (acc ? acc + "\n\n" : "") + chunk;
@@ -264,15 +228,20 @@ async function generateJsonSectionWithRetry({
 
   let last = "";
   for (let attempt = 0; attempt <= retries; attempt++) {
-    const raw = await deepseekChatWithRetry({
-      messages: [
-        { role: "system", content: ngoSystemPrompt(lang) },
-        { role: "user", content: prompt },
-      ],
-      temperature,
-      max_tokens,
-      retries: 2,
-    });
+    let raw = "";
+    try {
+      raw = await deepseekChat({
+        messages: [
+          { role: "system", content: ngoSystemPrompt(lang) },
+          { role: "user", content: prompt },
+        ],
+        temperature,
+        max_tokens,
+      });
+    } catch (e) {
+      console.error("[NGO] deepseekChat failed (text section)", { key, msg: String(e?.message || e), stack: e?.stack });
+      throw new Error(`NGO_SECTION_FAILED:${key}::${String(e?.message || e)}`);
+    }
 
     last = String(raw || "").trim();
     const jsonText = extractJsonBlock(last);
@@ -290,15 +259,19 @@ IMPORTANT: Return STRICT JSON ONLY.
 - Must start with { and end with }
 `.trim();
 
-    last = await deepseekChatWithRetry({
-      messages: [
-        { role: "system", content: ngoSystemPrompt(lang) },
-        { role: "user", content: strict },
-      ],
-      temperature: Math.min(0.2, temperature),
-      max_tokens,
-      retries: 2,
-    });
+    try {
+      last = await deepseekChat({
+        messages: [
+          { role: "system", content: ngoSystemPrompt(lang) },
+          { role: "user", content: strict },
+        ],
+        temperature: Math.min(0.2, temperature),
+        max_tokens,
+      });
+    } catch (e) {
+      console.error("[NGO] deepseekChat failed (json strict retry)", { key, msg: String(e?.message || e), stack: e?.stack });
+      throw new Error(`NGO_SECTION_FAILED:${key}::${String(e?.message || e)}`);
+    }
   }
   return last;
 }
