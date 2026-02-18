@@ -111,8 +111,13 @@ async function generateTextSectionWithContinuation({
         max_tokens,
       });
     } catch (e) {
-      console.error("[NGO] deepseekChat failed (text section)", { key, msg: String(e?.message || e), stack: e?.stack });
-      throw new Error(`NGO_SECTION_FAILED:${key}::${String(e?.message || e)}`);
+      const msg = String(e?.message || e);
+      console.error("[NGO] deepseekChat failed", { key, attempt, msg, stack: e?.stack });
+      if (attempt < retries) {
+        await new Promise((r) => setTimeout(r, 700 * (attempt + 1)));
+        continue;
+      }
+      throw e;
     }
 
     const chunk = String(raw || "").trim();
@@ -239,8 +244,13 @@ async function generateJsonSectionWithRetry({
         max_tokens,
       });
     } catch (e) {
-      console.error("[NGO] deepseekChat failed (text section)", { key, msg: String(e?.message || e), stack: e?.stack });
-      throw new Error(`NGO_SECTION_FAILED:${key}::${String(e?.message || e)}`);
+      const msg = String(e?.message || e);
+      console.error("[NGO] deepseekChat failed", { key, attempt, msg, stack: e?.stack });
+      if (attempt < retries) {
+        await new Promise((r) => setTimeout(r, 700 * (attempt + 1)));
+        continue;
+      }
+      throw e;
     }
 
     last = String(raw || "").trim();
@@ -269,8 +279,13 @@ IMPORTANT: Return STRICT JSON ONLY.
         max_tokens,
       });
     } catch (e) {
-      console.error("[NGO] deepseekChat failed (json strict retry)", { key, msg: String(e?.message || e), stack: e?.stack });
-      throw new Error(`NGO_SECTION_FAILED:${key}::${String(e?.message || e)}`);
+      const msg = String(e?.message || e);
+      console.error("[NGO] deepseekChat failed (json strict)", { key, attempt, msg, stack: e?.stack });
+      if (attempt < retries) {
+        await new Promise((r) => setTimeout(r, 700 * (attempt + 1)));
+        continue;
+      }
+      throw e;
     }
   }
   return last;
