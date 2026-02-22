@@ -1,5 +1,35 @@
 // bp/core/ngoPdfAssembler.js
 import PDFDocument from "pdfkit";
+import { PassThrough } from "stream";
+
+
+export async function buildNgoProjectPdfBufferPremium({ title, ctx, sections }) {
+  return new Promise((resolve, reject) => {
+    const doc = new PDFDocument({
+      size: "A4",
+      margins: { top: 56, left: 56, right: 56, bottom: 56 },
+      bufferPages: true,
+    });
+
+    const stream = new PassThrough();
+    const chunks = [];
+
+    stream.on("data", (c) => chunks.push(c));
+    stream.on("end", () => resolve(Buffer.concat(chunks)));
+    stream.on("error", reject);
+
+    doc.on("error", reject);
+    doc.pipe(stream);
+
+    try {
+      renderNgoProjectPdf(doc, { title, ctx, sections });
+      doc.end();
+    } catch (e) {
+      reject(e);
+      try { doc.end(); } catch (_) {}
+    }
+  });
+}
 
 export function writeNgoProjectPdfPremium({ res, title, ctx, sections }) {
   res.setHeader("Content-Type", "application/pdf");
@@ -11,92 +41,41 @@ export function writeNgoProjectPdfPremium({ res, title, ctx, sections }) {
     bufferPages: true,
   });
 
-  // Prevent unhandled 'error' event on ServerResponse (we attach a real handler below too)
-  res.on("error", () => {});
-
   // Pipe early, but keep the process crash-proof if PDF generation fails mid-stream.
   doc.pipe(res);
 
   // If the PDFKit stream errors, avoid crashing the whole Render instance.
+  const __safeClose = (why, err) => {
+    try {
+      try { doc.unpipe(res); } catch (_) {}
+      try { doc.removeAllListeners("data"); } catch (_) {}
+      try { doc.removeAllListeners("end"); } catch (_) {}
+      try { doc.removeAllListeners("error"); } catch (_) {}
+      if (err) console.error("[NGO][PDF] close:", why, err);
+      if (!res.writableEnded) {
+        if (!res.headersSent) res.statusCode = 500;
+        try { res.end(); } catch (_) {}
+      }
+      // If the stream is in a bad state, force close the socket (prevents write-after-end).
+      try { res.destroy(); } catch (_) {}
+    } catch (_) {}
+  };
+
   doc.on("error", (err) => {
     console.error("[NGO][PDF] PDFKit error", err);
-    try {
-      if (!res.headersSent) res.statusCode = 500;
-      res.end();
-    } catch (_) {}
+    __safeClose("pdfkit_error", err);
   });
 
   // If the client disconnects, stop writing.
   res.on("close", () => {
-    try {
-      doc.end();
-    } catch (_) {}
-  });
-
-  // ---- Blank-page protection (same concept as BP pdfAssembler)
-  let __pageIndex = 0;
-  const __pageHasBody = new Set();
-  const __touch = () => __pageHasBody.add(__pageIndex);
-  let __suppressTouch = false;
-
-  doc.on("pageAdded", () => {
-    __pageIndex += 1;
-  });
-
-  const __origText = doc.text.bind(doc);
-  doc.text = function (...args) {
-    const s = args?.[0];
-    if (!__suppressTouch && s !== undefined && s !== null && String(s).trim().length > 0) {
-      __touch();
+    // Client disconnected mid-stream.
+    if (!res.writableEnded) {
+      try { doc.end(); } catch (_) {}
+      try { res.destroy(); } catch (_) {}
     }
-    return __origText(...args);
-  };
+  });
 
-  doc.__touch = __touch;
-  doc.__setSuppressTouch = (v) => {
-    __suppressTouch = !!v;
-  };
-
-  const styles = {
-    title: { font: "Helvetica-Bold", size: 22 },
-    h1: { font: "Helvetica-Bold", size: 16 },
-    h2: { font: "Helvetica-Bold", size: 12 },
-    body: { font: "Helvetica", size: 10.5, lineGap: 3.2 },
-    small: { font: "Helvetica", size: 9, lineGap: 2.6 },
-  };
-
-  const safeSections = Array.isArray(sections) ? sections : [];
-  const headerLeft = String(ctx?.organization || "ONG").trim() || "ONG";
-  const footerLeft = String(ctx?.projectTitle || title || "Projet").trim();
-
-  // 1) Cover
-  renderCover(doc, title, ctx, styles);
-
-  // 2) TOC placeholder
-  const tocPageIndex = doc.bufferedPageRange().count;
-  doc.addPage();
-  renderTOCPlaceholder(doc, styles);
-
-  // 3) Sections + TOC entries
-  const toc = [];
-  for (const s of safeSections) {
-    const secTitle = (s?.title || "").trim() || s?.key || "Section";
-    doc.addPage();
-
-    const startPageNumber = getCurrentPageNumber(doc);
-    toc.push({ title: secTitle, page: startPageNumber });
-
-    renderSection(doc, secTitle, s, styles);
-  }
-
-  // 4) Fill TOC
-  fillTOC(doc, tocPageIndex, toc, styles);
-
-  // 5) headers/footers
-  renderAllHeadersFooters(doc, { headerLeft, footerLeft, styles });
-
-  // 6) Remove trailing blank pages
-  removeTrailingBlankPages(doc, __pageHasBody);
+  renderNgoProjectPdf(doc, { title, ctx, sections });
 
   doc.end();
 }
@@ -441,7 +420,7 @@ function renderKeyValue(doc, title, rows, styles) {
   }
 }
 
-function renderTable(doc, { title, headers = [], colFracs, rows, styles } = {}) {
+function renderTable(doc, { title, headers, colFracs, rows, styles }) {
   doc.moveDown(0.8);
   applyFont(doc, styles.h2).text(String(title || ""));
   doc.moveDown(0.25);
@@ -449,18 +428,7 @@ function renderTable(doc, { title, headers = [], colFracs, rows, styles } = {}) 
   const x = doc.page.margins.left;
   const w = doc.page.width - doc.page.margins.left - doc.page.margins.right;
 
-  const safeHeadersInput = Array.isArray(headers) ? headers : [];
-  let safeN = safeHeadersInput.length;
-  if (safeN === 0) {
-    const first = (rows && rows.length) ? rows[0] : null;
-    if (Array.isArray(first)) safeN = first.length;
-    else if (first && typeof first === "object") safeN = Object.keys(first).length;
-    else if (Array.isArray(colFracs) && colFracs.length) safeN = colFracs.length;
-    else safeN = 1;
-  }
-  const safeHeaders = safeHeadersInput.length ? safeHeadersInput.slice(0, safeN) : Array.from({ length: safeN }, (_, i) => `Col ${i + 1}`);
-
-  const fracs = normalizeFracs(colFracs, safeHeaders.length);
+  const fracs = normalizeFracs(colFracs, headers.length);
   const colW = fracs.map((f) => f * w);
 
   const headerY = doc.y;
@@ -474,9 +442,9 @@ function renderTable(doc, { title, headers = [], colFracs, rows, styles } = {}) 
   applyFont(doc, { font: "Helvetica-Bold", size: 9.1 });
 
   let cx = x;
-  for (let i = 0; i < headers.length; i++) {
-    const hw = colW[i];
-    doc.text(String(headers[i] || ""), cx + 6, headerY + 4, {
+  for (let i = 0; i < safeHeaders.length; i++) {
+    const hw = colW[i] || (w / safeHeaders.length);
+    doc.text(headerLabel(safeHeaders[i]), cx + 6, headerY + 4, {
       width: hw - 10,
       align: "left",
     });
@@ -486,6 +454,15 @@ function renderTable(doc, { title, headers = [], colFracs, rows, styles } = {}) 
   doc.moveDown(1.2);
   applyFont(doc, styles.small);
 
+
+  const headerLabel = (v) => {
+    if (v === null || v === undefined) return "";
+    if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") return String(v);
+    if (typeof v === "object") {
+      return String(v.text ?? v.label ?? v.value ?? v.name ?? "");
+    }
+    return "";
+  };
   // Defensive cell normalization:
   // - rows may be arrays of primitives
   // - or objects (we'll render Object.values)
@@ -495,7 +472,7 @@ function renderTable(doc, { title, headers = [], colFracs, rows, styles } = {}) 
     if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") return String(v);
     if (Array.isArray(v)) return v.map(cellText).filter(Boolean).join(" • ");
     if (typeof v === "object") {
-      if (typeof v.text === "string" || typeof v.text === "number") return String(v.text);
+      if (v && typeof v === "object" && (typeof v.text === "string" || typeof v.text === "number")) return String(v.text);
       if (typeof v.label === "string" || typeof v.label === "number") return String(v.label);
       if (typeof v.value === "string" || typeof v.value === "number") return String(v.value);
       if (typeof v.name === "string" || typeof v.name === "number") return String(v.name);
@@ -521,7 +498,7 @@ function renderTable(doc, { title, headers = [], colFracs, rows, styles } = {}) 
     const r = Array.isArray(r0) ? r0 : (r0 && typeof r0 === "object" ? Object.values(r0) : [r0]);
 
     let x0 = x;
-    for (let i = 0; i < headers.length; i++) {
+    for (let i = 0; i < safeHeaders.length; i++) {
       const cellW = colW[i];
       const txt = cellText(r?.[i]);
       doc.text(txt, x0 + 6, y0 + 2, { width: cellW - 10, height: rowHeight - 4 });
@@ -667,4 +644,75 @@ function makeDots(left, right, max = 90) {
   const R = String(right || "").length;
   const dots = Math.max(2, Math.min(max, 90 - L - R));
   return ".".repeat(dots);
+}
+
+
+
+function renderNgoProjectPdf(doc, { title, ctx, sections }) {
+// ---- Blank-page protection (same concept as BP pdfAssembler)
+let __pageIndex = 0;
+const __pageHasBody = new Set();
+const __touch = () => __pageHasBody.add(__pageIndex);
+let __suppressTouch = false;
+
+doc.on("pageAdded", () => {
+  __pageIndex += 1;
+});
+
+const __origText = doc.text.bind(doc);
+doc.text = function (...args) {
+  const s = args?.[0];
+  if (!__suppressTouch && s !== undefined && s !== null && String(s).trim().length > 0) {
+    __touch();
+  }
+  return __origText(...args);
+};
+
+doc.__touch = __touch;
+doc.__setSuppressTouch = (v) => {
+  __suppressTouch = !!v;
+};
+
+const styles = {
+  title: { font: "Helvetica-Bold", size: 22 },
+  h1: { font: "Helvetica-Bold", size: 16 },
+  h2: { font: "Helvetica-Bold", size: 12 },
+  body: { font: "Helvetica", size: 10.5, lineGap: 3.2 },
+  small: { font: "Helvetica", size: 9, lineGap: 2.6 },
+};
+
+const safeSections = Array.isArray(sections) ? sections : [];
+const headerLeft = String(ctx?.organization || "ONG").trim() || "ONG";
+const footerLeft = String(ctx?.projectTitle || title || "Projet").trim();
+
+// 1) Cover
+renderCover(doc, title, ctx, styles);
+
+// 2) TOC placeholder
+const tocPageIndex = doc.bufferedPageRange().count;
+doc.addPage();
+renderTOCPlaceholder(doc, styles);
+
+// 3) Sections + TOC entries
+const toc = [];
+for (const s of safeSections) {
+  const secTitle = (s?.title || "").trim() || s?.key || "Section";
+  doc.addPage();
+
+  const startPageNumber = getCurrentPageNumber(doc);
+  toc.push({ title: secTitle, page: startPageNumber });
+
+  renderSection(doc, secTitle, s, styles);
+}
+
+// 4) Fill TOC
+fillTOC(doc, tocPageIndex, toc, styles);
+
+// 5) headers/footers
+renderAllHeadersFooters(doc, { headerLeft, footerLeft, styles });
+
+// 6) Remove trailing blank pages
+removeTrailingBlankPages(doc, __pageHasBody);
+
+doc.end();
 }
