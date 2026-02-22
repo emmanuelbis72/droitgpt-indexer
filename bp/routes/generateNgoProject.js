@@ -2,7 +2,7 @@
 import express from "express";
 import crypto from "crypto";
 import { generateNgoProjectPremium } from "../core/ngoOrchestrator.js";
-import { writeNgoProjectPdfPremium, buildNgoProjectPdfBufferPremium } from "../core/ngoPdfAssembler.js";
+import { writeNgoProjectPdfPremium } from "../core/ngoPdfAssembler.js";
 import { normalizeLang, safeStr } from "../core/sanitize.js";
 
 const router = express.Router();
@@ -12,7 +12,7 @@ const router = express.Router();
 ========================================================= */
 const JOB_TTL_MS = Number(process.env.NGO_JOB_TTL_MS || 1000 * 60 * 60); // 1h
 const MAX_JOBS = Number(process.env.NGO_MAX_JOBS || 25);
-const jobs = new Map(); // id -> { status, createdAt, startedAt, doneAt, error, result, pdf }
+const jobs = new Map(); // id -> { status, createdAt, startedAt, doneAt, error, result }
 let generationInFlight = false;
 
 function now() {
@@ -78,28 +78,22 @@ router.get("/premium/jobs/:id", (req, res) => {
   });
 });
 
-router.get("/premium/jobs/:id/result", async (req, res) => {
+router.get("/premium/jobs/:id/result", (req, res) => {
   pruneJobs();
   const id = String(req.params.id || "");
   const j = jobs.get(id);
   if (!j) return res.status(404).json({ error: "JOB_NOT_FOUND" });
-
   if (j.status !== "done") {
+    // Provide explicit info when the job finished in error/rejected.
+    if (j.status === "error" || j.status === "rejected") {
+      return res.status(409).json({
+        error: j.status === "error" ? "JOB_ERROR" : "JOB_REJECTED",
+        status: j.status,
+        details: j.error || null,
+      });
+    }
     return res.status(409).json({ error: "JOB_NOT_READY", status: j.status });
   }
-
-  // ✅ fast path: PDF already built in job
-  if (j.pdf && Buffer.isBuffer(j.pdf) && j.pdf.length > 0) {
-    const title = j.result?.title || "ngo-project";
-    res.setHeader("Content-Type", "application/pdf");
-    res.setHeader(
-      "Content-Disposition",
-      `attachment; filename="${String(title).replace(/[^a-zA-Z0-9._-]+/g, "_").slice(0, 100)}.pdf"`
-    );
-    return res.status(200).send(j.pdf);
-  }
-
-  // fallback (should be rare): generate on demand
   const result = j.result;
   if (!result?.sections || !result?.ctx || !result?.title) {
     return res.status(500).json({ error: "JOB_RESULT_MISSING" });
@@ -124,8 +118,6 @@ router.get("/premium/jobs/:id/result", async (req, res) => {
     }
   }
 });
-
-
 
 /**
  * POST /generate-ngo-project/premium
@@ -202,12 +194,7 @@ router.post("/premium", async (req, res) => {
 
       try {
         const result = await generateNgoProjectPremium({ lang, ctx, lite });
-
-        // ✅ build PDF inside job for stable /result
-        const pdf = await buildNgoProjectPdfBufferPremium({ title, ctx, sections: result?.sections || [] });
-
         j.status = "done";
-        j.pdf = pdf;
         j.result = {
           title,
           ctx,
@@ -215,6 +202,7 @@ router.post("/premium", async (req, res) => {
         };
         j.doneAt = now();
       } catch (e) {
+        console.error("[NGO][JOB] generation failed", { msg: String(e?.message || e), stack: e?.stack });
         j.status = "error";
         j.error = String(e?.message || e);
         j.doneAt = now();

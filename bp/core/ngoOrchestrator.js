@@ -103,21 +103,16 @@ async function generateTextSectionWithContinuation({
     let raw = "";
     try {
       raw = await deepseekChat({
-        messages: [
-          { role: "system", content: ngoSystemPrompt(lang) },
-          { role: "user", content: prompt },
-        ],
-        temperature,
-        max_tokens,
-      });
+      messages: [
+        { role: "system", content: ngoSystemPrompt(lang) },
+        { role: "user", content: prompt },
+      ],
+      temperature,
+      max_tokens,
+    });
     } catch (e) {
-      const msg = String(e?.message || e);
-      console.error("[NGO] deepseekChat failed", { key, attempt, msg, stack: e?.stack });
-      if (attempt < retries) {
-        await new Promise((r) => setTimeout(r, 700 * (attempt + 1)));
-        continue;
-      }
-      throw e;
+      console.error("[NGO] deepseekChat failed (text section)", { key, msg: String(e?.message || e), stack: e?.stack });
+      throw new Error(`NGO_SECTION_FAILED:${key}::${String(e?.message || e)}`);
     }
 
     const chunk = String(raw || "").trim();
@@ -236,21 +231,16 @@ async function generateJsonSectionWithRetry({
     let raw = "";
     try {
       raw = await deepseekChat({
-        messages: [
-          { role: "system", content: ngoSystemPrompt(lang) },
-          { role: "user", content: prompt },
-        ],
-        temperature,
-        max_tokens,
-      });
+      messages: [
+        { role: "system", content: ngoSystemPrompt(lang) },
+        { role: "user", content: prompt },
+      ],
+      temperature,
+      max_tokens,
+    });
     } catch (e) {
-      const msg = String(e?.message || e);
-      console.error("[NGO] deepseekChat failed", { key, attempt, msg, stack: e?.stack });
-      if (attempt < retries) {
-        await new Promise((r) => setTimeout(r, 700 * (attempt + 1)));
-        continue;
-      }
-      throw e;
+      console.error("[NGO] deepseekChat failed (json section)", { key, msg: String(e?.message || e), stack: e?.stack });
+      throw new Error(`NGO_SECTION_FAILED:${key}::${String(e?.message || e)}`);
     }
 
     last = String(raw || "").trim();
@@ -271,22 +261,13 @@ IMPORTANT: Return STRICT JSON ONLY.
 
     try {
       last = await deepseekChat({
-        messages: [
-          { role: "system", content: ngoSystemPrompt(lang) },
-          { role: "user", content: strict },
-        ],
-        temperature: Math.min(0.2, temperature),
-        max_tokens,
-      });
-    } catch (e) {
-      const msg = String(e?.message || e);
-      console.error("[NGO] deepseekChat failed (json strict)", { key, attempt, msg, stack: e?.stack });
-      if (attempt < retries) {
-        await new Promise((r) => setTimeout(r, 700 * (attempt + 1)));
-        continue;
-      }
-      throw e;
-    }
+      messages: [
+        { role: "system", content: ngoSystemPrompt(lang) },
+        { role: "user", content: strict },
+      ],
+      temperature: Math.min(0.2, temperature),
+      max_tokens,
+    });
   }
   return last;
 }
