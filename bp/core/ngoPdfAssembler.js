@@ -12,49 +12,120 @@ export function writeNgoProjectPdfPremium({ res, title, ctx, sections }) {
   });
 
   // Pipe early, but keep the process crash-proof if PDF generation fails mid-stream.
-  doc.pipe(res);
-
-  // Guard against double-close and "write after end"
+  // Stream safety: prevent "write after end" if an exception occurs mid-generation
   let __closed = false;
-  const __safeClose = (reason, err) => {
+  const __safeClose = (why) => {
     if (__closed) return;
     __closed = true;
-
-    if (err) console.error("[NGO][PDF] stream close:", reason, err);
-    else console.error("[NGO][PDF] stream close:", reason);
-
-    // Stop PDFKit from writing into a closed response
-    try { doc.unpipe(res); } catch (_) {}
-    try { doc.removeAllListeners("data"); } catch (_) {}
-
-    // End the response if still writable
-    try {
-      if (!res.headersSent) res.statusCode = 500;
-      if (!res.writableEnded) res.end();
-    } catch (_) {}
-
-    // End / destroy the PDF stream
-    try { doc.end(); } catch (_) {}
-    try { doc.destroy?.(); } catch (_) {}
+    try { doc.unpipe(res); } catch {}
+    try { doc.removeAllListeners("data"); } catch {}
+    try { doc.removeAllListeners("end"); } catch {}
+    try { doc.removeAllListeners("error"); } catch {}
+    try { res.end(); } catch {}
   };
 
-  // If the PDFKit stream errors, avoid crashing the whole Render instance.
-  doc.on("error", (err) => __safeClose("pdfkit_error", err));
-
-  // If the client disconnects or response errors, stop writing.
-  res.on("close", () => {
-    if (!res.writableEnded) __safeClose("client_closed");
+  res.on("error", (e) => {
+    console.error("[NGO][PDF] response error", e);
+    __safeClose("response_error");
   });
-  res.on("error", (err) => __safeClose("response_error", err));
 
-  try {
-    renderNgoProjectPdf(doc, { title, ctx, sections });
-    doc.end();
-  } catch (err) {
-    console.error("[NGO] PDF generation failed", err);
-    __safeClose("render_failed", err);
+  res.on("close", () => {
+    // Client may abort download; stop piping to avoid write-after-end
+    if (!res.writableEnded) {
+      console.warn("[NGO][PDF] response close (client aborted)");
+      __safeClose("client_close");
+    }
+  });
+
+  doc.on("error", (e) => {
+    console.error("[NGO][PDF] doc error", e);
+    __safeClose("doc_error");
+  });
+
+  doc.pipe(res);
+
+  // If the PDFKit stream errors, avoid crashing the whole Render instance.
+  doc.on("error", (err) => {
+    console.error("[NGO][PDF] PDFKit error", err);
+    try {
+      if (!res.headersSent) res.statusCode = 500;
+      res.end();
+    } catch (_) {}
+  });
+
+  // If the client disconnects, stop writing.
+  res.on("close", () => {
+    try {
+      doc.end();
+    } catch (_) {}
+  });
+
+  // ---- Blank-page protection (same concept as BP pdfAssembler)
+  let __pageIndex = 0;
+  const __pageHasBody = new Set();
+  const __touch = () => __pageHasBody.add(__pageIndex);
+  let __suppressTouch = false;
+
+  doc.on("pageAdded", () => {
+    __pageIndex += 1;
+  });
+
+  const __origText = doc.text.bind(doc);
+  doc.text = function (...args) {
+    const s = args?.[0];
+    if (!__suppressTouch && s !== undefined && s !== null && String(s).trim().length > 0) {
+      __touch();
+    }
+    return __origText(...args);
+  };
+
+  doc.__touch = __touch;
+  doc.__setSuppressTouch = (v) => {
+    __suppressTouch = !!v;
+  };
+
+  const styles = {
+    title: { font: "Helvetica-Bold", size: 22 },
+    h1: { font: "Helvetica-Bold", size: 16 },
+    h2: { font: "Helvetica-Bold", size: 12 },
+    body: { font: "Helvetica", size: 10.5, lineGap: 3.2 },
+    small: { font: "Helvetica", size: 9, lineGap: 2.6 },
+  };
+
+  const safeSections = Array.isArray(sections) ? sections : [];
+  const headerLeft = String(ctx?.organization || "ONG").trim() || "ONG";
+  const footerLeft = String(ctx?.projectTitle || title || "Projet").trim();
+
+  // 1) Cover
+  renderCover(doc, title, ctx, styles);
+
+  // 2) TOC placeholder
+  const tocPageIndex = doc.bufferedPageRange().count;
+  doc.addPage();
+  renderTOCPlaceholder(doc, styles);
+
+  // 3) Sections + TOC entries
+  const toc = [];
+  for (const s of safeSections) {
+    const secTitle = (s?.title || "").trim() || s?.key || "Section";
+    doc.addPage();
+
+    const startPageNumber = getCurrentPageNumber(doc);
+    toc.push({ title: secTitle, page: startPageNumber });
+
+    renderSection(doc, secTitle, s, styles);
   }
-}
+
+  // 4) Fill TOC
+  fillTOC(doc, tocPageIndex, toc, styles);
+
+  // 5) headers/footers
+  renderAllHeadersFooters(doc, { headerLeft, footerLeft, styles });
+
+  // 6) Remove trailing blank pages
+  removeTrailingBlankPages(doc, __pageHasBody);
+
+  doc.end();
 }
 
 /* =========================
@@ -65,6 +136,17 @@ function renderCover(doc, title, ctx, styles) {
 
   const x = doc.page.margins.left;
   const w = doc.page.width - doc.page.margins.left - doc.page.margins.right;
+
+  const safeHeaders = Array.isArray(headers) ? headers : [];
+  const headerLabel = (h) => {
+    if (h === null || h === undefined) return "";
+    if (typeof h === "string" || typeof h === "number" || typeof h === "boolean") return String(h);
+    if (typeof h === "object") {
+      const v = h?.text ?? h?.label ?? h?.value ?? h?.name;
+      if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") return String(v);
+    }
+    return "";
+  };
 
   doc.font("Helvetica-Bold").fontSize(styles.title.size).text(String(title || ""), x, 120, {
     width: w,
@@ -120,6 +202,17 @@ function fillTOC(doc, tocPageIndex, toc, styles) {
 
   const x = doc.page.margins.left;
   const w = doc.page.width - doc.page.margins.left - doc.page.margins.right;
+
+  const safeHeaders = Array.isArray(headers) ? headers : [];
+  const headerLabel = (h) => {
+    if (h === null || h === undefined) return "";
+    if (typeof h === "string" || typeof h === "number" || typeof h === "boolean") return String(h);
+    if (typeof h === "object") {
+      const v = h?.text ?? h?.label ?? h?.value ?? h?.name;
+      if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") return String(v);
+    }
+    return "";
+  };
 
   for (const item of toc) {
     ensureSpace(doc, 18);
@@ -370,6 +463,17 @@ function renderKeyValue(doc, title, rows, styles) {
   const x = doc.page.margins.left;
   const w = doc.page.width - doc.page.margins.left - doc.page.margins.right;
 
+  const safeHeaders = Array.isArray(headers) ? headers : [];
+  const headerLabel = (h) => {
+    if (h === null || h === undefined) return "";
+    if (typeof h === "string" || typeof h === "number" || typeof h === "boolean") return String(h);
+    if (typeof h === "object") {
+      const v = h?.text ?? h?.label ?? h?.value ?? h?.name;
+      if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") return String(v);
+    }
+    return "";
+  };
+
   const yH = doc.y;
   doc.save();
   doc.rect(x, yH, w, 18).fillOpacity(0.06).fill("#000000");
@@ -405,7 +509,18 @@ function renderTable(doc, { title, headers, colFracs, rows, styles }) {
   const x = doc.page.margins.left;
   const w = doc.page.width - doc.page.margins.left - doc.page.margins.right;
 
-  const fracs = normalizeFracs(colFracs, headers.length);
+  const safeHeaders = Array.isArray(headers) ? headers : [];
+  const headerLabel = (h) => {
+    if (h === null || h === undefined) return "";
+    if (typeof h === "string" || typeof h === "number" || typeof h === "boolean") return String(h);
+    if (typeof h === "object") {
+      const v = h?.text ?? h?.label ?? h?.value ?? h?.name;
+      if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") return String(v);
+    }
+    return "";
+  };
+
+  const fracs = normalizeFracs(colFracs, safeHeaders.length);
   const colW = fracs.map((f) => f * w);
 
   const headerY = doc.y;
@@ -419,9 +534,9 @@ function renderTable(doc, { title, headers, colFracs, rows, styles }) {
   applyFont(doc, { font: "Helvetica-Bold", size: 9.1 });
 
   let cx = x;
-  for (let i = 0; i < headers.length; i++) {
+  for (let i = 0; i < safeHeaders.length; i++) {
     const hw = colW[i];
-    doc.text(String(headers[i] || ""), cx + 6, headerY + 4, {
+    doc.text(headerLabel(safeHeaders[i]), cx + 6, headerY + 4, {
       width: hw - 10,
       align: "left",
     });
@@ -439,11 +554,12 @@ function renderTable(doc, { title, headers, colFracs, rows, styles }) {
     if (v === null || v === undefined) return "";
     if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") return String(v);
     if (Array.isArray(v)) return v.map(cellText).filter(Boolean).join(" • ");
-    if (typeof v === "object") {
-      if (typeof v?.text === "string" || typeof v?.text === "number") return String(v.text);
-      if (typeof v?.label === "string" || typeof v?.label === "number") return String(v.label);
-      if (typeof v?.value === "string" || typeof v?.value === "number") return String(v.value);
-      if (typeof v?.name === "string" || typeof v?.name === "number") return String(v.name);
+    if (v && typeof v === "object") {
+      const t = v?.text;
+      if (typeof t === "string" || typeof t === "number" || typeof t === "boolean") return String(t);
+      if (typeof v.label === "string" || typeof v.label === "number") return String(v.label);
+      if (typeof v.value === "string" || typeof v.value === "number") return String(v.value);
+      if (typeof v.name === "string" || typeof v.name === "number") return String(v.name);
       try {
         const s = JSON.stringify(v);
         return s && s !== "{}" ? s : "";
@@ -466,7 +582,7 @@ function renderTable(doc, { title, headers, colFracs, rows, styles }) {
     const r = Array.isArray(r0) ? r0 : (r0 && typeof r0 === "object" ? Object.values(r0) : [r0]);
 
     let x0 = x;
-    for (let i = 0; i < headers.length; i++) {
+    for (let i = 0; i < safeHeaders.length; i++) {
       const cellW = colW[i];
       const txt = cellText(r?.[i]);
       doc.text(txt, x0 + 6, y0 + 2, { width: cellW - 10, height: rowHeight - 4 });
@@ -535,6 +651,17 @@ function renderHeaderFooter(doc, { headerLeft, headerRight, footerLeft, pageNumb
   const x = doc.page.margins.left;
   const w = doc.page.width - doc.page.margins.left - doc.page.margins.right;
 
+  const safeHeaders = Array.isArray(headers) ? headers : [];
+  const headerLabel = (h) => {
+    if (h === null || h === undefined) return "";
+    if (typeof h === "string" || typeof h === "number" || typeof h === "boolean") return String(h);
+    if (typeof h === "object") {
+      const v = h?.text ?? h?.label ?? h?.value ?? h?.name;
+      if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") return String(v);
+    }
+    return "";
+  };
+
   // header line
   doc.save();
   doc.moveTo(x, 38).lineTo(x + w, 38).strokeOpacity(0.12).stroke();
@@ -596,6 +723,17 @@ function drawDivider(doc) {
   doc.moveDown(0.35);
   const x = doc.page.margins.left;
   const w = doc.page.width - doc.page.margins.left - doc.page.margins.right;
+
+  const safeHeaders = Array.isArray(headers) ? headers : [];
+  const headerLabel = (h) => {
+    if (h === null || h === undefined) return "";
+    if (typeof h === "string" || typeof h === "number" || typeof h === "boolean") return String(h);
+    if (typeof h === "object") {
+      const v = h?.text ?? h?.label ?? h?.value ?? h?.name;
+      if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") return String(v);
+    }
+    return "";
+  };
   doc.save();
   doc.moveTo(x, doc.y).lineTo(x + w, doc.y).strokeOpacity(0.15).stroke();
   doc.restore();
