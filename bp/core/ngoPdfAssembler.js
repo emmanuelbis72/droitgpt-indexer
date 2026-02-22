@@ -1,5 +1,35 @@
 // bp/core/ngoPdfAssembler.js
 import PDFDocument from "pdfkit";
+import { PassThrough } from "stream";
+
+
+export async function buildNgoProjectPdfBufferPremium({ title, ctx, sections }) {
+  return new Promise((resolve, reject) => {
+    const doc = new PDFDocument({
+      size: "A4",
+      margins: { top: 56, left: 56, right: 56, bottom: 56 },
+      bufferPages: true,
+    });
+
+    const stream = new PassThrough();
+    const chunks = [];
+
+    stream.on("data", (c) => chunks.push(c));
+    stream.on("end", () => resolve(Buffer.concat(chunks)));
+    stream.on("error", reject);
+
+    doc.on("error", reject);
+    doc.pipe(stream);
+
+    try {
+      renderNgoProjectPdf(doc, { title, ctx, sections });
+      doc.end();
+    } catch (e) {
+      reject(e);
+      try { doc.end(); } catch (_) {}
+    }
+  });
+}
 
 export function writeNgoProjectPdfPremium({ res, title, ctx, sections }) {
   res.setHeader("Content-Type", "application/pdf");
@@ -12,36 +42,6 @@ export function writeNgoProjectPdfPremium({ res, title, ctx, sections }) {
   });
 
   // Pipe early, but keep the process crash-proof if PDF generation fails mid-stream.
-  // Stream safety: prevent "write after end" if an exception occurs mid-generation
-  let __closed = false;
-  const __safeClose = (why) => {
-    if (__closed) return;
-    __closed = true;
-    try { doc.unpipe(res); } catch {}
-    try { doc.removeAllListeners("data"); } catch {}
-    try { doc.removeAllListeners("end"); } catch {}
-    try { doc.removeAllListeners("error"); } catch {}
-    try { res.end(); } catch {}
-  };
-
-  res.on("error", (e) => {
-    console.error("[NGO][PDF] response error", e);
-    __safeClose("response_error");
-  });
-
-  res.on("close", () => {
-    // Client may abort download; stop piping to avoid write-after-end
-    if (!res.writableEnded) {
-      console.warn("[NGO][PDF] response close (client aborted)");
-      __safeClose("client_close");
-    }
-  });
-
-  doc.on("error", (e) => {
-    console.error("[NGO][PDF] doc error", e);
-    __safeClose("doc_error");
-  });
-
   doc.pipe(res);
 
   // If the PDFKit stream errors, avoid crashing the whole Render instance.
@@ -60,70 +60,7 @@ export function writeNgoProjectPdfPremium({ res, title, ctx, sections }) {
     } catch (_) {}
   });
 
-  // ---- Blank-page protection (same concept as BP pdfAssembler)
-  let __pageIndex = 0;
-  const __pageHasBody = new Set();
-  const __touch = () => __pageHasBody.add(__pageIndex);
-  let __suppressTouch = false;
-
-  doc.on("pageAdded", () => {
-    __pageIndex += 1;
-  });
-
-  const __origText = doc.text.bind(doc);
-  doc.text = function (...args) {
-    const s = args?.[0];
-    if (!__suppressTouch && s !== undefined && s !== null && String(s).trim().length > 0) {
-      __touch();
-    }
-    return __origText(...args);
-  };
-
-  doc.__touch = __touch;
-  doc.__setSuppressTouch = (v) => {
-    __suppressTouch = !!v;
-  };
-
-  const styles = {
-    title: { font: "Helvetica-Bold", size: 22 },
-    h1: { font: "Helvetica-Bold", size: 16 },
-    h2: { font: "Helvetica-Bold", size: 12 },
-    body: { font: "Helvetica", size: 10.5, lineGap: 3.2 },
-    small: { font: "Helvetica", size: 9, lineGap: 2.6 },
-  };
-
-  const safeSections = Array.isArray(sections) ? sections : [];
-  const headerLeft = String(ctx?.organization || "ONG").trim() || "ONG";
-  const footerLeft = String(ctx?.projectTitle || title || "Projet").trim();
-
-  // 1) Cover
-  renderCover(doc, title, ctx, styles);
-
-  // 2) TOC placeholder
-  const tocPageIndex = doc.bufferedPageRange().count;
-  doc.addPage();
-  renderTOCPlaceholder(doc, styles);
-
-  // 3) Sections + TOC entries
-  const toc = [];
-  for (const s of safeSections) {
-    const secTitle = (s?.title || "").trim() || s?.key || "Section";
-    doc.addPage();
-
-    const startPageNumber = getCurrentPageNumber(doc);
-    toc.push({ title: secTitle, page: startPageNumber });
-
-    renderSection(doc, secTitle, s, styles);
-  }
-
-  // 4) Fill TOC
-  fillTOC(doc, tocPageIndex, toc, styles);
-
-  // 5) headers/footers
-  renderAllHeadersFooters(doc, { headerLeft, footerLeft, styles });
-
-  // 6) Remove trailing blank pages
-  removeTrailingBlankPages(doc, __pageHasBody);
+  renderNgoProjectPdf(doc, { title, ctx, sections });
 
   doc.end();
 }
@@ -142,8 +79,8 @@ function renderCover(doc, title, ctx, styles) {
     if (h === null || h === undefined) return "";
     if (typeof h === "string" || typeof h === "number" || typeof h === "boolean") return String(h);
     if (typeof h === "object") {
-      const v = h?.text ?? h?.label ?? h?.value ?? h?.name;
-      if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") return String(v);
+      const t = h?.text ?? h?.label ?? h?.value ?? h?.name;
+      if (typeof t === "string" || typeof t === "number" || typeof t === "boolean") return String(t);
     }
     return "";
   };
@@ -208,8 +145,8 @@ function fillTOC(doc, tocPageIndex, toc, styles) {
     if (h === null || h === undefined) return "";
     if (typeof h === "string" || typeof h === "number" || typeof h === "boolean") return String(h);
     if (typeof h === "object") {
-      const v = h?.text ?? h?.label ?? h?.value ?? h?.name;
-      if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") return String(v);
+      const t = h?.text ?? h?.label ?? h?.value ?? h?.name;
+      if (typeof t === "string" || typeof t === "number" || typeof t === "boolean") return String(t);
     }
     return "";
   };
@@ -468,8 +405,8 @@ function renderKeyValue(doc, title, rows, styles) {
     if (h === null || h === undefined) return "";
     if (typeof h === "string" || typeof h === "number" || typeof h === "boolean") return String(h);
     if (typeof h === "object") {
-      const v = h?.text ?? h?.label ?? h?.value ?? h?.name;
-      if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") return String(v);
+      const t = h?.text ?? h?.label ?? h?.value ?? h?.name;
+      if (typeof t === "string" || typeof t === "number" || typeof t === "boolean") return String(t);
     }
     return "";
   };
@@ -501,7 +438,7 @@ function renderKeyValue(doc, title, rows, styles) {
   }
 }
 
-function renderTable(doc, { title, headers, colFracs, rows, styles }) {
+function renderTable(doc, { title, headers = [], colFracs, rows, styles }) {
   doc.moveDown(0.8);
   applyFont(doc, styles.h2).text(String(title || ""));
   doc.moveDown(0.25);
@@ -514,13 +451,13 @@ function renderTable(doc, { title, headers, colFracs, rows, styles }) {
     if (h === null || h === undefined) return "";
     if (typeof h === "string" || typeof h === "number" || typeof h === "boolean") return String(h);
     if (typeof h === "object") {
-      const v = h?.text ?? h?.label ?? h?.value ?? h?.name;
-      if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") return String(v);
+      const t = h?.text ?? h?.label ?? h?.value ?? h?.name;
+      if (typeof t === "string" || typeof t === "number" || typeof t === "boolean") return String(t);
     }
     return "";
   };
 
-  const fracs = normalizeFracs(colFracs, safeHeaders.length);
+  const fracs = normalizeFracs(colFracs, Math.max(1, safeHeaders.length));
   const colW = fracs.map((f) => f * w);
 
   const headerY = doc.y;
@@ -554,9 +491,8 @@ function renderTable(doc, { title, headers, colFracs, rows, styles }) {
     if (v === null || v === undefined) return "";
     if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") return String(v);
     if (Array.isArray(v)) return v.map(cellText).filter(Boolean).join(" • ");
-    if (v && typeof v === "object") {
-      const t = v?.text;
-      if (typeof t === "string" || typeof t === "number" || typeof t === "boolean") return String(t);
+    if (typeof v === "object") {
+      if (typeof v.text === "string" || typeof v.text === "number") return String(v.text);
       if (typeof v.label === "string" || typeof v.label === "number") return String(v.label);
       if (typeof v.value === "string" || typeof v.value === "number") return String(v.value);
       if (typeof v.name === "string" || typeof v.name === "number") return String(v.name);
@@ -656,8 +592,8 @@ function renderHeaderFooter(doc, { headerLeft, headerRight, footerLeft, pageNumb
     if (h === null || h === undefined) return "";
     if (typeof h === "string" || typeof h === "number" || typeof h === "boolean") return String(h);
     if (typeof h === "object") {
-      const v = h?.text ?? h?.label ?? h?.value ?? h?.name;
-      if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") return String(v);
+      const t = h?.text ?? h?.label ?? h?.value ?? h?.name;
+      if (typeof t === "string" || typeof t === "number" || typeof t === "boolean") return String(t);
     }
     return "";
   };
@@ -729,8 +665,8 @@ function drawDivider(doc) {
     if (h === null || h === undefined) return "";
     if (typeof h === "string" || typeof h === "number" || typeof h === "boolean") return String(h);
     if (typeof h === "object") {
-      const v = h?.text ?? h?.label ?? h?.value ?? h?.name;
-      if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") return String(v);
+      const t = h?.text ?? h?.label ?? h?.value ?? h?.name;
+      if (typeof t === "string" || typeof t === "number" || typeof t === "boolean") return String(t);
     }
     return "";
   };
@@ -750,4 +686,75 @@ function makeDots(left, right, max = 90) {
   const R = String(right || "").length;
   const dots = Math.max(2, Math.min(max, 90 - L - R));
   return ".".repeat(dots);
+}
+
+
+
+function renderNgoProjectPdf(doc, { title, ctx, sections }) {
+// ---- Blank-page protection (same concept as BP pdfAssembler)
+let __pageIndex = 0;
+const __pageHasBody = new Set();
+const __touch = () => __pageHasBody.add(__pageIndex);
+let __suppressTouch = false;
+
+doc.on("pageAdded", () => {
+  __pageIndex += 1;
+});
+
+const __origText = doc.text.bind(doc);
+doc.text = function (...args) {
+  const s = args?.[0];
+  if (!__suppressTouch && s !== undefined && s !== null && String(s).trim().length > 0) {
+    __touch();
+  }
+  return __origText(...args);
+};
+
+doc.__touch = __touch;
+doc.__setSuppressTouch = (v) => {
+  __suppressTouch = !!v;
+};
+
+const styles = {
+  title: { font: "Helvetica-Bold", size: 22 },
+  h1: { font: "Helvetica-Bold", size: 16 },
+  h2: { font: "Helvetica-Bold", size: 12 },
+  body: { font: "Helvetica", size: 10.5, lineGap: 3.2 },
+  small: { font: "Helvetica", size: 9, lineGap: 2.6 },
+};
+
+const safeSections = Array.isArray(sections) ? sections : [];
+const headerLeft = String(ctx?.organization || "ONG").trim() || "ONG";
+const footerLeft = String(ctx?.projectTitle || title || "Projet").trim();
+
+// 1) Cover
+renderCover(doc, title, ctx, styles);
+
+// 2) TOC placeholder
+const tocPageIndex = doc.bufferedPageRange().count;
+doc.addPage();
+renderTOCPlaceholder(doc, styles);
+
+// 3) Sections + TOC entries
+const toc = [];
+for (const s of safeSections) {
+  const secTitle = (s?.title || "").trim() || s?.key || "Section";
+  doc.addPage();
+
+  const startPageNumber = getCurrentPageNumber(doc);
+  toc.push({ title: secTitle, page: startPageNumber });
+
+  renderSection(doc, secTitle, s, styles);
+}
+
+// 4) Fill TOC
+fillTOC(doc, tocPageIndex, toc, styles);
+
+// 5) headers/footers
+renderAllHeadersFooters(doc, { headerLeft, footerLeft, styles });
+
+// 6) Remove trailing blank pages
+removeTrailingBlankPages(doc, __pageHasBody);
+
+doc.end();
 }
