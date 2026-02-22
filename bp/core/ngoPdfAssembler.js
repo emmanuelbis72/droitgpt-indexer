@@ -12,9 +12,9 @@ export function writeNgoProjectPdfPremium({ res, title, ctx, sections }) {
   });
 
   // Pipe early, but keep the process crash-proof if PDF generation fails mid-stream.
-  // IMPORTANT: never write to the response after it has ended/destroyed (prevents ERR_STREAM_WRITE_AFTER_END)
   doc.pipe(res);
 
+  // Guard against double-close and "write after end"
   let __closed = false;
   const __safeClose = (reason, err) => {
     if (__closed) return;
@@ -23,108 +23,38 @@ export function writeNgoProjectPdfPremium({ res, title, ctx, sections }) {
     if (err) console.error("[NGO][PDF] stream close:", reason, err);
     else console.error("[NGO][PDF] stream close:", reason);
 
-    // Stop piping first (prevents further writes)
-    try {
-      doc.unpipe(res);
-    } catch (_) {}
+    // Stop PDFKit from writing into a closed response
+    try { doc.unpipe(res); } catch (_) {}
+    try { doc.removeAllListeners("data"); } catch (_) {}
 
-    // End/Destroy response only if not already ended
+    // End the response if still writable
     try {
       if (!res.headersSent) res.statusCode = 500;
+      if (!res.writableEnded) res.end();
     } catch (_) {}
 
-    try {
-      if (!res.writableEnded && !res.destroyed) res.end();
-    } catch (_) {}
-
-    try {
-      if (!res.destroyed) res.destroy();
-    } catch (_) {}
-
-    // Ensure doc ends
-    try {
-      doc.end();
-    } catch (_) {}
+    // End / destroy the PDF stream
+    try { doc.end(); } catch (_) {}
+    try { doc.destroy?.(); } catch (_) {}
   };
 
   // If the PDFKit stream errors, avoid crashing the whole Render instance.
   doc.on("error", (err) => __safeClose("pdfkit_error", err));
 
-  // If the HTTP response errors, avoid unhandled 'error' event crash.
+  // If the client disconnects or response errors, stop writing.
+  res.on("close", () => {
+    if (!res.writableEnded) __safeClose("client_closed");
+  });
   res.on("error", (err) => __safeClose("response_error", err));
 
-  // If the client disconnects early, stop writing.
-  res.on("close", () => {
-    // 'close' can fire after normal completion; only act when the client closed early.
-    if (!res.writableEnded) __safeClose("client_close");
-  });
-
-  // ---- Blank-page protection (same concept as BP pdfAssembler)
-  let __pageIndex = 0;
-  const __pageHasBody = new Set();
-  const __touch = () => __pageHasBody.add(__pageIndex);
-  let __suppressTouch = false;
-
-  doc.on("pageAdded", () => {
-    __pageIndex += 1;
-  });
-
-  const __origText = doc.text.bind(doc);
-  doc.text = function (...args) {
-    const s = args?.[0];
-    if (!__suppressTouch && s !== undefined && s !== null && String(s).trim().length > 0) {
-      __touch();
-    }
-    return __origText(...args);
-  };
-
-  doc.__touch = __touch;
-  doc.__setSuppressTouch = (v) => {
-    __suppressTouch = !!v;
-  };
-
-  const styles = {
-    title: { font: "Helvetica-Bold", size: 22 },
-    h1: { font: "Helvetica-Bold", size: 16 },
-    h2: { font: "Helvetica-Bold", size: 12 },
-    body: { font: "Helvetica", size: 10.5, lineGap: 3.2 },
-    small: { font: "Helvetica", size: 9, lineGap: 2.6 },
-  };
-
-  const safeSections = Array.isArray(sections) ? sections : [];
-  const headerLeft = String(ctx?.organization || "ONG").trim() || "ONG";
-  const footerLeft = String(ctx?.projectTitle || title || "Projet").trim();
-
-  // 1) Cover
-  renderCover(doc, title, ctx, styles);
-
-  // 2) TOC placeholder
-  const tocPageIndex = doc.bufferedPageRange().count;
-  doc.addPage();
-  renderTOCPlaceholder(doc, styles);
-
-  // 3) Sections + TOC entries
-  const toc = [];
-  for (const s of safeSections) {
-    const secTitle = (s?.title || "").trim() || s?.key || "Section";
-    doc.addPage();
-
-    const startPageNumber = getCurrentPageNumber(doc);
-    toc.push({ title: secTitle, page: startPageNumber });
-
-    renderSection(doc, secTitle, s, styles);
+  try {
+    renderNgoProjectPdf(doc, { title, ctx, sections });
+    doc.end();
+  } catch (err) {
+    console.error("[NGO] PDF generation failed", err);
+    __safeClose("render_failed", err);
   }
-
-  // 4) Fill TOC
-  fillTOC(doc, tocPageIndex, toc, styles);
-
-  // 5) headers/footers
-  renderAllHeadersFooters(doc, { headerLeft, footerLeft, styles });
-
-  // 6) Remove trailing blank pages
-  removeTrailingBlankPages(doc, __pageHasBody);
-
-  doc.end();
+}
 }
 
 /* =========================
@@ -510,10 +440,10 @@ function renderTable(doc, { title, headers, colFracs, rows, styles }) {
     if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") return String(v);
     if (Array.isArray(v)) return v.map(cellText).filter(Boolean).join(" • ");
     if (typeof v === "object") {
-      if (typeof v.text === "string" || typeof v.text === "number") return String(v.text);
-      if (typeof v.label === "string" || typeof v.label === "number") return String(v.label);
-      if (typeof v.value === "string" || typeof v.value === "number") return String(v.value);
-      if (typeof v.name === "string" || typeof v.name === "number") return String(v.name);
+      if (typeof v?.text === "string" || typeof v?.text === "number") return String(v.text);
+      if (typeof v?.label === "string" || typeof v?.label === "number") return String(v.label);
+      if (typeof v?.value === "string" || typeof v?.value === "number") return String(v.value);
+      if (typeof v?.name === "string" || typeof v?.name === "number") return String(v.name);
       try {
         const s = JSON.stringify(v);
         return s && s !== "{}" ? s : "";
