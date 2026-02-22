@@ -45,34 +45,25 @@ export function writeNgoProjectPdfPremium({ res, title, ctx, sections }) {
   doc.pipe(res);
 
   // If the PDFKit stream errors, avoid crashing the whole Render instance.
-  const __safeClose = (why, err) => {
-    try {
-      try { doc.unpipe(res); } catch (_) {}
-      try { doc.removeAllListeners("data"); } catch (_) {}
-      try { doc.removeAllListeners("end"); } catch (_) {}
-      try { doc.removeAllListeners("error"); } catch (_) {}
-      if (err) console.error("[NGO][PDF] close:", why, err);
-      if (!res.writableEnded) {
-        if (!res.headersSent) res.statusCode = 500;
-        try { res.end(); } catch (_) {}
-      }
-      // If the stream is in a bad state, force close the socket (prevents write-after-end).
-      try { res.destroy(); } catch (_) {}
-    } catch (_) {}
-  };
+  // Avoid unhandled response stream errors (prevents process crash on write-after-end)
+  res.on("error", (err) => {
+    console.error("[NGO][PDF] response error", err);
+    __safeClose("response_error", err);
+  });
 
   doc.on("error", (err) => {
     console.error("[NGO][PDF] PDFKit error", err);
-    __safeClose("pdfkit_error", err);
+    try {
+      if (!res.headersSent) res.statusCode = 500;
+      res.end();
+    } catch (_) {}
   });
 
   // If the client disconnects, stop writing.
   res.on("close", () => {
-    // Client disconnected mid-stream.
-    if (!res.writableEnded) {
-      try { doc.end(); } catch (_) {}
-      try { res.destroy(); } catch (_) {}
-    }
+    try {
+      doc.end();
+    } catch (_) {}
   });
 
   renderNgoProjectPdf(doc, { title, ctx, sections });
@@ -420,7 +411,7 @@ function renderKeyValue(doc, title, rows, styles) {
   }
 }
 
-function renderTable(doc, { title, headers, colFracs, rows, styles }) {
+function renderTable(doc, { title, headers = [], colFracs, rows = [], styles = {} }) {
   doc.moveDown(0.8);
   applyFont(doc, styles.h2).text(String(title || ""));
   doc.moveDown(0.25);
@@ -428,7 +419,28 @@ function renderTable(doc, { title, headers, colFracs, rows, styles }) {
   const x = doc.page.margins.left;
   const w = doc.page.width - doc.page.margins.left - doc.page.margins.right;
 
-  const fracs = normalizeFracs(colFracs, headers.length);
+  const safeHeaders = Array.isArray(headers) ? headers : [];
+
+  const headerLabel = (v) => {
+    if (v === null || v === undefined) return "";
+    if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") return String(v);
+    if (typeof v === "object") return String(v.text ?? v.label ?? v.value ?? v.name ?? "");
+    return "";
+  };
+
+  const cellText = (v) => {
+    if (v === null || v === undefined) return "";
+    if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") return String(v);
+    if (Array.isArray(v)) return v.map(cellText).filter(Boolean).join(" • ");
+    if (typeof v === "object") return String(v.text ?? v.label ?? v.value ?? v.name ?? "");
+    return "";
+  };
+
+  const firstRow = Array.isArray(rows) && rows.length ? rows[0] : null;
+  const firstRowCols = Array.isArray(firstRow) ? firstRow.length : (firstRow && typeof firstRow === "object" ? Object.values(firstRow).length : 0);
+  const ncols = Math.max(safeHeaders.length, firstRowCols, 1);
+
+  const fracs = normalizeFracs(colFracs, ncols);
   const colW = fracs.map((f) => f * w);
 
   const headerY = doc.y;
@@ -442,9 +454,9 @@ function renderTable(doc, { title, headers, colFracs, rows, styles }) {
   applyFont(doc, { font: "Helvetica-Bold", size: 9.1 });
 
   let cx = x;
-  for (let i = 0; i < safeHeaders.length; i++) {
-    const hw = colW[i] || (w / safeHeaders.length);
-    doc.text(headerLabel(safeHeaders[i]), cx + 6, headerY + 4, {
+  for (let i = 0; i < ncols; i++) {
+    const hw = colW[i] || (w / ncols);
+    doc.text(headerLabel(safeHeaders[i] ?? ""), cx + 6, headerY + 4, {
       width: hw - 10,
       align: "left",
     });
@@ -454,58 +466,40 @@ function renderTable(doc, { title, headers, colFracs, rows, styles }) {
   doc.moveDown(1.2);
   applyFont(doc, styles.small);
 
-
-  const headerLabel = (v) => {
-    if (v === null || v === undefined) return "";
-    if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") return String(v);
-    if (typeof v === "object") {
-      return String(v.text ?? v.label ?? v.value ?? v.name ?? "");
-    }
-    return "";
-  };
-  // Defensive cell normalization:
-  // - rows may be arrays of primitives
-  // - or objects (we'll render Object.values)
-  // - cells may be { text: "..." } depending on upstream formatting
-  const cellText = (v) => {
-    if (v === null || v === undefined) return "";
-    if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") return String(v);
-    if (Array.isArray(v)) return v.map(cellText).filter(Boolean).join(" • ");
-    if (typeof v === "object") {
-      if (v && typeof v === "object" && (typeof v.text === "string" || typeof v.text === "number")) return String(v.text);
-      if (typeof v.label === "string" || typeof v.label === "number") return String(v.label);
-      if (typeof v.value === "string" || typeof v.value === "number") return String(v.value);
-      if (typeof v.name === "string" || typeof v.name === "number") return String(v.name);
-      try {
-        const s = JSON.stringify(v);
-        return s && s !== "{}" ? s : "";
-      } catch {
-        return "";
-      }
-    }
-    return "";
-  };
-
   const rowHeight = 34; // base; text wraps inside
-  for (const r0 of rows || []) {
-    ensureSpace(doc, rowHeight + 8);
+  for (const r0 of Array.isArray(rows) ? rows : []) {
+    const rowArr = Array.isArray(r0)
+      ? r0
+      : (r0 && typeof r0 === "object")
+        ? Object.values(r0)
+        : [r0];
 
     const y0 = doc.y;
+    ensureSpace(doc, rowHeight + 6);
+
+    // Alternating background
     doc.save();
-    doc.rect(x, y0 - 2, w, rowHeight).strokeOpacity(0.12).stroke();
+    doc.rect(x, y0, w, rowHeight).fillOpacity(0.025).fill("#000000");
     doc.restore();
 
-    const r = Array.isArray(r0) ? r0 : (r0 && typeof r0 === "object" ? Object.values(r0) : [r0]);
-
     let x0 = x;
-    for (let i = 0; i < safeHeaders.length; i++) {
-      const cellW = colW[i];
-      const txt = cellText(r?.[i]);
+    for (let i = 0; i < ncols; i++) {
+      const cellW = colW[i] || (w / ncols);
+      const v = i < rowArr.length ? rowArr[i] : "";
+      const txt = cellText(v);
+
+      // Cell border
+      doc.save();
+      doc.rect(x0, y0, cellW, rowHeight).strokeOpacity(0.15).stroke("#000000");
+      doc.restore();
+
       doc.text(txt, x0 + 6, y0 + 2, { width: cellW - 10, height: rowHeight - 4 });
+
       x0 += cellW;
     }
 
-    doc.moveDown(2.05);
+    doc.y = y0 + rowHeight;
+    doc.moveDown(0.1);
   }
 }
 
