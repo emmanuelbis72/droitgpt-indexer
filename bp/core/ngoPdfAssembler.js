@@ -32,6 +32,7 @@ export async function buildNgoProjectPdfBufferPremium({ title, ctx, sections }) 
 }
 
 export function writeNgoProjectPdfPremium({ res, title, ctx, sections }) {
+  // Headers
   res.setHeader("Content-Type", "application/pdf");
   res.setHeader("Content-Disposition", `attachment; filename="${sanitizeFilename(title)}.pdf"`);
 
@@ -41,28 +42,69 @@ export function writeNgoProjectPdfPremium({ res, title, ctx, sections }) {
     bufferPages: true,
   });
 
-  // Pipe early, but keep the process crash-proof if PDF generation fails mid-stream.
+  // --- Crash-proof streaming (Render / Node 22) ---
+  let closed = false;
+  const __safeClose = (reason, err) => {
+    if (closed) return;
+    closed = true;
+
+    try {
+      // Stop PDFKit from writing to res
+      try {
+        doc.removeAllListeners("data");
+        doc.removeAllListeners("end");
+        doc.removeAllListeners("error");
+      } catch (_) {}
+      try {
+        doc.unpipe(res);
+      } catch (_) {}
+      try {
+        // Ensure PDFKit is ended
+        doc.end();
+      } catch (_) {}
+
+      // Best-effort response termination
+      if (!res.headersSent) res.statusCode = 500;
+      try {
+        res.end();
+      } catch (_) {}
+
+      // Only destroy on hard error (prevents truncating successful downloads)
+      if (err) {
+        try {
+          res.destroy(err);
+        } catch (_) {}
+      }
+    } finally {
+      if (err) console.error("[NGO][PDF] safeClose:", reason, err);
+      else console.warn("[NGO][PDF] safeClose:", reason);
+    }
+  };
+
+  // Important: attach response error handler to avoid "Unhandled 'error' event"
+  res.on("error", (err) => {
+    __safeClose("response_error", err);
+  });
+
+  // If client disconnects before completion, stop writing
+  res.on("close", () => {
+    if (!res.writableEnded) __safeClose("client_close");
+  });
+
+  // PDFKit error handler
+  doc.on("error", (err) => {
+    __safeClose("pdfkit_error", err);
+  });
+
+  // Start piping after handlers are in place
   doc.pipe(res);
 
-  // If the PDFKit stream errors, avoid crashing the whole Render instance.
-  doc.on("error", (err) => {
-    console.error("[NGO][PDF] PDFKit error", err);
-    try {
-      if (!res.headersSent) res.statusCode = 500;
-      res.end();
-    } catch (_) {}
-  });
-
-  // If the client disconnects, stop writing.
-  res.on("close", () => {
-    try {
-      doc.end();
-    } catch (_) {}
-  });
-
-  renderNgoProjectPdf(doc, { title, ctx, sections });
-
-  doc.end();
+  try {
+    renderNgoProjectPdf(doc, { title, ctx, sections });
+    doc.end();
+  } catch (err) {
+    __safeClose("render_error", err);
+  }
 }
 
 /* =========================
@@ -568,19 +610,9 @@ function renderHeaderFooter(doc, { headerLeft, headerRight, footerLeft, pageNumb
   if (typeof doc.__setSuppressTouch === "function") doc.__setSuppressTouch(false);
 }
 
-function removeTrailingBlankPages(doc, pageHasBodySet) {
-  const range = doc.bufferedPageRange();
-  const total = range.count;
-
-  // Remove blank pages only at the end
-  let lastIdx = total - 1;
-  while (lastIdx >= 0) {
-    const hasBody = pageHasBodySet.has(lastIdx);
-    if (hasBody) break;
-    doc.switchToPage(lastIdx);
-    doc.deletePage(lastIdx);
-    lastIdx -= 1;
-  }
+function removeTrailingBlankPages(_doc, _pageHasBodySet) {
+  // PDFKit does not support deletePage(); keep as no-op.
+  return;
 }
 
 /* =========================
@@ -694,7 +726,7 @@ fillTOC(doc, tocPageIndex, toc, styles);
 renderAllHeadersFooters(doc, { headerLeft, footerLeft, styles });
 
 // 6) Remove trailing blank pages
-removeTrailingBlankPages(doc, __pageHasBody);
+// removeTrailingBlankPages(doc, __pageHasBody);
 
 doc.end();
 }
