@@ -32,7 +32,6 @@ export async function buildNgoProjectPdfBufferPremium({ title, ctx, sections }) 
 }
 
 export function writeNgoProjectPdfPremium({ res, title, ctx, sections }) {
-  // Headers
   res.setHeader("Content-Type", "application/pdf");
   res.setHeader("Content-Disposition", `attachment; filename="${sanitizeFilename(title)}.pdf"`);
 
@@ -42,69 +41,34 @@ export function writeNgoProjectPdfPremium({ res, title, ctx, sections }) {
     bufferPages: true,
   });
 
-  // --- Crash-proof streaming (Render / Node 22) ---
-  let closed = false;
-  const __safeClose = (reason, err) => {
-    if (closed) return;
-    closed = true;
+  // Pipe early, but keep the process crash-proof if PDF generation fails mid-stream.
+  doc.pipe(res);
 
-    try {
-      // Stop PDFKit from writing to res
-      try {
-        doc.removeAllListeners("data");
-        doc.removeAllListeners("end");
-        doc.removeAllListeners("error");
-      } catch (_) {}
-      try {
-        doc.unpipe(res);
-      } catch (_) {}
-      try {
-        // Ensure PDFKit is ended
-        doc.end();
-      } catch (_) {}
-
-      // Best-effort response termination
-      if (!res.headersSent) res.statusCode = 500;
-      try {
-        res.end();
-      } catch (_) {}
-
-      // Only destroy on hard error (prevents truncating successful downloads)
-      if (err) {
-        try {
-          res.destroy(err);
-        } catch (_) {}
-      }
-    } finally {
-      if (err) console.error("[NGO][PDF] safeClose:", reason, err);
-      else console.warn("[NGO][PDF] safeClose:", reason);
-    }
-  };
-
-  // Important: attach response error handler to avoid "Unhandled 'error' event"
+  // If the PDFKit stream errors, avoid crashing the whole Render instance.
+  // Avoid unhandled response stream errors (prevents process crash on write-after-end)
   res.on("error", (err) => {
+    console.error("[NGO][PDF] response error", err);
     __safeClose("response_error", err);
   });
 
-  // If client disconnects before completion, stop writing
-  res.on("close", () => {
-    if (!res.writableEnded) __safeClose("client_close");
-  });
-
-  // PDFKit error handler
   doc.on("error", (err) => {
-    __safeClose("pdfkit_error", err);
+    console.error("[NGO][PDF] PDFKit error", err);
+    try {
+      if (!res.headersSent) res.statusCode = 500;
+      res.end();
+    } catch (_) {}
   });
 
-  // Start piping after handlers are in place
-  doc.pipe(res);
+  // If the client disconnects, stop writing.
+  res.on("close", () => {
+    try {
+      safeDocEnd();
+    } catch (_) {}
+  });
 
-  try {
-    renderNgoProjectPdf(doc, { title, ctx, sections });
-    doc.end();
-  } catch (err) {
-    __safeClose("render_error", err);
-  }
+  renderNgoProjectPdf(doc, { title, ctx, sections });
+
+  safeDocEnd();
 }
 
 /* =========================
@@ -414,8 +378,7 @@ function renderWorkplan(doc, obj, styles) {
 ========================= */
 function renderKeyValue(doc, title, rows, styles) {
   doc.moveDown(0.7);
-  applyFont(doc, styles.h2);
-  doc.text(title);
+  applyFont(doc, styles.h2).text(title);
   doc.moveDown(0.25);
 
   const x = doc.page.margins.left;
@@ -448,9 +411,7 @@ function renderKeyValue(doc, title, rows, styles) {
   }
 }
 
-function renderTable(doc, { title, headers, colFracs, rows, styles }) {
-  headers = Array.isArray(headers) ? headers : [];
-  rows = Array.isArray(rows) ? rows : [];
+function renderTable(doc, { title, headers = [], colFracs, rows = [], styles = {} }) {
   doc.moveDown(0.8);
   applyFont(doc, styles.h2).text(String(title || ""));
   doc.moveDown(0.25);
@@ -458,7 +419,28 @@ function renderTable(doc, { title, headers, colFracs, rows, styles }) {
   const x = doc.page.margins.left;
   const w = doc.page.width - doc.page.margins.left - doc.page.margins.right;
 
-  const fracs = normalizeFracs(colFracs, headers.length);
+  const safeHeaders = Array.isArray(headers) ? headers : [];
+
+  const headerLabel = (v) => {
+    if (v === null || v === undefined) return "";
+    if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") return String(v);
+    if (typeof v === "object") return String(v.text ?? v.label ?? v.value ?? v.name ?? "");
+    return "";
+  };
+
+  const cellText = (v) => {
+    if (v === null || v === undefined) return "";
+    if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") return String(v);
+    if (Array.isArray(v)) return v.map(cellText).filter(Boolean).join(" • ");
+    if (typeof v === "object") return String(v.text ?? v.label ?? v.value ?? v.name ?? "");
+    return "";
+  };
+
+  const firstRow = Array.isArray(rows) && rows.length ? rows[0] : null;
+  const firstRowCols = Array.isArray(firstRow) ? firstRow.length : (firstRow && typeof firstRow === "object" ? Object.values(firstRow).length : 0);
+  const ncols = Math.max(safeHeaders.length, firstRowCols, 1);
+
+  const fracs = normalizeFracs(colFracs, ncols);
   const colW = fracs.map((f) => f * w);
 
   const headerY = doc.y;
@@ -472,9 +454,9 @@ function renderTable(doc, { title, headers, colFracs, rows, styles }) {
   applyFont(doc, { font: "Helvetica-Bold", size: 9.1 });
 
   let cx = x;
-  for (let i = 0; i < headers.length; i++) {
-    const hw = colW[i];
-    doc.text(String(headers[i] || ""), cx + 6, headerY + 4, {
+  for (let i = 0; i < ncols; i++) {
+    const hw = colW[i] || (w / ncols);
+    doc.text(headerLabel(safeHeaders[i] ?? ""), cx + 6, headerY + 4, {
       width: hw - 10,
       align: "left",
     });
@@ -484,49 +466,40 @@ function renderTable(doc, { title, headers, colFracs, rows, styles }) {
   doc.moveDown(1.2);
   applyFont(doc, styles.small);
 
-  // Defensive cell normalization:
-  // - rows may be arrays of primitives
-  // - or objects (we'll render Object.values)
-  // - cells may be { text: "..." } depending on upstream formatting
-  const cellText = (v) => {
-    if (v === null || v === undefined) return "";
-    if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") return String(v);
-    if (Array.isArray(v)) return v.map(cellText).filter(Boolean).join(" • ");
-    if (typeof v === "object") {
-      if (typeof v.text === "string" || typeof v.text === "number") return String(v.text);
-      if (typeof v.label === "string" || typeof v.label === "number") return String(v.label);
-      if (typeof v.value === "string" || typeof v.value === "number") return String(v.value);
-      if (typeof v.name === "string" || typeof v.name === "number") return String(v.name);
-      try {
-        const s = JSON.stringify(v);
-        return s && s !== "{}" ? s : "";
-      } catch {
-        return "";
-      }
-    }
-    return "";
-  };
-
   const rowHeight = 34; // base; text wraps inside
-  for (const r0 of rows || []) {
-    ensureSpace(doc, rowHeight + 8);
+  for (const r0 of Array.isArray(rows) ? rows : []) {
+    const rowArr = Array.isArray(r0)
+      ? r0
+      : (r0 && typeof r0 === "object")
+        ? Object.values(r0)
+        : [r0];
 
     const y0 = doc.y;
+    ensureSpace(doc, rowHeight + 6);
+
+    // Alternating background
     doc.save();
-    doc.rect(x, y0 - 2, w, rowHeight).strokeOpacity(0.12).stroke();
+    doc.rect(x, y0, w, rowHeight).fillOpacity(0.025).fill("#000000");
     doc.restore();
 
-    const r = Array.isArray(r0) ? r0 : (r0 && typeof r0 === "object" ? Object.values(r0) : [r0]);
-
     let x0 = x;
-    for (let i = 0; i < headers.length; i++) {
-      const cellW = colW[i];
-      const txt = cellText(r?.[i]);
+    for (let i = 0; i < ncols; i++) {
+      const cellW = colW[i] || (w / ncols);
+      const v = i < rowArr.length ? rowArr[i] : "";
+      const txt = cellText(v);
+
+      // Cell border
+      doc.save();
+      doc.rect(x0, y0, cellW, rowHeight).strokeOpacity(0.15).stroke("#000000");
+      doc.restore();
+
       doc.text(txt, x0 + 6, y0 + 2, { width: cellW - 10, height: rowHeight - 4 });
+
       x0 += cellW;
     }
 
-    doc.moveDown(2.05);
+    doc.y = y0 + rowHeight;
+    doc.moveDown(0.1);
   }
 }
 
@@ -611,7 +584,8 @@ function renderHeaderFooter(doc, { headerLeft, headerRight, footerLeft, pageNumb
 }
 
 function removeTrailingBlankPages(_doc, _pageHasBodySet) {
-  // PDFKit does not support deletePage(); keep as no-op.
+  // PDFKit does not support deleting pages once written.
+  // Keep as no-op to avoid runtime errors.
   return;
 }
 
@@ -627,7 +601,7 @@ function sanitizeFilename(name) {
 
 function applyFont(doc, style = {}) {
   const font = style.font || "Helvetica";
-  const size = typeof style.size === "number" ? style.size : 10;
+  const size = Number(style.size || 11);
   doc.font(font).fontSize(size);
   if (style.lineGap !== undefined) doc.lineGap(style.lineGap);
   return doc;
@@ -726,7 +700,7 @@ fillTOC(doc, tocPageIndex, toc, styles);
 renderAllHeadersFooters(doc, { headerLeft, footerLeft, styles });
 
 // 6) Remove trailing blank pages
-// removeTrailingBlankPages(doc, __pageHasBody);
+removeTrailingBlankPages(doc, __pageHasBody);
 
 doc.end();
 }
