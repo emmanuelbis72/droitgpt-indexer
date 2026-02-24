@@ -42,7 +42,6 @@ export function writeNgoProjectPdfPremium({ res, title, ctx, sections }) {
     bufferPages: true,
   });
 
-  // ---- STRICT PROD: crash-proof PDF streaming (no double end, no write-after-end)
   let __ended = false;
 
   const safeDocEnd = () => {
@@ -50,9 +49,7 @@ export function writeNgoProjectPdfPremium({ res, title, ctx, sections }) {
     __ended = true;
     try {
       doc.end();
-    } catch (_) {
-      // ignore
-    }
+    } catch (_) {}
   };
 
   const __safeClose = (tag, err) => {
@@ -60,15 +57,12 @@ export function writeNgoProjectPdfPremium({ res, title, ctx, sections }) {
       console.error(`[NGO][PDF] safeClose: ${tag}`, err || "");
     } catch (_) {}
 
-    // Stop piping immediately so PDFKit can't write into a closed response
     try {
       doc.unpipe(res);
     } catch (_) {}
 
-    // Ensure doc.end is called at most once
     safeDocEnd();
 
-    // Close response safely (destroy only on error)
     try {
       if (!res.headersSent) res.statusCode = 500;
     } catch (_) {}
@@ -76,12 +70,9 @@ export function writeNgoProjectPdfPremium({ res, title, ctx, sections }) {
     try {
       if (err) res.destroy(err);
       else if (!res.writableEnded) res.end();
-    } catch (_) {
-      // ignore
-    }
+    } catch (_) {}
   };
 
-  // Avoid unhandled response errors (prevents Render instance crash)
   res.on("error", (err) => {
     console.error("[NGO][PDF] response error", err);
     __safeClose("response_error", err);
@@ -92,13 +83,11 @@ export function writeNgoProjectPdfPremium({ res, title, ctx, sections }) {
     __safeClose("pdfkit_error", err);
   });
 
-  // If the client disconnects, stop writing (only if not already ended)
   res.on("close", () => {
     if (res.writableEnded) return;
     __safeClose("client_close");
   });
 
-  // Pipe AFTER handlers are attached
   doc.pipe(res);
 
   try {
@@ -195,13 +184,11 @@ function renderSection(doc, title, sectionObj, styles) {
   const key = String(sectionObj?.key || "").trim();
   const metaJson = sectionObj?.meta?.json;
 
-  // JSON tables
   if (metaJson && typeof metaJson === "object") {
     renderJsonBlock(doc, key, metaJson, styles);
     return;
   }
 
-  // Text
   applyFont(doc, styles.body);
   const content = String(sectionObj?.content || "").trim();
   doc.text(content || "—");
@@ -219,7 +206,6 @@ function renderJsonBlock(doc, key, obj, styles) {
   if (key === "budget_json") return renderBudget(doc, obj, styles);
   if (key === "workplan_json") return renderWorkplan(doc, obj, styles);
 
-  // Fallback: pretty JSON
   applyFont(doc, styles.small);
   doc.text(JSON.stringify(obj, null, 2));
 }
@@ -245,7 +231,6 @@ function renderStakeholders(doc, obj, styles) {
 }
 
 function renderLogframe(doc, obj, styles) {
-  // Flatten: impact + outcomes + outputs
   const rows = [];
 
   if (obj?.impact?.statement) {
@@ -351,7 +336,6 @@ function renderBudget(doc, obj, styles) {
   const currency = String(obj?.currency || "USD");
   const direct = Array.isArray(obj?.direct_costs) ? obj.direct_costs : [];
 
-  // Render each category separately for readability
   for (const cat of direct) {
     const catName = String(cat?.category || "Catégorie");
     const items = Array.isArray(cat?.items) ? cat.items : [];
@@ -373,7 +357,6 @@ function renderBudget(doc, obj, styles) {
     });
   }
 
-  // Totals
   const totals = obj?.totals || {};
   const indirect = obj?.indirect_costs || {};
   const summaryRows = [
@@ -462,7 +445,6 @@ function renderTable(doc, { title, headers, colFracs, rows, styles }) {
   const headerY = doc.y;
   ensureSpace(doc, 24);
 
-  // Header bar
   doc.save();
   doc.rect(x, headerY, w, 18).fillOpacity(0.06).fill("#000000");
   doc.restore();
@@ -482,10 +464,6 @@ function renderTable(doc, { title, headers, colFracs, rows, styles }) {
   doc.moveDown(1.2);
   applyFont(doc, styles.small);
 
-  // Defensive cell normalization:
-  // - rows may be arrays of primitives
-  // - or objects (we'll render Object.values)
-  // - cells may be { text: "..." } depending on upstream formatting
   const cellText = (v) => {
     if (v === null || v === undefined) return "";
     if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") return String(v);
@@ -505,7 +483,7 @@ function renderTable(doc, { title, headers, colFracs, rows, styles }) {
     return "";
   };
 
-  const rowHeight = 34; // base; text wraps inside
+  const rowHeight = 34;
   for (const r0 of rows || []) {
     ensureSpace(doc, rowHeight + 8);
 
@@ -567,12 +545,16 @@ function renderAllHeadersFooters(doc, { headerLeft, footerLeft, styles }) {
   const range = doc.bufferedPageRange();
   const pageCount = range.count;
 
+  // IMPORTANT: we must ensure header/footer never wraps (wrap can force PDFKit to add pages)
+  const safeHeaderLeft = oneLine(headerLeft, 70);
+  const safeFooterLeft = oneLine(footerLeft, 90);
+
   for (let i = range.start; i < range.start + range.count; i++) {
     doc.switchToPage(i);
     renderHeaderFooter(doc, {
-      headerLeft,
+      headerLeft: safeHeaderLeft,
       headerRight: "CONFIDENTIEL",
-      footerLeft,
+      footerLeft: safeFooterLeft,
       pageNumber: i + 1,
       pageCount,
       styles,
@@ -586,33 +568,30 @@ function renderHeaderFooter(doc, { headerLeft, headerRight, footerLeft, pageNumb
   const x = doc.page.margins.left;
   const w = doc.page.width - doc.page.margins.left - doc.page.margins.right;
 
-  // header line
   doc.save();
   doc.moveTo(x, 38).lineTo(x + w, 38).strokeOpacity(0.12).stroke();
   doc.restore();
 
   applyFont(doc, { font: "Helvetica", size: 9 });
-  doc.text(String(headerLeft || ""), x, 24, { width: w * 0.6, align: "left" });
-  doc.text(String(headerRight || ""), x + w * 0.6, 24, { width: w * 0.4, align: "right" });
 
-  // footer line
+  // HARD RULE: prevent wrap => prevent implicit addPage()
+  doc.text(oneLine(headerLeft, 70), x, 24, { width: w * 0.6, align: "left", lineBreak: false });
+  doc.text(oneLine(headerRight, 30), x + w * 0.6, 24, { width: w * 0.4, align: "right", lineBreak: false });
+
   const y = doc.page.height - 42;
   doc.save();
   doc.moveTo(x, y).lineTo(x + w, y).strokeOpacity(0.12).stroke();
   doc.restore();
 
   applyFont(doc, { font: "Helvetica", size: 9 });
-  doc.text(String(footerLeft || ""), x, y + 8, { width: w * 0.7, align: "left" });
-  doc.text(`${pageNumber}/${pageCount}`, x + w * 0.7, y + 8, { width: w * 0.3, align: "right" });
+
+  doc.text(oneLine(footerLeft, 90), x, y + 8, { width: w * 0.7, align: "left", lineBreak: false });
+  doc.text(`${pageNumber}/${pageCount}`, x + w * 0.7, y + 8, { width: w * 0.3, align: "right", lineBreak: false });
 
   if (typeof doc.__setSuppressTouch === "function") doc.__setSuppressTouch(false);
 }
 
 function removeTrailingBlankPages(doc, pageHasBodySet) {
-  // NOTE (STRICT PROD): PDFKit does NOT support doc.deletePage().
-  // Calling doc.deletePage() crashes with:
-  //   TypeError: doc.deletePage is not a function
-  // We keep this as a safe no-op.
   void doc;
   void pageHasBodySet;
 }
@@ -662,8 +641,18 @@ function makeDots(left, right, max = 90) {
   return ".".repeat(dots);
 }
 
+// CRITICAL: header/footer MUST be 1 line.
+// We also normalize whitespace to avoid weird long sequences.
+function oneLine(text, maxChars) {
+  const s = String(text ?? "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!s) return "";
+  if (s.length <= maxChars) return s;
+  return s.slice(0, Math.max(1, maxChars - 1)).trimEnd() + "…";
+}
+
 function renderNgoProjectPdf(doc, { title, ctx, sections }) {
-  // ---- Blank-page protection (same concept as BP pdfAssembler)
   let __pageIndex = 0;
   const __pageHasBody = new Set();
   const __touch = () => __pageHasBody.add(__pageIndex);
@@ -699,15 +688,12 @@ function renderNgoProjectPdf(doc, { title, ctx, sections }) {
   const headerLeft = String(ctx?.organization || "ONG").trim() || "ONG";
   const footerLeft = String(ctx?.projectTitle || title || "Projet").trim();
 
-  // 1) Cover
   renderCover(doc, title, ctx, styles);
 
-  // 2) TOC placeholder
   const tocPageIndex = doc.bufferedPageRange().count;
   doc.addPage();
   renderTOCPlaceholder(doc, styles);
 
-  // 3) Sections + TOC entries
   const toc = [];
   for (const s of safeSections) {
     const secTitle = (s?.title || "").trim() || s?.key || "Section";
@@ -719,16 +705,11 @@ function renderNgoProjectPdf(doc, { title, ctx, sections }) {
     renderSection(doc, secTitle, s, styles);
   }
 
-  // 4) Fill TOC
   fillTOC(doc, tocPageIndex, toc, styles);
 
-  // 5) headers/footers
   renderAllHeadersFooters(doc, { headerLeft, footerLeft, styles });
 
-  // 6) Remove trailing blank pages
   removeTrailingBlankPages(doc, __pageHasBody);
 
-  // IMPORTANT (STRICT PROD):
   // Do NOT call doc.end() here.
-  // The caller (buffer builder or HTTP writer) owns doc.end() exactly once.
 }
