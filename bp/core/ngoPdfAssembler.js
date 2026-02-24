@@ -2,7 +2,6 @@
 import PDFDocument from "pdfkit";
 import { PassThrough } from "stream";
 
-
 export async function buildNgoProjectPdfBufferPremium({ title, ctx, sections }) {
   return new Promise((resolve, reject) => {
     const doc = new PDFDocument({
@@ -26,7 +25,9 @@ export async function buildNgoProjectPdfBufferPremium({ title, ctx, sections }) 
       doc.end();
     } catch (e) {
       reject(e);
-      try { doc.end(); } catch (_) {}
+      try {
+        doc.end();
+      } catch (_) {}
     }
   });
 }
@@ -267,12 +268,7 @@ function renderLogframe(doc, obj, styles) {
 
     const outputs = Array.isArray(o?.outputs) ? o.outputs : [];
     for (const out of outputs) {
-      rows.push([
-        "Output",
-        out?.statement || "",
-        joinIndicators(out?.indicators),
-        "",
-      ]);
+      rows.push(["Output", out?.statement || "", joinIndicators(out?.indicators), ""]);
     }
   }
 
@@ -518,7 +514,7 @@ function renderTable(doc, { title, headers, colFracs, rows, styles }) {
     doc.rect(x, y0 - 2, w, rowHeight).strokeOpacity(0.12).stroke();
     doc.restore();
 
-    const r = Array.isArray(r0) ? r0 : (r0 && typeof r0 === "object" ? Object.values(r0) : [r0]);
+    const r = Array.isArray(r0) ? r0 : r0 && typeof r0 === "object" ? Object.values(r0) : [r0];
 
     let x0 = x;
     for (let i = 0; i < headers.length; i++) {
@@ -666,73 +662,73 @@ function makeDots(left, right, max = 90) {
   return ".".repeat(dots);
 }
 
-
-
 function renderNgoProjectPdf(doc, { title, ctx, sections }) {
-// ---- Blank-page protection (same concept as BP pdfAssembler)
-let __pageIndex = 0;
-const __pageHasBody = new Set();
-const __touch = () => __pageHasBody.add(__pageIndex);
-let __suppressTouch = false;
+  // ---- Blank-page protection (same concept as BP pdfAssembler)
+  let __pageIndex = 0;
+  const __pageHasBody = new Set();
+  const __touch = () => __pageHasBody.add(__pageIndex);
+  let __suppressTouch = false;
 
-doc.on("pageAdded", () => {
-  __pageIndex += 1;
-});
+  doc.on("pageAdded", () => {
+    __pageIndex += 1;
+  });
 
-const __origText = doc.text.bind(doc);
-doc.text = function (...args) {
-  const s = args?.[0];
-  if (!__suppressTouch && s !== undefined && s !== null && String(s).trim().length > 0) {
-    __touch();
-  }
-  return __origText(...args);
-};
+  const __origText = doc.text.bind(doc);
+  doc.text = function (...args) {
+    const s = args?.[0];
+    if (!__suppressTouch && s !== undefined && s !== null && String(s).trim().length > 0) {
+      __touch();
+    }
+    return __origText(...args);
+  };
 
-doc.__touch = __touch;
-doc.__setSuppressTouch = (v) => {
-  __suppressTouch = !!v;
-};
+  doc.__touch = __touch;
+  doc.__setSuppressTouch = (v) => {
+    __suppressTouch = !!v;
+  };
 
-const styles = {
-  title: { font: "Helvetica-Bold", size: 22 },
-  h1: { font: "Helvetica-Bold", size: 16 },
-  h2: { font: "Helvetica-Bold", size: 12 },
-  body: { font: "Helvetica", size: 10.5, lineGap: 3.2 },
-  small: { font: "Helvetica", size: 9, lineGap: 2.6 },
-};
+  const styles = {
+    title: { font: "Helvetica-Bold", size: 22 },
+    h1: { font: "Helvetica-Bold", size: 16 },
+    h2: { font: "Helvetica-Bold", size: 12 },
+    body: { font: "Helvetica", size: 10.5, lineGap: 3.2 },
+    small: { font: "Helvetica", size: 9, lineGap: 2.6 },
+  };
 
-const safeSections = Array.isArray(sections) ? sections : [];
-const headerLeft = String(ctx?.organization || "ONG").trim() || "ONG";
-const footerLeft = String(ctx?.projectTitle || title || "Projet").trim();
+  const safeSections = Array.isArray(sections) ? sections : [];
+  const headerLeft = String(ctx?.organization || "ONG").trim() || "ONG";
+  const footerLeft = String(ctx?.projectTitle || title || "Projet").trim();
 
-// 1) Cover
-renderCover(doc, title, ctx, styles);
+  // 1) Cover
+  renderCover(doc, title, ctx, styles);
 
-// 2) TOC placeholder
-const tocPageIndex = doc.bufferedPageRange().count;
-doc.addPage();
-renderTOCPlaceholder(doc, styles);
-
-// 3) Sections + TOC entries
-const toc = [];
-for (const s of safeSections) {
-  const secTitle = (s?.title || "").trim() || s?.key || "Section";
+  // 2) TOC placeholder
+  const tocPageIndex = doc.bufferedPageRange().count;
   doc.addPage();
+  renderTOCPlaceholder(doc, styles);
 
-  const startPageNumber = getCurrentPageNumber(doc);
-  toc.push({ title: secTitle, page: startPageNumber });
+  // 3) Sections + TOC entries
+  const toc = [];
+  for (const s of safeSections) {
+    const secTitle = (s?.title || "").trim() || s?.key || "Section";
+    doc.addPage();
 
-  renderSection(doc, secTitle, s, styles);
-}
+    const startPageNumber = getCurrentPageNumber(doc);
+    toc.push({ title: secTitle, page: startPageNumber });
 
-// 4) Fill TOC
-fillTOC(doc, tocPageIndex, toc, styles);
+    renderSection(doc, secTitle, s, styles);
+  }
 
-// 5) headers/footers
-renderAllHeadersFooters(doc, { headerLeft, footerLeft, styles });
+  // 4) Fill TOC
+  fillTOC(doc, tocPageIndex, toc, styles);
 
-// 6) Remove trailing blank pages
-removeTrailingBlankPages(doc, __pageHasBody);
+  // 5) headers/footers
+  renderAllHeadersFooters(doc, { headerLeft, footerLeft, styles });
 
-doc.end();
+  // 6) Remove trailing blank pages
+  removeTrailingBlankPages(doc, __pageHasBody);
+
+  // IMPORTANT (STRICT PROD):
+  // Do NOT call doc.end() here.
+  // The caller (buffer builder or HTTP writer) owns doc.end() exactly once.
 }
