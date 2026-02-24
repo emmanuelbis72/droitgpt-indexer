@@ -41,11 +41,46 @@ export function writeNgoProjectPdfPremium({ res, title, ctx, sections }) {
     bufferPages: true,
   });
 
-  // Pipe early, but keep the process crash-proof if PDF generation fails mid-stream.
-  doc.pipe(res);
+  // ---- STRICT PROD: crash-proof PDF streaming (no double end, no write-after-end)
+  let __ended = false;
 
-  // If the PDFKit stream errors, avoid crashing the whole Render instance.
-  // Avoid unhandled response stream errors (prevents process crash on write-after-end)
+  const safeDocEnd = () => {
+    if (__ended) return;
+    __ended = true;
+    try {
+      doc.end();
+    } catch (_) {
+      // ignore
+    }
+  };
+
+  const __safeClose = (tag, err) => {
+    try {
+      console.error(`[NGO][PDF] safeClose: ${tag}`, err || "");
+    } catch (_) {}
+
+    // Stop piping immediately so PDFKit can't write into a closed response
+    try {
+      doc.unpipe(res);
+    } catch (_) {}
+
+    // Ensure doc.end is called at most once
+    safeDocEnd();
+
+    // Close response safely (destroy only on error)
+    try {
+      if (!res.headersSent) res.statusCode = 500;
+    } catch (_) {}
+
+    try {
+      if (err) res.destroy(err);
+      else if (!res.writableEnded) res.end();
+    } catch (_) {
+      // ignore
+    }
+  };
+
+  // Avoid unhandled response errors (prevents Render instance crash)
   res.on("error", (err) => {
     console.error("[NGO][PDF] response error", err);
     __safeClose("response_error", err);
@@ -53,22 +88,25 @@ export function writeNgoProjectPdfPremium({ res, title, ctx, sections }) {
 
   doc.on("error", (err) => {
     console.error("[NGO][PDF] PDFKit error", err);
-    try {
-      if (!res.headersSent) res.statusCode = 500;
-      res.end();
-    } catch (_) {}
+    __safeClose("pdfkit_error", err);
   });
 
-  // If the client disconnects, stop writing.
+  // If the client disconnects, stop writing (only if not already ended)
   res.on("close", () => {
-    try {
-      safeDocEnd();
-    } catch (_) {}
+    if (res.writableEnded) return;
+    __safeClose("client_close");
   });
 
-  renderNgoProjectPdf(doc, { title, ctx, sections });
+  // Pipe AFTER handlers are attached
+  doc.pipe(res);
 
-  safeDocEnd();
+  try {
+    renderNgoProjectPdf(doc, { title, ctx, sections });
+    safeDocEnd();
+  } catch (err) {
+    console.error("[NGO] PDF generation failed", err);
+    __safeClose("render_error", err);
+  }
 }
 
 /* =========================
@@ -378,7 +416,8 @@ function renderWorkplan(doc, obj, styles) {
 ========================= */
 function renderKeyValue(doc, title, rows, styles) {
   doc.moveDown(0.7);
-  applyFont(doc, styles.h2).text(title);
+  applyFont(doc, styles.h2);
+  doc.text(title);
   doc.moveDown(0.25);
 
   const x = doc.page.margins.left;
@@ -411,7 +450,9 @@ function renderKeyValue(doc, title, rows, styles) {
   }
 }
 
-function renderTable(doc, { title, headers = [], colFracs, rows = [], styles = {} }) {
+function renderTable(doc, { title, headers, colFracs, rows, styles }) {
+  headers = Array.isArray(headers) ? headers : [];
+  rows = Array.isArray(rows) ? rows : [];
   doc.moveDown(0.8);
   applyFont(doc, styles.h2).text(String(title || ""));
   doc.moveDown(0.25);
@@ -419,28 +460,7 @@ function renderTable(doc, { title, headers = [], colFracs, rows = [], styles = {
   const x = doc.page.margins.left;
   const w = doc.page.width - doc.page.margins.left - doc.page.margins.right;
 
-  const safeHeaders = Array.isArray(headers) ? headers : [];
-
-  const headerLabel = (v) => {
-    if (v === null || v === undefined) return "";
-    if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") return String(v);
-    if (typeof v === "object") return String(v.text ?? v.label ?? v.value ?? v.name ?? "");
-    return "";
-  };
-
-  const cellText = (v) => {
-    if (v === null || v === undefined) return "";
-    if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") return String(v);
-    if (Array.isArray(v)) return v.map(cellText).filter(Boolean).join(" • ");
-    if (typeof v === "object") return String(v.text ?? v.label ?? v.value ?? v.name ?? "");
-    return "";
-  };
-
-  const firstRow = Array.isArray(rows) && rows.length ? rows[0] : null;
-  const firstRowCols = Array.isArray(firstRow) ? firstRow.length : (firstRow && typeof firstRow === "object" ? Object.values(firstRow).length : 0);
-  const ncols = Math.max(safeHeaders.length, firstRowCols, 1);
-
-  const fracs = normalizeFracs(colFracs, ncols);
+  const fracs = normalizeFracs(colFracs, headers.length);
   const colW = fracs.map((f) => f * w);
 
   const headerY = doc.y;
@@ -454,9 +474,9 @@ function renderTable(doc, { title, headers = [], colFracs, rows = [], styles = {
   applyFont(doc, { font: "Helvetica-Bold", size: 9.1 });
 
   let cx = x;
-  for (let i = 0; i < ncols; i++) {
-    const hw = colW[i] || (w / ncols);
-    doc.text(headerLabel(safeHeaders[i] ?? ""), cx + 6, headerY + 4, {
+  for (let i = 0; i < headers.length; i++) {
+    const hw = colW[i];
+    doc.text(String(headers[i] || ""), cx + 6, headerY + 4, {
       width: hw - 10,
       align: "left",
     });
@@ -466,40 +486,49 @@ function renderTable(doc, { title, headers = [], colFracs, rows = [], styles = {
   doc.moveDown(1.2);
   applyFont(doc, styles.small);
 
+  // Defensive cell normalization:
+  // - rows may be arrays of primitives
+  // - or objects (we'll render Object.values)
+  // - cells may be { text: "..." } depending on upstream formatting
+  const cellText = (v) => {
+    if (v === null || v === undefined) return "";
+    if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") return String(v);
+    if (Array.isArray(v)) return v.map(cellText).filter(Boolean).join(" • ");
+    if (typeof v === "object") {
+      if (typeof v.text === "string" || typeof v.text === "number") return String(v.text);
+      if (typeof v.label === "string" || typeof v.label === "number") return String(v.label);
+      if (typeof v.value === "string" || typeof v.value === "number") return String(v.value);
+      if (typeof v.name === "string" || typeof v.name === "number") return String(v.name);
+      try {
+        const s = JSON.stringify(v);
+        return s && s !== "{}" ? s : "";
+      } catch {
+        return "";
+      }
+    }
+    return "";
+  };
+
   const rowHeight = 34; // base; text wraps inside
-  for (const r0 of Array.isArray(rows) ? rows : []) {
-    const rowArr = Array.isArray(r0)
-      ? r0
-      : (r0 && typeof r0 === "object")
-        ? Object.values(r0)
-        : [r0];
+  for (const r0 of rows || []) {
+    ensureSpace(doc, rowHeight + 8);
 
     const y0 = doc.y;
-    ensureSpace(doc, rowHeight + 6);
-
-    // Alternating background
     doc.save();
-    doc.rect(x, y0, w, rowHeight).fillOpacity(0.025).fill("#000000");
+    doc.rect(x, y0 - 2, w, rowHeight).strokeOpacity(0.12).stroke();
     doc.restore();
 
+    const r = Array.isArray(r0) ? r0 : (r0 && typeof r0 === "object" ? Object.values(r0) : [r0]);
+
     let x0 = x;
-    for (let i = 0; i < ncols; i++) {
-      const cellW = colW[i] || (w / ncols);
-      const v = i < rowArr.length ? rowArr[i] : "";
-      const txt = cellText(v);
-
-      // Cell border
-      doc.save();
-      doc.rect(x0, y0, cellW, rowHeight).strokeOpacity(0.15).stroke("#000000");
-      doc.restore();
-
+    for (let i = 0; i < headers.length; i++) {
+      const cellW = colW[i];
+      const txt = cellText(r?.[i]);
       doc.text(txt, x0 + 6, y0 + 2, { width: cellW - 10, height: rowHeight - 4 });
-
       x0 += cellW;
     }
 
-    doc.y = y0 + rowHeight;
-    doc.moveDown(0.1);
+    doc.moveDown(2.05);
   }
 }
 
@@ -583,10 +612,19 @@ function renderHeaderFooter(doc, { headerLeft, headerRight, footerLeft, pageNumb
   if (typeof doc.__setSuppressTouch === "function") doc.__setSuppressTouch(false);
 }
 
-function removeTrailingBlankPages(_doc, _pageHasBodySet) {
-  // PDFKit does not support deleting pages once written.
-  // Keep as no-op to avoid runtime errors.
-  return;
+function removeTrailingBlankPages(doc, pageHasBodySet) {
+  const range = doc.bufferedPageRange();
+  const total = range.count;
+
+  // Remove blank pages only at the end
+  let lastIdx = total - 1;
+  while (lastIdx >= 0) {
+    const hasBody = pageHasBodySet.has(lastIdx);
+    if (hasBody) break;
+    doc.switchToPage(lastIdx);
+    doc.deletePage(lastIdx);
+    lastIdx -= 1;
+  }
 }
 
 /* =========================
@@ -601,7 +639,7 @@ function sanitizeFilename(name) {
 
 function applyFont(doc, style = {}) {
   const font = style.font || "Helvetica";
-  const size = Number(style.size || 11);
+  const size = typeof style.size === "number" ? style.size : 10;
   doc.font(font).fontSize(size);
   if (style.lineGap !== undefined) doc.lineGap(style.lineGap);
   return doc;
