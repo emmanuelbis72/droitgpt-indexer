@@ -613,18 +613,12 @@ function renderHeaderFooter(doc, { headerLeft, headerRight, footerLeft, pageNumb
 }
 
 function removeTrailingBlankPages(doc, pageHasBodySet) {
-  const range = doc.bufferedPageRange();
-  const total = range.count;
-
-  // Remove blank pages only at the end
-  let lastIdx = total - 1;
-  while (lastIdx >= 0) {
-    const hasBody = pageHasBodySet.has(lastIdx);
-    if (hasBody) break;
-    doc.switchToPage(lastIdx);
-    doc.deletePage(lastIdx);
-    lastIdx -= 1;
-  }
+  // NOTE (STRICT PROD): PDFKit does NOT support doc.deletePage().
+  // Calling doc.deletePage() crashes with:
+  //   TypeError: doc.deletePage is not a function
+  // We keep this as a safe no-op.
+  void doc;
+  void pageHasBodySet;
 }
 
 /* =========================
