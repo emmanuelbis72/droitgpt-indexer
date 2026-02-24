@@ -1,5 +1,35 @@
 // bp/core/ngoPdfAssembler.js
 import PDFDocument from "pdfkit";
+import { PassThrough } from "stream";
+
+
+export async function buildNgoProjectPdfBufferPremium({ title, ctx, sections }) {
+  return new Promise((resolve, reject) => {
+    const doc = new PDFDocument({
+      size: "A4",
+      margins: { top: 56, left: 56, right: 56, bottom: 56 },
+      bufferPages: true,
+    });
+
+    const stream = new PassThrough();
+    const chunks = [];
+
+    stream.on("data", (c) => chunks.push(c));
+    stream.on("end", () => resolve(Buffer.concat(chunks)));
+    stream.on("error", reject);
+
+    doc.on("error", reject);
+    doc.pipe(stream);
+
+    try {
+      renderNgoProjectPdf(doc, { title, ctx, sections });
+      doc.end();
+    } catch (e) {
+      reject(e);
+      try { doc.end(); } catch (_) {}
+    }
+  });
+}
 
 export function writeNgoProjectPdfPremium({ res, title, ctx, sections }) {
   res.setHeader("Content-Type", "application/pdf");
@@ -11,114 +41,29 @@ export function writeNgoProjectPdfPremium({ res, title, ctx, sections }) {
     bufferPages: true,
   });
 
-  // --- Safe close to prevent "write after end" and avoid process crash
-  let __closed = false;
-  const __safeClose = (reason, err) => {
-    if (__closed) return;
-    __closed = true;
-    try { doc.unpipe(res); } catch (_) {}
+  // Pipe early, but keep the process crash-proof if PDF generation fails mid-stream.
+  doc.pipe(res);
+
+  // If the PDFKit stream errors, avoid crashing the whole Render instance.
+  doc.on("error", (err) => {
+    console.error("[NGO][PDF] PDFKit error", err);
     try {
       if (!res.headersSent) res.statusCode = 500;
+      res.end();
     } catch (_) {}
-    try { if (!res.writableEnded) res.end(); } catch (_) {}
-    // In error scenarios, destroy the socket to stop further writes
-    try { if (!res.destroyed) res.destroy(err); } catch (_) {}
-    try { doc.end(); } catch (_) {}
-  };
-
-  // Avoid unhandled response errors (can crash Node in Render)
-  res.on("error", (err) => {
-    console.error("[NGO][PDF] response error", err);
-    __safeClose("response_error", err);
   });
 
   // If the client disconnects, stop writing.
   res.on("close", () => {
-    __safeClose("client_close");
+    try {
+      doc.end();
+    } catch (_) {}
   });
 
-  // If the PDFKit stream errors, stop cleanly.
-  doc.on("error", (err) => {
-    console.error("[NGO][PDF] PDFKit error", err);
-    __safeClose("pdfkit_error", err);
-  });
+  renderNgoProjectPdf(doc, { title, ctx, sections });
 
-  // Pipe AFTER handlers are attached
-  doc.pipe(res);
-
-  try {
-    // ---- Blank-page protection (same concept as BP pdfAssembler)
-    let __pageIndex = 0;
-    const __pageHasBody = new Set();
-    const __touch = () => __pageHasBody.add(__pageIndex);
-    let __suppressTouch = false;
-
-    doc.on("pageAdded", () => {
-      __pageIndex += 1;
-    });
-
-    const __origText = doc.text.bind(doc);
-    doc.text = function (...args) {
-      const s = args?.[0];
-      if (!__suppressTouch && s !== undefined && s !== null && String(s).trim().length > 0) {
-        __touch();
-      }
-      return __origText(...args);
-    };
-
-    doc.__touch = __touch;
-    doc.__setSuppressTouch = (v) => {
-      __suppressTouch = !!v;
-    };
-
-    const styles = {
-      title: { font: "Helvetica-Bold", size: 22 },
-      h1: { font: "Helvetica-Bold", size: 16 },
-      h2: { font: "Helvetica-Bold", size: 12 },
-      body: { font: "Helvetica", size: 10.5, lineGap: 3.2 },
-      small: { font: "Helvetica", size: 9, lineGap: 2.6 },
-    };
-
-    const safeSections = Array.isArray(sections) ? sections : [];
-    const headerLeft = String(ctx?.organization || "ONG").trim() || "ONG";
-    const footerLeft = String(ctx?.projectTitle || title || "Projet").trim();
-
-    // 1) Cover
-    renderCover(doc, title, ctx, styles);
-
-    // 2) TOC placeholder
-    const tocPageIndex = doc.bufferedPageRange().count;
-    doc.addPage();
-    renderTOCPlaceholder(doc, styles);
-
-    // 3) Sections + TOC entries
-    const toc = [];
-    for (const s of safeSections) {
-      const secTitle = (s?.title || "").trim() || s?.key || "Section";
-      doc.addPage();
-
-      const startPageNumber = getCurrentPageNumber(doc);
-      toc.push({ title: secTitle, page: startPageNumber });
-
-      renderSection(doc, secTitle, s, styles);
-    }
-
-    // 4) Fill TOC
-    fillTOC(doc, tocPageIndex, toc, styles);
-
-    // 5) headers/footers
-    renderAllHeadersFooters(doc, { headerLeft, footerLeft, styles });
-
-    // 6) Remove trailing blank pages
-    removeTrailingBlankPages(doc, __pageHasBody);
-
-    doc.end();
-  } catch (err) {
-    console.error("[NGO] PDF generation failed", err);
-    __safeClose("generation_error", err);
-  }
+  doc.end();
 }
-
 
 /* =========================
    Cover + TOC
@@ -427,7 +372,8 @@ function renderWorkplan(doc, obj, styles) {
 ========================= */
 function renderKeyValue(doc, title, rows, styles) {
   doc.moveDown(0.7);
-  applyFont(doc, styles.h2).text(title);
+  applyFont(doc, styles.h2);
+  doc.text(title);
   doc.moveDown(0.25);
 
   const x = doc.page.margins.left;
@@ -461,6 +407,8 @@ function renderKeyValue(doc, title, rows, styles) {
 }
 
 function renderTable(doc, { title, headers, colFracs, rows, styles }) {
+  headers = Array.isArray(headers) ? headers : [];
+  rows = Array.isArray(rows) ? rows : [];
   doc.moveDown(0.8);
   applyFont(doc, styles.h2).text(String(title || ""));
   doc.moveDown(0.25);
@@ -646,11 +594,10 @@ function sanitizeFilename(name) {
 }
 
 function applyFont(doc, style = {}) {
-  // Always return doc so callers can chain: applyFont(doc, style).text(...)
-  const font = style?.font || "Helvetica";
-  const size = Number(style?.size || 11);
+  const font = style.font || "Helvetica";
+  const size = typeof style.size === "number" ? style.size : 10;
   doc.font(font).fontSize(size);
-  if (style?.lineGap !== undefined) doc.lineGap(style.lineGap);
+  if (style.lineGap !== undefined) doc.lineGap(style.lineGap);
   return doc;
 }
 
@@ -679,4 +626,75 @@ function makeDots(left, right, max = 90) {
   const R = String(right || "").length;
   const dots = Math.max(2, Math.min(max, 90 - L - R));
   return ".".repeat(dots);
+}
+
+
+
+function renderNgoProjectPdf(doc, { title, ctx, sections }) {
+// ---- Blank-page protection (same concept as BP pdfAssembler)
+let __pageIndex = 0;
+const __pageHasBody = new Set();
+const __touch = () => __pageHasBody.add(__pageIndex);
+let __suppressTouch = false;
+
+doc.on("pageAdded", () => {
+  __pageIndex += 1;
+});
+
+const __origText = doc.text.bind(doc);
+doc.text = function (...args) {
+  const s = args?.[0];
+  if (!__suppressTouch && s !== undefined && s !== null && String(s).trim().length > 0) {
+    __touch();
+  }
+  return __origText(...args);
+};
+
+doc.__touch = __touch;
+doc.__setSuppressTouch = (v) => {
+  __suppressTouch = !!v;
+};
+
+const styles = {
+  title: { font: "Helvetica-Bold", size: 22 },
+  h1: { font: "Helvetica-Bold", size: 16 },
+  h2: { font: "Helvetica-Bold", size: 12 },
+  body: { font: "Helvetica", size: 10.5, lineGap: 3.2 },
+  small: { font: "Helvetica", size: 9, lineGap: 2.6 },
+};
+
+const safeSections = Array.isArray(sections) ? sections : [];
+const headerLeft = String(ctx?.organization || "ONG").trim() || "ONG";
+const footerLeft = String(ctx?.projectTitle || title || "Projet").trim();
+
+// 1) Cover
+renderCover(doc, title, ctx, styles);
+
+// 2) TOC placeholder
+const tocPageIndex = doc.bufferedPageRange().count;
+doc.addPage();
+renderTOCPlaceholder(doc, styles);
+
+// 3) Sections + TOC entries
+const toc = [];
+for (const s of safeSections) {
+  const secTitle = (s?.title || "").trim() || s?.key || "Section";
+  doc.addPage();
+
+  const startPageNumber = getCurrentPageNumber(doc);
+  toc.push({ title: secTitle, page: startPageNumber });
+
+  renderSection(doc, secTitle, s, styles);
+}
+
+// 4) Fill TOC
+fillTOC(doc, tocPageIndex, toc, styles);
+
+// 5) headers/footers
+renderAllHeadersFooters(doc, { headerLeft, footerLeft, styles });
+
+// 6) Remove trailing blank pages
+removeTrailingBlankPages(doc, __pageHasBody);
+
+doc.end();
 }
