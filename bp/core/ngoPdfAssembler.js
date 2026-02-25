@@ -191,7 +191,7 @@ function renderSection(doc, title, sectionObj, styles) {
 
   applyFont(doc, styles.body);
   const content = String(sectionObj?.content || "").trim();
-  doc.text(content || "—");
+  renderTextWithBoldAndLists(doc, content || "—", styles);
 }
 
 /* =========================
@@ -568,25 +568,34 @@ function renderHeaderFooter(doc, { headerLeft, headerRight, footerLeft, pageNumb
   const x = doc.page.margins.left;
   const w = doc.page.width - doc.page.margins.left - doc.page.margins.right;
 
+  // ✅ Safe positions INSIDE printable area / margins (prevents implicit addPage)
+  const headerY = Math.max(6, doc.page.margins.top - 28); // e.g. 56-28=28
+  const headerLineY = doc.page.margins.top - 18;          // e.g. 38
+
+  const footerLineY = doc.page.height - doc.page.margins.bottom + 12; // e.g. 842-56+12=798 (line in bottom margin)
+  const footerTextY = doc.page.height - doc.page.margins.bottom - 14; // e.g. 842-56-14=772 (text in printable area)
+
+  // Header divider
   doc.save();
-  doc.moveTo(x, 38).lineTo(x + w, 38).strokeOpacity(0.12).stroke();
+  doc.moveTo(x, headerLineY).lineTo(x + w, headerLineY).strokeOpacity(0.12).stroke();
   doc.restore();
 
   applyFont(doc, { font: "Helvetica", size: 9 });
 
   // HARD RULE: prevent wrap => prevent implicit addPage()
-  doc.text(oneLine(headerLeft, 70), x, 24, { width: w * 0.6, align: "left", lineBreak: false });
-  doc.text(oneLine(headerRight, 30), x + w * 0.6, 24, { width: w * 0.4, align: "right", lineBreak: false });
+  doc.text(oneLine(headerLeft, 70), x, headerY, { width: w * 0.6, align: "left", lineBreak: false });
+  doc.text(oneLine(headerRight, 30), x + w * 0.6, headerY, { width: w * 0.4, align: "right", lineBreak: false });
 
-  const y = doc.page.height - 42;
+  // Footer divider
   doc.save();
-  doc.moveTo(x, y).lineTo(x + w, y).strokeOpacity(0.12).stroke();
+  doc.moveTo(x, footerLineY).lineTo(x + w, footerLineY).strokeOpacity(0.12).stroke();
   doc.restore();
 
   applyFont(doc, { font: "Helvetica", size: 9 });
 
-  doc.text(oneLine(footerLeft, 90), x, y + 8, { width: w * 0.7, align: "left", lineBreak: false });
-  doc.text(`${pageNumber}/${pageCount}`, x + w * 0.7, y + 8, { width: w * 0.3, align: "right", lineBreak: false });
+  // Footer text (inside printable area)
+  doc.text(oneLine(footerLeft, 90), x, footerTextY, { width: w * 0.7, align: "left", lineBreak: false });
+  doc.text(`${pageNumber}/${pageCount}`, x + w * 0.7, footerTextY, { width: w * 0.3, align: "right", lineBreak: false });
 
   if (typeof doc.__setSuppressTouch === "function") doc.__setSuppressTouch(false);
 }
@@ -599,6 +608,67 @@ function removeTrailingBlankPages(doc, pageHasBodySet) {
 /* =========================
    Helpers
 ========================= */
+
+function renderTextWithBoldAndLists(doc, text, styles) {
+  const lines = String(text || "").replace(/\r/g, "").split("\n");
+
+  for (const raw of lines) {
+    let line = String(raw ?? "").trimEnd();
+
+    // blank line => paragraph spacing
+    if (!line.trim()) {
+      doc.moveDown(0.6);
+      continue;
+    }
+
+    // separator lines like "******" or "-----" => render a light divider
+    if (/^(\*{3,}|-{3,}|_{3,})\s*$/.test(line.trim())) {
+      drawDivider(doc);
+      continue;
+    }
+
+    // bullets "- " or "* " => bullet point
+    if (/^\s*[-*]\s+/.test(line)) {
+      line = "• " + line.replace(/^\s*[-*]\s+/, "");
+    }
+
+    // neutralize markdown headings (just in case)
+    const noMd = line.replace(/^#{1,6}\s+/, "");
+
+    // full line bold **...**
+    const mFull = noMd.match(/^\*\*(.+?)\*\*\s*$/);
+    if (mFull) {
+      doc.font("Helvetica-Bold").fontSize(styles?.h2?.size || 12).text(String(mFull[1] || "").trim(), { align: "left" });
+      doc.font("Helvetica").fontSize(styles?.body?.size || 10.5);
+      continue;
+    }
+
+    // mixed bold segments
+    const parts = [];
+    let rest = noMd;
+    while (rest.length) {
+      const m = rest.match(/\*\*(.+?)\*\*/);
+      if (!m) {
+        parts.push({ t: rest, b: false });
+        break;
+      }
+      const idx = m.index || 0;
+      if (idx > 0) parts.push({ t: rest.slice(0, idx), b: false });
+      parts.push({ t: m[1], b: true });
+      rest = rest.slice(idx + m[0].length);
+    }
+
+    for (let i = 0; i < parts.length; i++) {
+      const p = parts[i];
+      const isLast = i === parts.length - 1;
+      doc.font(p.b ? "Helvetica-Bold" : "Helvetica");
+      doc.text(String(p.t || ""), { continued: !isLast });
+    }
+    doc.text("");
+    doc.font("Helvetica");
+  }
+}
+
 function sanitizeFilename(name) {
   return String(name || "document")
     .trim()
