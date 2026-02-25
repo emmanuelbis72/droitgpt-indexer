@@ -3,7 +3,6 @@ import dotenv from 'dotenv';
 import generatePdfRoute from './generatePdf.js';
 import generateBusinessPlanRoute from './routes/generateBusinessPlan.js';
 import generateLicenceMemoireRoute from './routes/generateLicenceMemoire.js';
-import generateScientificArticleRoute from './routes/generateScientificArticle.js';
 import generateExcelAppRoute from './routes/generateExcelApp.js';
 
 dotenv.config();
@@ -58,11 +57,6 @@ app.use('/generate-pdf', generatePdfRoute);
 app.use('/generate-business-plan', generateBusinessPlanRoute);
 app.use('/generate-academic', generateLicenceMemoireRoute);
 app.use('/generate-memoire', generateLicenceMemoireRoute);
-
-// ✅ Articles scientifiques (mode général) + Droit congolais (RAG)
-app.use('/generate-article', generateScientificArticleRoute);
-
-// ✅ Progiciels Excel (.xlsx) : formulaires + formules + dashboards
 app.use('/generate-excel-app', generateExcelAppRoute);
 
 // Download helper (TXT)
@@ -109,14 +103,6 @@ app.get('/', (_req, res) => {
       '/generate-business-plan/premium/jobs/:id/result',
       '/generate-memoire',
       '/generate-academic/licence-memoire',
-      '/generate-article',
-      '/generate-article?async=1',
-      '/generate-article/jobs/:id',
-      '/generate-article/jobs/:id/result',
-      '/generate-excel-app',
-      '/generate-excel-app?async=1',
-      '/generate-excel-app/jobs/:id',
-      '/generate-excel-app/jobs/:id/result',
       '/download-business-plan',
     ],
   });
