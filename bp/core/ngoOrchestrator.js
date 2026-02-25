@@ -28,6 +28,7 @@ export async function generateNgoProjectPremium({ lang, ctx, lite = false }) {
     // JSON sections
     const isJson = [
       "stakeholder_analysis_json",
+      "org_chart_json",
       "logframe_json",
       "me_plan_json",
       "sdg_alignment_json",
@@ -320,6 +321,7 @@ function titleFromKey(key, lang) {
     context_justification: "Contexte et justification",
     problem_analysis: "Analyse du problème",
     stakeholder_analysis_json: "Analyse des parties prenantes",
+    org_chart_json: "Organigramme fonctionnel de l'équipe projet",
     theory_of_change: "Théorie du changement",
     objectives_results: "Objectifs et résultats attendus",
     logframe_json: "Cadre logique (LogFrame)",
@@ -340,6 +342,7 @@ function titleFromKey(key, lang) {
     context_justification: "Context and Rationale",
     problem_analysis: "Problem Analysis",
     stakeholder_analysis_json: "Stakeholder Analysis",
+    org_chart_json: "Project Team Org Chart",
     theory_of_change: "Theory of Change",
     objectives_results: "Objectives and Expected Results",
     logframe_json: "Logical Framework (LogFrame)",

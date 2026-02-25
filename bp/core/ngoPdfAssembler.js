@@ -199,6 +199,7 @@ function renderSection(doc, title, sectionObj, styles) {
 ========================= */
 function renderJsonBlock(doc, key, obj, styles) {
   if (key === "stakeholder_analysis_json") return renderStakeholders(doc, obj, styles);
+  if (key === "org_chart_json") return renderOrgChart(doc, obj, styles);
   if (key === "logframe_json") return renderLogframe(doc, obj, styles);
   if (key === "me_plan_json") return renderME(doc, obj, styles);
   if (key === "sdg_alignment_json") return renderSDGs(doc, obj, styles);
@@ -228,6 +229,50 @@ function renderStakeholders(doc, obj, styles) {
     rows: tableRows,
     styles,
   });
+
+  // Optional stakeholder mapping (power-interest grid)
+  const m = obj?.stakeholder_map;
+  const q = m?.quadrants || {};
+  if (m && typeof m === "object") {
+    const mapRows = [
+      { label: "Gérer de près (High power / High interest)", value: safeJoin(q.manage_closely) },
+      { label: "Satisfaire (High power / Low interest)", value: safeJoin(q.keep_satisfied) },
+      { label: "Informer (Low power / High interest)", value: safeJoin(q.keep_informed) },
+      { label: "Surveiller (Low power / Low interest)", value: safeJoin(q.monitor) },
+    ];
+    renderKeyValue(doc, "Cartographie des parties prenantes (Power/Interest)", mapRows, styles);
+  }
+}
+
+function renderOrgChart(doc, obj, styles) {
+  const s = obj?.org_structure || {};
+  const buckets = [
+    { key: "governance", title: "Gouvernance" },
+    { key: "management", title: "Management" },
+    { key: "technical", title: "Technique" },
+    { key: "field", title: "Terrain" },
+    { key: "support", title: "Support" },
+  ];
+
+  for (const b of buckets) {
+    const roles = Array.isArray(s?.[b.key]) ? s[b.key] : [];
+    if (!roles.length) continue;
+
+    const rows = roles.map((r) => [
+      r?.role || "",
+      r?.reports_to || "",
+      Array.isArray(r?.key_responsibilities) ? r.key_responsibilities.join("; ") : r?.key_responsibilities || "",
+      r?.profile || "",
+    ]);
+
+    renderTable(doc, {
+      title: `Organigramme — ${b.title}`,
+      headers: ["Rôle", "Rapporte à", "Responsabilités clés", "Profil"],
+      colFracs: [0.20, 0.16, 0.44, 0.20],
+      rows,
+      styles,
+    });
+  }
 }
 
 function renderLogframe(doc, obj, styles) {
@@ -334,9 +379,13 @@ function renderRisks(doc, obj, styles) {
 
 function renderBudget(doc, obj, styles) {
   const currency = String(obj?.currency || "USD");
-  const direct = Array.isArray(obj?.direct_costs) ? obj.direct_costs : [];
+  const byCategory = Array.isArray(obj?.by_category)
+    ? obj.by_category
+    : Array.isArray(obj?.direct_costs)
+      ? obj.direct_costs
+      : [];
 
-  for (const cat of direct) {
+  for (const cat of byCategory) {
     const catName = String(cat?.category || "Catégorie");
     const items = Array.isArray(cat?.items) ? cat.items : [];
     const rows = items.map((it) => [
@@ -355,6 +404,39 @@ function renderBudget(doc, obj, styles) {
       rows,
       styles,
     });
+
+    // Optional category total
+    if (cat?.category_total) {
+      renderKeyValue(doc, `Total catégorie — ${catName}`, [{ label: "Total", value: String(cat.category_total) }], styles);
+    }
+  }
+
+  // Optional: budget by activity
+  const byActivity = Array.isArray(obj?.by_activity) ? obj.by_activity : [];
+  for (const a of byActivity) {
+    const activityName = String(a?.activity || "Activité");
+    const costs = Array.isArray(a?.costs) ? a.costs : [];
+    const rows = costs.map((c) => [
+      c?.category || "",
+      c?.line_item || "",
+      c?.unit || "",
+      c?.qty || "",
+      c?.unit_cost || "",
+      c?.total_cost || "",
+    ]);
+    if (rows.length) {
+      renderTable(doc, {
+        title: `Budget par activité — ${activityName} (${currency})`,
+        headers: ["Catégorie", "Ligne", "Unité", "Qté", "Coût unitaire", "Total"],
+        colFracs: [0.14, 0.34, 0.10, 0.08, 0.14, 0.20],
+        rows,
+        styles,
+      });
+    }
+
+    if (a?.activity_total) {
+      renderKeyValue(doc, `Total activité — ${activityName}`, [{ label: "Total", value: String(a.activity_total) }], styles);
+    }
   }
 
   const totals = obj?.totals || {};
@@ -379,15 +461,77 @@ function renderWorkplan(doc, obj, styles) {
     String(a?.start_month ?? ""),
     String(a?.end_month ?? ""),
     Array.isArray(a?.milestones) ? a.milestones.join("; ") : "",
+    Array.isArray(a?.deliverables) ? a.deliverables.join("; ") : "",
   ]);
 
   renderTable(doc, {
     title: `Chronogramme (Workplan) — ${duration} mois`,
-    headers: ["Activité", "Composante", "Début", "Fin", "Jalons"],
-    colFracs: [0.32, 0.16, 0.08, 0.08, 0.36],
+    headers: ["Activité", "Composante", "Début", "Fin", "Jalons", "Livrables"],
+    colFracs: [0.26, 0.14, 0.07, 0.07, 0.24, 0.22],
     rows,
     styles,
   });
+
+  // Simple Gantt chart (visual)
+  renderGanttChart(doc, { duration, activities, styles });
+}
+
+function renderGanttChart(doc, { duration = 12, activities = [], styles }) {
+  const months = Math.max(1, Math.min(24, Number(duration) || 12));
+  const safeActs = Array.isArray(activities) ? activities.slice(0, 24) : [];
+  if (!safeActs.length) return;
+
+  doc.addPage();
+  applyFont(doc, styles.h1);
+  doc.text(`Diagramme de Gantt — ${months} mois`);
+  drawDivider(doc);
+
+  const x = doc.page.margins.left;
+  const w = doc.page.width - doc.page.margins.left - doc.page.margins.right;
+  const nameW = Math.min(240, w * 0.42);
+  const gridW = w - nameW;
+  const cellW = gridW / months;
+  const rowH = 14;
+
+  // Header row
+  ensureSpace(doc, 24);
+  const y0 = doc.y;
+  doc.save();
+  doc.rect(x, y0, w, rowH + 6).fillOpacity(0.06).fill("#000000");
+  doc.restore();
+  applyFont(doc, { font: "Helvetica-Bold", size: 8.2 });
+  doc.text("Activités", x + 6, y0 + 4, { width: nameW - 8 });
+  for (let m = 1; m <= months; m++) {
+    doc.text(String(m), x + nameW + (m - 1) * cellW, y0 + 4, { width: cellW, align: "center" });
+  }
+  doc.y = y0 + rowH + 10;
+
+  // Rows
+  applyFont(doc, { font: "Helvetica", size: 7.8 });
+  for (const a of safeActs) {
+    ensureSpace(doc, rowH + 10);
+    const y = doc.y;
+
+    // row border
+    doc.save();
+    doc.rect(x, y - 2, w, rowH + 4).strokeOpacity(0.12).stroke();
+    doc.restore();
+
+    const label = String(a?.activity || "").trim();
+    doc.text(label, x + 6, y, { width: nameW - 10, height: rowH });
+
+    const sm = clampInt(a?.start_month, 1, months);
+    const em = clampInt(a?.end_month, sm, months);
+
+    // bar
+    const barX = x + nameW + (sm - 1) * cellW + 1;
+    const barW = (em - sm + 1) * cellW - 2;
+    doc.save();
+    doc.rect(barX, y + 2, Math.max(1, barW), rowH - 4).fillOpacity(0.22).fill("#000000");
+    doc.restore();
+
+    doc.moveDown(1.05);
+  }
 }
 
 /* =========================
@@ -709,6 +853,23 @@ function makeDots(left, right, max = 90) {
   const R = String(right || "").length;
   const dots = Math.max(2, Math.min(max, 90 - L - R));
   return ".".repeat(dots);
+}
+
+function safeJoin(v) {
+  if (!v) return "";
+  if (Array.isArray(v)) return v.filter(Boolean).map(String).join("; ");
+  if (typeof v === "string") return v;
+  try {
+    return String(v);
+  } catch {
+    return "";
+  }
+}
+
+function clampInt(n, min, max) {
+  const x = Number.parseInt(String(n ?? ""), 10);
+  if (!Number.isFinite(x)) return min;
+  return Math.max(min, Math.min(max, x));
 }
 
 // CRITICAL: header/footer MUST be 1 line.

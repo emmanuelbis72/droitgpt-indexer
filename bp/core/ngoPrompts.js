@@ -26,6 +26,7 @@ export const NGO_SECTION_ORDER = [
   "context_justification",
   "problem_analysis",
   "stakeholder_analysis_json",
+  "org_chart_json",
   "theory_of_change",
   "objectives_results",
   "logframe_json",
@@ -49,6 +50,7 @@ export const NGO_LITE_ORDER = [
   "risk_matrix_json",
   "sdg_alignment_json",
   "workplan_json",
+  "org_chart_json",
 ];
 
 function baseContextFR(ctx) {
@@ -192,7 +194,7 @@ Rédige Analyse du problème (900–1300 mots) :
 - hypothèses critiques.`,
     stakeholder_analysis_json: `${ctxBlock}
 Retourne du JSON STRICT uniquement.
-Analyse des parties prenantes (matrice) :
+Analyse des parties prenantes (matrice + cartographie) :
 
 {
   "stakeholders": [
@@ -204,12 +206,50 @@ Analyse des parties prenantes (matrice) :
       "role": "",
       "engagement_strategy": ""
     }
-  ]
+  ],
+  "stakeholder_map": {
+    "method": "power_interest_grid",
+    "quadrants": {
+      "manage_closely": [""],
+      "keep_satisfied": [""],
+      "keep_informed": [""],
+      "monitor": [""]
+    }
+  }
 }
 
 Contraintes:
 - 10 à 18 parties prenantes pertinentes, adaptées à la RDC si le pays=RDC.
 - Textes courts mais concrets.`,
+
+    org_chart_json: `${ctxBlock}
+Retourne du JSON STRICT uniquement.
+Organigramme fonctionnel de l'équipe du projet (rôles, responsabilités, lignes de reporting) :
+
+{
+  "org_structure": {
+    "governance": [
+      {"role":"","reports_to":"","key_responsibilities":[""],"profile":""}
+    ],
+    "management": [
+      {"role":"","reports_to":"","key_responsibilities":[""],"profile":""}
+    ],
+    "technical": [
+      {"role":"","reports_to":"","key_responsibilities":[""],"profile":""}
+    ],
+    "field": [
+      {"role":"","reports_to":"","key_responsibilities":[""],"profile":""}
+    ],
+    "support": [
+      {"role":"","reports_to":"","key_responsibilities":[""],"profile":""}
+    ]
+  }
+}
+
+Règles:
+- 10 à 18 rôles max, réalistes pour un projet de 12 mois.
+- Chaque rôle: responsabilités concrètes (3–6 bullets) + reporting clair.
+- Adapter à la zone/pays (RDC si pays=RDC).`,
     theory_of_change: `${ctxBlock}
 Rédige Théorie du changement (900–1300 mots) :
 - Chaîne logique: inputs → activités → outputs → outcomes → impact
@@ -329,16 +369,26 @@ Règles:
 - 10 à 16 risques, adaptés RDC si pays=RDC.`,
     budget_json: `${ctxBlock}
 Retourne du JSON STRICT uniquement.
-Budget détaillé (format bailleur) :
+Budget détaillé (ventilation par catégorie ET par activité) :
 
 {
   "currency": "USD",
-  "direct_costs": [
+  "by_category": [
     {
       "category": "Personnel|Travel|Equipment|Supplies|Services|Training|Grants|Other",
+      "category_total": "",
       "items": [
         {"line_item":"","unit":"","qty":"","unit_cost":"","total_cost":"","notes":""}
       ]
+    }
+  ],
+  "by_activity": [
+    {
+      "activity": "",
+      "costs": [
+        {"category":"","line_item":"","unit":"","qty":"","unit_cost":"","total_cost":"","notes":""}
+      ],
+      "activity_total": ""
     }
   ],
   "indirect_costs": {
@@ -354,10 +404,11 @@ Budget détaillé (format bailleur) :
 }
 
 Règles:
-- Garder les coûts sous forme de montants indicatifs (pas besoin de chiffres ultra-précis).`,
+- Garder les coûts sous forme de montants indicatifs (pas besoin de chiffres ultra-précis).
+- Les activités doivent correspondre au chronogramme (mêmes intitulés ou très proches).`,
     workplan_json: `${ctxBlock}
 Retourne du JSON STRICT uniquement.
-Chronogramme (Workplan) :
+Chronogramme détaillé des activités (Workplan + logique Gantt) :
 
 {
   "duration_months": ${ctx.durationMonths || 12},
@@ -367,13 +418,15 @@ Chronogramme (Workplan) :
       "component": "",
       "start_month": 1,
       "end_month": 3,
-      "milestones": [""]
+      "milestones": [""],
+      "deliverables": [""]
     }
   ]
 }
 
 Règles:
-- 12 à 20 activités, couvrant toute la durée.`,
+- 12 à 20 activités, couvrant toute la durée.
+- Chaque activité doit inclure 1–3 jalons et 1–3 livrables.`,
     sustainability_exit: `${ctxBlock}
 Rédige Durabilité & stratégie de sortie (900–1200 mots) :
 - appropriation locale, institutionnalisation
@@ -388,7 +441,7 @@ Rédige Gouvernance, capacités & gestion fiduciaire (900–1200 mots) :
 - conformité, safeguarding, plainte (GRM).`,
     annexes_list: `${ctxBlock}
 Rédige la section Annexes (max 350 mots) :
-- liste des annexes proposées (chronogramme détaillé, organigramme, cartographie parties prenantes, CV, lettres soutien, etc.)`,
+- liste des annexes proposées (chronogramme détaillé + diagramme de Gantt, organigramme fonctionnel, cartographie parties prenantes, budget détaillé par activité, outils de collecte M&E, CV, lettres de soutien, etc.)`,
   };
 
   const pEN = {
@@ -425,7 +478,7 @@ Write Problem Analysis (900–1300 words):
 - critical assumptions.`,
     stakeholder_analysis_json: `${ctxBlock}
 Return STRICT JSON ONLY.
-Stakeholder analysis matrix:
+Stakeholder analysis matrix + stakeholder mapping:
 
 {
   "stakeholders": [
@@ -437,8 +490,46 @@ Stakeholder analysis matrix:
       "role": "",
       "engagement_strategy": ""
     }
-  ]
+  ],
+  "stakeholder_map": {
+    "method": "power_interest_grid",
+    "quadrants": {
+      "manage_closely": [""],
+      "keep_satisfied": [""],
+      "keep_informed": [""],
+      "monitor": [""]
+    }
+  }
 }`,
+
+    org_chart_json: `${ctxBlock}
+Return STRICT JSON ONLY.
+Functional project team org chart (roles, responsibilities, reporting lines):
+
+{
+  "org_structure": {
+    "governance": [
+      {"role":"","reports_to":"","key_responsibilities":[""],"profile":""}
+    ],
+    "management": [
+      {"role":"","reports_to":"","key_responsibilities":[""],"profile":""}
+    ],
+    "technical": [
+      {"role":"","reports_to":"","key_responsibilities":[""],"profile":""}
+    ],
+    "field": [
+      {"role":"","reports_to":"","key_responsibilities":[""],"profile":""}
+    ],
+    "support": [
+      {"role":"","reports_to":"","key_responsibilities":[""],"profile":""}
+    ]
+  }
+}
+
+Rules:
+- 10 to 18 roles max, realistic for a 12-month project.
+- Each role: concrete responsibilities (3–6 bullets) + clear reporting line.
+- Adapt to country/area (DRC if country=DRC).`,
     theory_of_change: `${ctxBlock}
 Write Theory of Change (900–1300 words):
 - logical chain: inputs → activities → outputs → outcomes → impact
@@ -544,16 +635,26 @@ Risk matrix:
 }`,
     budget_json: `${ctxBlock}
 Return STRICT JSON ONLY.
-Budget:
+Detailed budget (breakdown by category AND by activity):
 
 {
   "currency": "USD",
-  "direct_costs": [
+  "by_category": [
     {
       "category": "Personnel|Travel|Equipment|Supplies|Services|Training|Grants|Other",
+      "category_total": "",
       "items": [
         {"line_item":"","unit":"","qty":"","unit_cost":"","total_cost":"","notes":""}
       ]
+    }
+  ],
+  "by_activity": [
+    {
+      "activity": "",
+      "costs": [
+        {"category":"","line_item":"","unit":"","qty":"","unit_cost":"","total_cost":"","notes":""}
+      ],
+      "activity_total": ""
     }
   ],
   "indirect_costs": {
@@ -569,7 +670,7 @@ Budget:
 }`,
     workplan_json: `${ctxBlock}
 Return STRICT JSON ONLY.
-Workplan:
+Detailed workplan schedule (incl. Gantt logic):
 
 {
   "duration_months": ${ctx.durationMonths || 12},
@@ -579,7 +680,8 @@ Workplan:
       "component": "",
       "start_month": 1,
       "end_month": 3,
-      "milestones": [""]
+      "milestones": [""],
+      "deliverables": [""]
     }
   ]
 }`,
@@ -588,7 +690,7 @@ Write Sustainability & Exit Strategy (900–1200 words).`,
     governance_capacity: `${ctxBlock}
 Write Governance, Capacity & Fiduciary Management (900–1200 words).`,
     annexes_list: `${ctxBlock}
-Write Annexes section (max 350 words): list proposed annexes.`,
+Write Annexes section (max 350 words): list proposed annexes (detailed schedule + Gantt, functional org chart, stakeholder mapping, activity-based budget, M&E data collection tools, etc.).`,
   };
 
   const map = lang === "en" ? pEN : pFR;
