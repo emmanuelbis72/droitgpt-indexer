@@ -10,22 +10,51 @@ function sanitizeFilename(name) {
     .slice(0, 90);
 }
 
+function oneLine(s, max = 120) {
+  const t = String(s || "").replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " ").trim();
+  if (!t) return "";
+  if (t.length <= max) return t;
+  return t.slice(0, max - 1) + "…";
+}
+
 function addHeaderFooter(doc, { title }) {
-  const margin = doc.page.margins.left;
-  const w = doc.page.width;
+  // Guard against re-entrancy: header/footer drawing must NEVER trigger addPage()
+  if (doc.__inHeaderFooter) return;
+  doc.__inHeaderFooter = true;
+
+  const x = doc.page.margins.left;
+  const w = doc.page.width - doc.page.margins.left - doc.page.margins.right;
   const h = doc.page.height;
+
+  // Safe positions inside printable area (avoid implicit page breaks)
+  const headerY = Math.max(6, doc.page.margins.top - 28);
+  const footerY = h - doc.page.margins.bottom - 14;
+
+  const prevY = doc.y;
 
   doc.save();
   doc.fontSize(8).fillColor("#666");
-  doc.text("DroitGPT", margin, 18, { width: w - margin * 2, align: "left" });
-  doc.text(String(title || ""), margin, 18, { width: w - margin * 2, align: "right" });
+  doc.text(oneLine("DroitGPT", 40), x, headerY, {
+    width: w * 0.4,
+    align: "left",
+    lineBreak: false,
+  });
+  doc.text(oneLine(title, 80), x + w * 0.4, headerY, {
+    width: w * 0.6,
+    align: "right",
+    lineBreak: false,
+  });
   doc.restore();
 
   const pageNumber = doc.page.number;
   doc.save();
   doc.fontSize(8).fillColor("#666");
-  doc.text(`Page ${pageNumber}`, margin, h - 28, { width: w - margin * 2, align: "center" });
+  doc.text(`Page ${pageNumber}`, x, footerY, { width: w, align: "center", lineBreak: false });
   doc.restore();
+
+  // Restore cursor so header/footer doesn't affect content flow
+  doc.y = prevY;
+  doc.__inHeaderFooter = false;
 }
 
 function sectionTitle(doc, text) {
