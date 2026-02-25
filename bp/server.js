@@ -1,9 +1,10 @@
-﻿import express from "express";
+import express from "express";
 import dotenv from "dotenv";
 import generatePdfRoute from "./generatePdf.js";
 import generateBusinessPlanRoute from "./routes/generateBusinessPlan.js";
 import generateLicenceMemoireRoute from "./routes/generateLicenceMemoire.js";
 import generateNgoProjectRoute from "./routes/generateNgoProject.js";
+import { registerGenerateBookJurisprudence } from "./routes/generateBookJurisprudence.js";
 
 dotenv.config();
 
@@ -58,6 +59,9 @@ app.use("/generate-memoire", generateLicenceMemoireRoute);
 // ✅ NEW: NGO Premium project generation
 app.use("/generate-ngo-project", generateNgoProjectRoute);
 
+// ✅ NEW: DroitGPT Editions — Jurisprudence book (sync + async)
+registerGenerateBookJurisprudence(app);
+
 // Download helper (TXT)
 app.post("/download-business-plan", (req, res) => {
   try {
@@ -103,6 +107,10 @@ app.get("/", (_req, res) => {
       "/generate-ngo-project/premium?async=1",
       "/generate-ngo-project/premium/jobs/:id",
       "/generate-ngo-project/premium/jobs/:id/result",
+      "/generate-book/jurisprudence",
+      "/generate-book/jurisprudence?async=1",
+      "/generate-book/jurisprudence/jobs/:id",
+      "/generate-book/jurisprudence/jobs/:id/result",
       "/generate-memoire",
       "/generate-academic/licence-memoire",
       "/download-business-plan",
