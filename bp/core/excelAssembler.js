@@ -92,6 +92,11 @@ function writeDataTable(ws, table, lang) {
   // Create an Excel Table for structured references if possible
   const tableName = String(table?.name || "DATA").replace(/[^A-Za-z0-9_]/g, "_").slice(0, 25);
   try {
+    // ⚠️ Excel Desktop is strict: a table must include at least one data row.
+    // A table with ONLY the header row frequently triggers:
+    // "Nous avons trouvé un problème dans le contenu…" and Excel repairs the file.
+    // We add a single empty row to keep the table range valid.
+    const emptyRow = columns.map(() => null);
     ws.addTable({
       name: tableName,
       ref: `A${headerRowIdx}`,
@@ -99,7 +104,7 @@ function writeDataTable(ws, table, lang) {
       totalsRow: false,
       style: { theme: "TableStyleMedium2", showRowStripes: true },
       columns: columns.map((c) => ({ name: c.label || c.key })),
-      rows: [],
+      rows: [emptyRow],
     });
   } catch {
     // ExcelJS can throw if table name duplicate
