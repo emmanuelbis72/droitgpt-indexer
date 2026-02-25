@@ -10,6 +10,7 @@ Règles:
 - Style: professionnel, académique, précis, sans hallucinations.
 - Si des sources RAG sont fournies: tu dois t'appuyer dessus et NE PAS inventer des décisions.
 - Si une métadonnée d'une jurisprudence manque: écris "INCOMPLET" (n'invente jamais).
+- La longueur demandée est CONTRAIGNANTE: tu dois atteindre au minimum la longueur (pages/mots) demandée.
 
 Schéma JSON attendu:
 {
@@ -43,6 +44,7 @@ Rules:
 - Professional, academic tone. No hallucinations.
 - If RAG sources are provided: rely on them and do NOT invent case law.
 - If a case metadata is missing: write "INCOMPLETE" (never invent).
+- The requested length is CONSTRAINING: you must reach at least the requested pages/words.
 
 JSON schema:
 {
@@ -55,6 +57,11 @@ JSON schema:
 }
 `;
 
+function toInt(n, d) {
+  const x = Number(n);
+  return Number.isFinite(x) && x > 0 ? Math.floor(x) : d;
+}
+
 export function buildArticleUserPrompt({ lang, mode, ctx, ragExcerpts }) {
   const L = String(lang || "fr").toLowerCase().startsWith("en") ? "en" : "fr";
   const isLaw = mode === "law_rag";
@@ -63,7 +70,10 @@ export function buildArticleUserPrompt({ lang, mode, ctx, ragExcerpts }) {
   const topic = (ctx?.topic || ctx?.theme || "").trim();
   const rq = (ctx?.researchQuestion || ctx?.question || "").trim();
   const audience = (ctx?.audience || (isLaw ? "magistrats, avocats, universitaires" : "professionnels et universitaires")).trim();
-  const length = Number(ctx?.targetPages || ctx?.pages || (isLaw ? 18 : 12));
+
+  // Pages -> minimum word count heuristic (dense academic)
+  const pages = toInt(ctx?.targetPages || ctx?.pages, isLaw ? 18 : 12);
+  const minWords = toInt(ctx?.minWords, pages * 420); // ~420 words/page
 
   if (L === "en") {
     return `
@@ -71,7 +81,10 @@ Write a professional scientific article.
 
 Mode: ${isLaw ? "CONGOLESE LAW (RAG)" : "GENERAL SCIENTIFIC"}
 Audience: ${audience}
-Target length: ~${length} pages (dense academic writing).
+
+Length requirement (MANDATORY):
+- Target: ~${pages} pages (dense academic writing)
+- Minimum: ${minWords} words (do not stop early; add depth, subsections, and examples)
 
 Topic: ${topic || "(not provided)"}
 Research question: ${rq || "(not provided)"}
@@ -81,11 +94,14 @@ Mandatory structure (sections):
 1) Introduction
 2) Background / Literature
 3) Methodology / Approach
-4) Analysis / Discussion
+4) Analysis / Discussion (with sub-sections 4.1, 4.2, 4.3...)
 5) Practical implications
 6) Conclusion
 
-If law RAG mode: include a "Case law synthesis" section and populate the jurisprudences array from the excerpts.
+Extra rules:
+- Ensure each major section has substantial content (not a few paragraphs).
+- Prefer clear paragraphs, not bullets.
+- If law RAG mode: include a "Case law synthesis" section and populate the jurisprudences array from the excerpts (no inventions).
 
 RAG EXCERPTS (use only these for case law):
 ${ragExcerpts || "(no excerpts)"}
@@ -98,7 +114,10 @@ Rédige un article scientifique professionnel.
 
 Mode: ${isLaw ? "DROIT CONGOLAIS (RAG)" : "ARTICLE SCIENTIFIQUE (général)"}
 Public: ${audience}
-Taille cible: ~${length} pages (écriture dense, académique).
+
+Exigence de longueur (OBLIGATOIRE):
+- Cible: ~${pages} pages (écriture dense, académique)
+- Minimum: ${minWords} mots (ne t'arrête pas trop tôt; ajoute profondeur, sous-sections et exemples)
 
 Thème: ${topic || "(non précisé)"}
 Question de recherche: ${rq || "(non précisée)"}
@@ -108,11 +127,14 @@ Structure obligatoire (sections):
 1) Introduction
 2) Contexte / Revue de la littérature
 3) Méthodologie / Approche
-4) Analyse / Discussion
+4) Analyse / Discussion (avec sous-sections 4.1, 4.2, 4.3...)
 5) Implications pratiques
 6) Conclusion
 
-Si mode droit RAG: ajoute une section "Synthèse jurisprudentielle" et renseigne le tableau jurisprudences à partir des extraits.
+Règles supplémentaires:
+- Chaque section doit être substantielle (pas seulement 2-3 paragraphes).
+- Privilégie des paragraphes clairs, pas des listes.
+- Si mode droit RAG: ajoute une section "Synthèse jurisprudentielle" et renseigne le tableau jurisprudences à partir des extraits (sans invention).
 
 EXTRAITS RAG (utilise uniquement ceci pour la jurisprudence):
 ${ragExcerpts || "(aucun extrait)"}
