@@ -139,6 +139,7 @@ function renderCover(doc, title, ctx, styles) {
   );
 
   if (typeof doc.__setSuppressTouch === "function") doc.__setSuppressTouch(false);
+  if (typeof doc.__touch === "function") doc.__touch();
 }
 
 function renderTOCPlaceholder(doc, styles) {
@@ -744,9 +745,40 @@ function renderHeaderFooter(doc, { headerLeft, headerRight, footerLeft, pageNumb
   if (typeof doc.__setSuppressTouch === "function") doc.__setSuppressTouch(false);
 }
 
-function removeTrailingBlankPages(doc, pageHasBodySet) {
-  void doc;
-  void pageHasBodySet;
+function removeBlankPages(doc, pageHasBodySet, keepPages = []) {
+  try {
+    const range = doc.bufferedPageRange();
+    const start = range.start;
+    const end = range.start + range.count - 1;
+    const keep = new Set((keepPages || []).map((n) => Number(n)).filter(Number.isFinite));
+    const hasBody = pageHasBodySet instanceof Set ? pageHasBodySet : new Set();
+
+    const removed = [];
+    for (let i = end; i >= start; i--) {
+      if (keep.has(i) || hasBody.has(i)) continue;
+      try {
+        doc.removePage(i);
+        removed.push(i);
+      } catch (_) {
+        // Buffered pages should be removable; ignore if PDFKit refuses one.
+      }
+    }
+
+    if (!removed.length) return null;
+
+    removed.sort((a, b) => a - b);
+    return {
+      removed,
+      toCurrentPageNumber(oldPageIndex) {
+        const oldIndex = Number(oldPageIndex);
+        if (!Number.isFinite(oldIndex)) return oldPageIndex;
+        const removedBefore = removed.filter((p) => p < oldIndex).length;
+        return oldIndex - removedBefore + 1;
+      },
+    };
+  } catch (_) {
+    return null;
+  }
 }
 
 /* =========================
@@ -848,6 +880,10 @@ function getCurrentPageNumber(doc) {
   return r.start + r.count;
 }
 
+function getCurrentPageIndex(doc) {
+  return getCurrentPageNumber(doc) - 1;
+}
+
 function makeDots(left, right, max = 90) {
   const L = String(left || "").length;
   const R = String(right || "").length;
@@ -930,17 +966,22 @@ function renderNgoProjectPdf(doc, { title, ctx, sections }) {
     const secTitle = (s?.title || "").trim() || s?.key || "Section";
     doc.addPage();
 
-    const startPageNumber = getCurrentPageNumber(doc);
-    toc.push({ title: secTitle, page: startPageNumber });
+    const startPageIndex = getCurrentPageIndex(doc);
+    toc.push({ title: secTitle, pageIndex: startPageIndex, page: startPageIndex + 1 });
 
     renderSection(doc, secTitle, s, styles);
+  }
+
+  const cleanup = removeBlankPages(doc, __pageHasBody, [0, tocPageIndex]);
+  if (cleanup?.toCurrentPageNumber) {
+    for (const item of toc) {
+      item.page = cleanup.toCurrentPageNumber(item.pageIndex);
+    }
   }
 
   fillTOC(doc, tocPageIndex, toc, styles);
 
   renderAllHeadersFooters(doc, { headerLeft, footerLeft, styles });
-
-  removeTrailingBlankPages(doc, __pageHasBody);
 
   // Do NOT call doc.end() here.
 }
