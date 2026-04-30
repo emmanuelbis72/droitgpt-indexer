@@ -2,6 +2,7 @@ import express from 'express';
 import dotenv from 'dotenv';
 import generatePdfRoute from './generatePdf.js';
 import generateBusinessPlanRoute from './routes/generateBusinessPlan.js';
+import generateNgoProjectRoute from './routes/generateNgoProject.js';
 import generateLicenceMemoireRoute from './routes/generateLicenceMemoire.js';
 import generateExcelAppRoute from './routes/generateExcelApp.js';
 
@@ -55,6 +56,7 @@ app.use(express.json({ limit: '10mb' }));
 // Routes
 app.use('/generate-pdf', generatePdfRoute);
 app.use('/generate-business-plan', generateBusinessPlanRoute);
+app.use('/generate-ngo-project', generateNgoProjectRoute);
 app.use('/generate-academic', generateLicenceMemoireRoute);
 app.use('/generate-memoire', generateLicenceMemoireRoute);
 app.use('/generate-excel-app', generateExcelAppRoute);
@@ -101,6 +103,10 @@ app.get('/', (_req, res) => {
       '/generate-business-plan/premium?async=1',
       '/generate-business-plan/premium/jobs/:id',
       '/generate-business-plan/premium/jobs/:id/result',
+      '/generate-ngo-project/premium',
+      '/generate-ngo-project/premium?async=1',
+      '/generate-ngo-project/premium/jobs/:id',
+      '/generate-ngo-project/premium/jobs/:id/result',
       '/generate-memoire',
       '/generate-academic/licence-memoire',
       '/download-business-plan',
