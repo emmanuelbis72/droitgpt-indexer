@@ -28,3 +28,18 @@ services:
     envVars:
       - key: OPENAI_API_KEY
         sync: false
+
+  - type: web
+    name: businessplan-v9yy
+    env: node
+    plan: starter
+    buildCommand: npm install
+    startCommand: node server.js
+    rootDir: bp
+    autoDeploy: true
+    branch: main
+    envVars:
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: REDIS_URL
+        sync: false

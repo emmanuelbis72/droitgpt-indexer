@@ -1,9 +1,9 @@
 // bp/routes/generateNgoProject.js
 import express from "express";
-import crypto from "crypto";
 import { generateNgoProjectPremium } from "../core/ngoOrchestrator.js";
 import { writeNgoProjectPdfPremium } from "../core/ngoPdfAssembler.js";
 import { normalizeLang, safeStr } from "../core/sanitize.js";
+import { makeJobId, nowMs, putJob, getJob, patchJob } from "../core/jobStore.js";
 
 const router = express.Router();
 
@@ -11,34 +11,8 @@ const router = express.Router();
    ✅ JOB MODE + Anti-concurrency lock (same pattern as BP)
 ========================================================= */
 const JOB_TTL_MS = Number(process.env.NGO_JOB_TTL_MS || 1000 * 60 * 60); // 1h
-const MAX_JOBS = Number(process.env.NGO_MAX_JOBS || 25);
-const jobs = new Map(); // id -> { status, createdAt, startedAt, doneAt, error, result }
+const JOB_NAMESPACE = "ngo";
 let generationInFlight = false;
-
-function now() {
-  return Date.now();
-}
-
-function newJobId() {
-  return typeof crypto.randomUUID === "function"
-    ? crypto.randomUUID()
-    : crypto.randomBytes(16).toString("hex");
-}
-
-function pruneJobs() {
-  const t = now();
-  for (const [id, j] of jobs.entries()) {
-    const createdAt = Number(j?.createdAt || 0);
-    if (createdAt && t - createdAt > JOB_TTL_MS) jobs.delete(id);
-  }
-
-  if (jobs.size <= MAX_JOBS) return;
-  const arr = Array.from(jobs.entries()).sort(
-    (a, b) => (a[1]?.createdAt || 0) - (b[1]?.createdAt || 0)
-  );
-  const toDrop = Math.max(0, arr.length - MAX_JOBS);
-  for (let i = 0; i < toDrop; i++) jobs.delete(arr[i][0]);
-}
 
 router.get("/premium", (_req, res) => {
   res.json({
@@ -63,10 +37,9 @@ router.get("/premium", (_req, res) => {
   });
 });
 
-router.get("/premium/jobs/:id", (req, res) => {
-  pruneJobs();
+router.get("/premium/jobs/:id", async (req, res) => {
   const id = String(req.params.id || "");
-  const j = jobs.get(id);
+  const j = await getJob(id, { namespace: JOB_NAMESPACE });
   if (!j) return res.status(404).json({ error: "JOB_NOT_FOUND" });
   return res.json({
     jobId: id,
@@ -78,10 +51,9 @@ router.get("/premium/jobs/:id", (req, res) => {
   });
 });
 
-router.get("/premium/jobs/:id/result", (req, res) => {
-  pruneJobs();
+router.get("/premium/jobs/:id/result", async (req, res) => {
   const id = String(req.params.id || "");
-  const j = jobs.get(id);
+  const j = await getJob(id, { namespace: JOB_NAMESPACE });
   if (!j) return res.status(404).json({ error: "JOB_NOT_FOUND" });
   if (j.status !== "done") {
     // Provide explicit info when the job finished in error/rejected.
@@ -173,39 +145,54 @@ router.post("/premium", async (req, res) => {
 
   // ✅ JOB mode
   if (wantAsync) {
-    pruneJobs();
-    const id = newJobId();
-    jobs.set(id, { status: "queued", createdAt: now() });
+    const id = makeJobId();
+    await putJob(
+      { id, status: "queued", createdAt: nowMs(), error: null, result: null },
+      { ttlMs: JOB_TTL_MS, namespace: JOB_NAMESPACE }
+    );
 
     (async () => {
-      const j = jobs.get(id);
+      const j = await getJob(id, { namespace: JOB_NAMESPACE });
       if (!j) return;
 
       if (generationInFlight) {
-        j.status = "rejected";
-        j.error = "GENERATION_IN_FLIGHT";
-        j.doneAt = now();
+        await patchJob(
+          id,
+          { status: "rejected", error: "GENERATION_IN_FLIGHT", doneAt: nowMs() },
+          { ttlMs: JOB_TTL_MS, namespace: JOB_NAMESPACE }
+        );
         return;
       }
 
       generationInFlight = true;
-      j.status = "running";
-      j.startedAt = now();
+      await patchJob(
+        id,
+        { status: "running", startedAt: nowMs() },
+        { ttlMs: JOB_TTL_MS, namespace: JOB_NAMESPACE }
+      );
 
       try {
         const result = await generateNgoProjectPremium({ lang, ctx, lite });
-        j.status = "done";
-        j.result = {
-          title,
-          ctx,
-          sections: result?.sections || [],
-        };
-        j.doneAt = now();
+        await patchJob(
+          id,
+          {
+            status: "done",
+            result: {
+              title,
+              ctx,
+              sections: result?.sections || [],
+            },
+            doneAt: nowMs(),
+          },
+          { ttlMs: JOB_TTL_MS, namespace: JOB_NAMESPACE }
+        );
       } catch (e) {
         console.error("[NGO][JOB] generation failed", { msg: String(e?.message || e), stack: e?.stack });
-        j.status = "error";
-        j.error = String(e?.message || e);
-        j.doneAt = now();
+        await patchJob(
+          id,
+          { status: "error", error: String(e?.message || e), doneAt: nowMs() },
+          { ttlMs: JOB_TTL_MS, namespace: JOB_NAMESPACE }
+        );
       } finally {
         generationInFlight = false;
       }

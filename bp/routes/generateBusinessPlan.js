@@ -3,9 +3,9 @@
 import express from "express";
 import multer from "multer";
 import path from "path";
-import crypto from "crypto";
 import { generateBusinessPlanPremium } from "../core/orchestrator.js";
 import { writeBusinessPlanPdfPremium } from "../core/pdfAssembler.js";
+import { makeJobId, nowMs, putJob, getJob, patchJob } from "../core/jobStore.js";
 import {
   normalizeLang,
   normalizeDocType,
@@ -22,39 +22,12 @@ const router = express.Router();
 ========================================================= */
 
 const JOB_TTL_MS = Number(process.env.BP_JOB_TTL_MS || 1000 * 60 * 60); // 1h
-const MAX_JOBS = Number(process.env.BP_MAX_JOBS || 25);
-const jobs = new Map(); // id -> { status, createdAt, startedAt, doneAt, error, result }
+const JOB_NAMESPACE = "bp";
 let generationInFlight = false; // per-instance lock (Render)
 
-function now() {
-  return Date.now();
-}
-
-function newJobId() {
-  return typeof crypto.randomUUID === "function"
-    ? crypto.randomUUID()
-    : crypto.randomBytes(16).toString("hex");
-}
-
-function pruneJobs() {
-  const t = now();
-  for (const [id, j] of jobs.entries()) {
-    const createdAt = Number(j?.createdAt || 0);
-    if (createdAt && t - createdAt > JOB_TTL_MS) jobs.delete(id);
-  }
-
-  if (jobs.size <= MAX_JOBS) return;
-  const arr = Array.from(jobs.entries()).sort(
-    (a, b) => (a[1]?.createdAt || 0) - (b[1]?.createdAt || 0)
-  );
-  const toDrop = Math.max(0, arr.length - MAX_JOBS);
-  for (let i = 0; i < toDrop; i++) jobs.delete(arr[i][0]);
-}
-
-router.get("/premium/jobs/:id", (req, res) => {
-  pruneJobs();
+router.get("/premium/jobs/:id", async (req, res) => {
   const id = String(req.params.id || "");
-  const j = jobs.get(id);
+  const j = await getJob(id, { namespace: JOB_NAMESPACE });
   if (!j) return res.status(404).json({ error: "JOB_NOT_FOUND" });
   return res.json({
     jobId: id,
@@ -66,10 +39,9 @@ router.get("/premium/jobs/:id", (req, res) => {
   });
 });
 
-router.get("/premium/jobs/:id/result", (req, res) => {
-  pruneJobs();
+router.get("/premium/jobs/:id/result", async (req, res) => {
   const id = String(req.params.id || "");
-  const j = jobs.get(id);
+  const j = await getJob(id, { namespace: JOB_NAMESPACE });
   if (!j) return res.status(404).json({ error: "JOB_NOT_FOUND" });
   if (j.status !== "done") {
     return res.status(409).json({ error: "JOB_NOT_READY", status: j.status });
@@ -237,9 +209,11 @@ router.post("/premium", async (req, res) => {
 
     // ✅ JOB mode: return quickly with jobId, run generation in background
     if (wantAsync) {
-      pruneJobs();
-      const jobId = newJobId();
-      jobs.set(jobId, { status: "queued", createdAt: now() });
+      const jobId = makeJobId();
+      await putJob(
+        { id: jobId, status: "queued", createdAt: nowMs(), error: null, result: null },
+        { ttlMs: JOB_TTL_MS, namespace: JOB_NAMESPACE }
+      );
 
       // IMPORTANT: set lock BEFORE replying to avoid race conditions
       generationInFlight = true;
@@ -248,27 +222,37 @@ router.post("/premium", async (req, res) => {
 
       // background run
       (async () => {
-        const j = jobs.get(jobId);
+        const j = await getJob(jobId, { namespace: JOB_NAMESPACE });
         if (!j) {
           generationInFlight = false;
           return;
         }
 
-        j.status = "running";
-        j.startedAt = now();
+        await patchJob(
+          jobId,
+          { status: "running", startedAt: nowMs() },
+          { ttlMs: JOB_TTL_MS, namespace: JOB_NAMESPACE }
+        );
 
         try {
           const { sections } = await generateBusinessPlanPremium({ lang, ctx, lite });
-          j.result = { title, lang, ctx, lite, sections };
-          j.status = "done";
-          j.doneAt = now();
+          await patchJob(
+            jobId,
+            {
+              result: { title, lang, ctx, lite, sections },
+              status: "done",
+              doneAt: nowMs(),
+            },
+            { ttlMs: JOB_TTL_MS, namespace: JOB_NAMESPACE }
+          );
         } catch (e) {
-          j.status = "error";
-          j.error = String(e?.message || e);
-          j.doneAt = now();
+          await patchJob(
+            jobId,
+            { status: "error", error: String(e?.message || e), doneAt: nowMs() },
+            { ttlMs: JOB_TTL_MS, namespace: JOB_NAMESPACE }
+          );
         } finally {
           generationInFlight = false;
-          pruneJobs();
         }
       })();
 
