@@ -1,14 +1,21 @@
 import express from 'express';
 import dotenv from 'dotenv';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import generatePdfRoute from './generatePdf.js';
 import generateBusinessPlanRoute from './routes/generateBusinessPlan.js';
 import generateNgoProjectRoute from './routes/generateNgoProject.js';
 import generateLicenceMemoireRoute from './routes/generateLicenceMemoire.js';
 import generateExcelAppRoute from './routes/generateExcelApp.js';
+import generateGrantsManagementRoute from './routes/generateGrantsManagement.js';
+import { initGrantsDb } from './core/grantsDb.js';
+import { startGrantsScheduler } from './core/grantsScheduler.js';
 
 dotenv.config();
 
 const app = express();
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 /* =========================================================
    CORS (single source of truth)
@@ -52,6 +59,7 @@ const PORT = process.env.PORT || 5001;
 
 // Body parsing
 app.use(express.json({ limit: '10mb' }));
+app.use('/public', express.static(path.join(__dirname, 'public')));
 
 // Routes
 app.use('/generate-pdf', generatePdfRoute);
@@ -60,6 +68,11 @@ app.use('/generate-ngo-project', generateNgoProjectRoute);
 app.use('/generate-academic', generateLicenceMemoireRoute);
 app.use('/generate-memoire', generateLicenceMemoireRoute);
 app.use('/generate-excel-app', generateExcelAppRoute);
+app.use('/generate-grants-management', generateGrantsManagementRoute);
+
+app.get('/grants-dashboard', (_req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'grants-dashboard.html'));
+});
 
 // Download helper (TXT)
 app.post('/download-business-plan', (req, res) => {
@@ -109,6 +122,15 @@ app.get('/', (_req, res) => {
       '/generate-ngo-project/premium/jobs/:id/result',
       '/generate-memoire',
       '/generate-academic/licence-memoire',
+      '/generate-grants-management',
+      '/generate-grants-management/discover',
+      '/generate-grants-management/watch/run',
+      '/generate-grants-management/opportunities',
+      '/generate-grants-management/watch',
+      '/grants-dashboard',
+      '/generate-grants-management?async=1',
+      '/generate-grants-management/jobs/:id',
+      '/generate-grants-management/jobs/:id/result',
       '/download-business-plan',
     ],
   });
@@ -142,6 +164,9 @@ app.use((err, req, res, _next) => {
     path: req.originalUrl,
   });
 });
+
+await initGrantsDb();
+startGrantsScheduler();
 
 app.listen(PORT, () => {
   console.log(`PDF Service en ligne sur http://localhost:${PORT}`);
