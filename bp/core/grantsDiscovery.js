@@ -162,14 +162,19 @@ export function canonicalOpportunityKey(opportunity = {}) {
 }
 
 function normalizeDiscoveryQuery(input = {}) {
-  const country = clean(input.country || "RDC", 80);
-  const sector = clean(input.sector || "", 120);
-  const organizationType = clean(input.organizationType || "ONG", 80);
+  const opportunityType = normalizeOpportunityType(input.opportunityType || input.type || "ngo");
+  const target = normalizeTarget(input.target || input.audience || input.organizationType || "ong");
+  const country = clean(input.country || input.targetCountry || "RDC", 80);
+  const sector = clean(input.sector || input.domain || "", 120);
+  const organizationType = clean(input.organizationType || targetToOrganizationType(target), 80);
+  const domainTerms = domainKeywords(sector);
+  const typeTerms = opportunityTypeKeywords(opportunityType, target);
+  const drcTerms = countryKeywords(country);
   const keywords = clean(
     input.keywords ||
       input.query ||
-      [sector, country, input.theme, input.donor].filter(Boolean).join(" "),
-    220
+      [sector, ...domainTerms, ...typeTerms, ...drcTerms, input.theme, input.donor].filter(Boolean).join(" "),
+    320
   );
   const limit = clampInt(input.limit, 1, 50, DEFAULT_LIMIT);
 
@@ -177,11 +182,15 @@ function normalizeDiscoveryQuery(input = {}) {
     keywords,
     country,
     sector,
+    domain: sector,
+    opportunityType,
+    target,
     organizationType,
     donor: clean(input.donor || "", 120),
     language: clean(input.language || "fr", 10),
     limit,
     includeClosed: Boolean(input.includeClosed),
+    prioritizeDrc: input.prioritizeDrc !== false,
   };
 }
 
@@ -201,6 +210,10 @@ function normalizeSources(sources) {
           "linkedin",
           "foundations",
           "embassies",
+          "scholarships",
+          "entrepreneurship",
+          "ngo-portals",
+          "drc-local",
         ];
 
   const aliases = {
@@ -232,6 +245,19 @@ function normalizeSources(sources) {
     "fondations": "foundations",
     "embassies": "embassies",
     "ambassades": "embassies",
+    "scholarships": "scholarships",
+    "bourses": "scholarships",
+    "bourse": "scholarships",
+    "entrepreneurship": "entrepreneurship",
+    "entrepreneurs": "entrepreneurship",
+    "startup": "entrepreneurship",
+    "startups": "entrepreneurship",
+    "ngo-portals": "ngo-portals",
+    "ong-portals": "ngo-portals",
+    "ong": "ngo-portals",
+    "drc-local": "drc-local",
+    "rdc-local": "drc-local",
+    "congo-local": "drc-local",
   };
 
   const allowed = new Set(Object.values(aliases));
@@ -287,6 +313,9 @@ async function searchSource(source, query) {
       "https://www.fordfoundation.org/work/our-grants/?search={q}",
       "https://www.rockefellerfoundation.org/grants/?s={q}",
       "https://www.hewlett.org/grants/?keyword={q}",
+      "https://mastercardfdn.org/?s={q}",
+      "https://www.gatesfoundation.org/about/committed-grants?q={q}",
+      "https://www.usaid.gov/grants/search?keyword={q}",
     ],
   });
   if (source === "embassies") return searchCuratedSearchLinks({
@@ -298,6 +327,57 @@ async function searchSource(source, query) {
       "https://www.eeas.europa.eu/delegations_en?s={q}",
       "https://www.gov.uk/search/all?keywords={q}",
       "https://www.diplomatie.gouv.fr/en/search/?recherche={q}",
+      "https://cd.usembassy.gov/?s={q}",
+      "https://www.eeas.europa.eu/delegations/democratic-republic-congo_en?s={q}",
+    ],
+  });
+  if (source === "scholarships") return searchCuratedSearchLinks({
+    source,
+    donor: "Scholarship portals",
+    query,
+    templates: [
+      "https://www.scholarshipset.com/search?q={q}",
+      "https://www.opportunitiesforafricans.com/?s={q}",
+      "https://www.afterschoolafrica.com/?s={q}",
+      "https://www2.fundsforngos.org/category/fellowships/",
+      "https://opportunitiesforyouth.org/?s={q}",
+      "https://www.studygreen.info/?s={q}",
+    ],
+  });
+  if (source === "entrepreneurship") return searchCuratedSearchLinks({
+    source,
+    donor: "Entrepreneurship and startup portals",
+    query,
+    templates: [
+      "https://vc4a.com/programs/?lang=en-US",
+      "https://www.f6s.com/programs?search={q}",
+      "https://www.seedstars.com/community/entrepreneurs/programs/",
+      "https://www.tonyelumelufoundation.org/?s={q}",
+      "https://www.opportunitiesforafricans.com/?s={q}",
+      "https://www.youthbusiness.org/initiatives?search={q}",
+    ],
+  });
+  if (source === "ngo-portals") return searchCuratedSearchLinks({
+    source,
+    donor: "NGO funding portals",
+    query,
+    templates: [
+      "https://www2.fundsforngos.org/?s={q}",
+      "https://reliefweb.int/jobs?search={q}",
+      "https://www.devex.com/jobs/search?q={q}",
+      "https://www.bond.org.uk/jobs/?_sf_s={q}",
+      "https://www.globalgiving.org/search/?q={q}",
+    ],
+  });
+  if (source === "drc-local") return searchCuratedSearchLinks({
+    source,
+    donor: "DRC / Congo local opportunity sources",
+    query,
+    templates: [
+      "https://www.google.com/search?q=site%3Acd.usembassy.gov+DRC+Congo+grant+{q}",
+      "https://www.google.com/search?q=site%3Awww.eeas.europa.eu%2Fdelegations%2Fdemocratic-republic-congo+appel+projets+RDC+{q}",
+      "https://www.google.com/search?q=site%3Awww.undp.org%2Ffr%2Fdrcongo+appel+projets+{q}",
+      "https://www.google.com/search?q=site%3Areliefweb.int+DRC+Congo+grant+{q}",
     ],
   });
   return [];
@@ -697,9 +777,43 @@ function scoreOpportunity(opp, query) {
     reasons.push("Type d'organisation potentiellement compatible");
   }
 
+  const drcRegex = /(drc|rdc|democratic republic of congo|congo-kinshasa|congo kinshasa|république démocratique du congo|republique democratique du congo|africa|afrique|sub-saharan|subsaharan)/i;
+  if (query.prioritizeDrc && drcRegex.test(text)) {
+    score += 18;
+    reasons.push("Pertinent pour RDC/Congo ou Afrique");
+  } else if (query.prioritizeDrc) {
+    score -= 8;
+    reasons.push("Pertinence RDC/Congo non confirmee");
+  }
+
+  const typePattern = opportunityTypePattern(query.opportunityType);
+  if (typePattern && typePattern.test(text)) {
+    score += 14;
+    reasons.push(`Correspond au type: ${query.opportunityType}`);
+  }
+
+  const targetPattern = targetPatternFor(query.target);
+  if (targetPattern && targetPattern.test(text)) {
+    score += 10;
+    reasons.push(`Cible compatible: ${query.target}`);
+  }
+
+  if (query.domain) {
+    const domainTerms = tokenize(domainKeywords(query.domain).join(" "));
+    if (domainTerms.some((term) => text.includes(term))) {
+      score += 8;
+      reasons.push(`Domaine compatible: ${query.domain}`);
+    }
+  }
+
   if (/posted|forecasted|open/i.test(String(opp.status))) {
     score += 8;
     reasons.push("Statut actif ou previsionnel");
+  }
+
+  if (String(opp.status || "") === "search_link") {
+    score -= 18;
+    reasons.push("Lien de recherche a verifier manuellement");
   }
 
   const closeDate = parseDate(opp.closeDate);
@@ -718,6 +832,70 @@ function scoreOpportunity(opp, query) {
     score: Math.max(0, Math.min(100, score)),
     reasons: reasons.slice(0, 8),
   };
+}
+
+function normalizeOpportunityType(v) {
+  const s = String(v || "").toLowerCase().trim();
+  if (["scholarship", "bourse", "bourses", "fellowship"].includes(s)) return "scholarship";
+  if (["entrepreneur", "entrepreneurs", "startup", "business", "incubator", "accelerator"].includes(s)) return "entrepreneur";
+  if (["ngo", "ong", "appel-projet", "appel_a_projet", "call", "grant"].includes(s)) return "ngo";
+  return "ngo";
+}
+
+function normalizeTarget(v) {
+  const s = String(v || "").toLowerCase().trim();
+  if (["student", "students", "etudiant", "etudiants"].includes(s)) return "students";
+  if (["entrepreneur", "entrepreneurs", "startup", "pme"].includes(s)) return "entrepreneurs";
+  if (["ngo", "ong", "asbl", "association", "nonprofit"].includes(s)) return "ong";
+  return "ong";
+}
+
+function targetToOrganizationType(target) {
+  if (target === "students") return "Etudiants";
+  if (target === "entrepreneurs") return "Entrepreneurs / PME / Startup";
+  return "ONG / ASBL / Association";
+}
+
+function countryKeywords(country) {
+  const c = String(country || "").toLowerCase();
+  if (/rdc|drc|congo/.test(c)) {
+    return ["DRC", "RDC", "Congo", "Democratic Republic of Congo", "Congo Kinshasa", "Africa"];
+  }
+  return [country].filter(Boolean);
+}
+
+function opportunityTypeKeywords(type, target) {
+  if (type === "scholarship") return ["scholarship", "bourse", "fellowship", "students", "master", "training"];
+  if (type === "entrepreneur") return ["startup", "entrepreneur", "SME", "PME", "accelerator", "incubator", "seed grant", "business"];
+  return ["grant", "call for proposals", "appel a projets", "funding", "subvention", target];
+}
+
+function domainKeywords(domain) {
+  const d = String(domain || "").toLowerCase();
+  const map = {
+    education: ["education", "enseignement", "training", "formation", "school", "students"],
+    sante: ["health", "sante", "medical", "clinic", "public health"],
+    santé: ["health", "sante", "medical", "clinic", "public health"],
+    agriculture: ["agriculture", "agri", "food security", "nutrition", "farming"],
+    climat: ["climate", "climat", "environment", "energie", "energy", "adaptation"],
+    droits: ["rights", "human rights", "droits", "justice", "governance"],
+    femmes: ["women", "girls", "gender", "femmes", "filles"],
+    jeunes: ["youth", "jeunes", "young leaders", "leadership"],
+    numerique: ["digital", "tech", "innovation", "numerique", "numérique"],
+  };
+  return map[d] || [domain].filter(Boolean);
+}
+
+function opportunityTypePattern(type) {
+  if (type === "scholarship") return /(scholarship|bourse|fellowship|tuition|students?|master|phd|training)/i;
+  if (type === "entrepreneur") return /(startup|entrepreneur|sme|pme|accelerator|incubator|seed|business|innovation|vc4a)/i;
+  return /(grant|subvention|call for proposals|appel.{0,10}projets|funding|ngo|ong|nonprofit|civil society)/i;
+}
+
+function targetPatternFor(target) {
+  if (target === "students") return /(student|etudiant|étudiant|university|master|phd|scholarship|fellowship)/i;
+  if (target === "entrepreneurs") return /(entrepreneur|startup|sme|pme|business|founder|accelerator|incubator)/i;
+  return /(ngo|ong|asbl|association|nonprofit|civil society|community based|cso)/i;
 }
 
 function buildDiscoveryNextActions(query, opportunities) {
