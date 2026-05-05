@@ -50,6 +50,7 @@ import LicenceMemoirePage from "./pages/LicenceMemoirePage.jsx";
 
 // ✅ NEW: ONG Premium (page)
 import NgoProjectPremiumPage from "./pages/NgoProjectPremiumPage.jsx";
+import GrantsManagementPage from "./pages/GrantsManagementPage.jsx";
 
 // ✅ Excel Apps (progiciels Excel)
 import ExcelAppsPage from "./pages/ExcelAppsPage.jsx";
@@ -103,6 +104,15 @@ function App() {
               element={
                 <ProtectedRoute>
                   <NgoProjectPremiumPage />
+                </ProtectedRoute>
+              }
+            />
+
+            <Route
+              path="/grants"
+              element={
+                <ProtectedRoute>
+                  <GrantsManagementPage />
                 </ProtectedRoute>
               }
             />
