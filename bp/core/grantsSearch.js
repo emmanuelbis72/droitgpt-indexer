@@ -20,26 +20,31 @@ export async function searchWeb(query, { maxResults = 10, includeDomains = [] } 
 
 export async function searchAndIndexOpportunities(params = {}) {
   const maxResults = clampInt(params.maxResults, 1, 25, 12);
+  const candidateLimit = clampInt(params.candidateLimit, maxResults, 80, Math.max(maxResults * 5, 30));
   const query = buildSearchQuery(params);
   const customSites = normalizeCustomSites(params.sites || params.customSites || params.sourceUrls || params.sources);
-  console.log("[GRANTS] search started", { query, maxResults });
+  console.log("[GRANTS] search started", { query, maxResults, candidateLimit, customSites: customSites.urls.length });
 
   let searchResults = [];
   let warning = null;
   try {
-    searchResults = await searchWeb(query, { maxResults, includeDomains: customSites.domains });
+    searchResults = await runAgentWebSearch({ params, query, maxResults, candidateLimit, customSites });
   } catch (e) {
     if (e.code !== "WEB_SEARCH_NOT_CONFIGURED") throw e;
     warning = "WEB_SEARCH_NOT_CONFIGURED";
-    searchResults = await searchConfiguredSourcesIndex({ ...params, query, maxResults });
+    searchResults = await searchConfiguredSourcesIndex({ ...params, query, maxResults: candidateLimit });
   }
   if (customSites.urls.length) {
     const customLinks = await searchCustomSitesIndex(customSites.urls, params);
     searchResults = dedupeByUrl([...customLinks, ...searchResults]);
   }
+  if (!searchResults.length) {
+    warning = warning || "WEB_SEARCH_EMPTY_FALLBACK_TO_SOURCES";
+    searchResults = await searchConfiguredSourcesIndex({ ...params, query, maxResults: candidateLimit });
+  }
 
   const extracted = [];
-  for (const result of searchResults.slice(0, maxResults)) {
+  for (const result of searchResults.slice(0, candidateLimit)) {
     if (!result.url) continue;
     const opp = await extractOpportunityFromPage(result.url, {
       sourceName: result.sourceName || hostLabel(result.url),
@@ -63,10 +68,20 @@ export async function searchAndIndexOpportunities(params = {}) {
       saved.push(write.saved);
       await indexOpportunity(write.saved);
       console.log("[GRANTS] saved", { id: write.saved.id, status: write.saved.status, sourceUrl: write.saved.sourceUrl });
+      if (saved.length >= maxResults) break;
     }
   }
 
-  return { query, warning, results: saved, total: saved.length, skippedInactive: skippedInactive.length, customSites: customSites.urls.length };
+  return {
+    query,
+    warning,
+    results: saved,
+    total: saved.length,
+    candidates: searchResults.length,
+    extracted: extracted.length,
+    skippedInactive: skippedInactive.length,
+    customSites: customSites.urls.length,
+  };
 }
 
 export async function crawlConfiguredSources(params = {}) {
@@ -164,6 +179,44 @@ async function searchConfiguredSourcesIndex(params = {}) {
   return out.slice(0, clampInt(params.maxResults, 1, 25, 10));
 }
 
+async function runAgentWebSearch({ params = {}, query, maxResults, candidateLimit, customSites }) {
+  const queries = buildAgentQueries(params, query);
+  const perQuery = Math.min(12, Math.max(5, Math.ceil(candidateLimit / Math.max(1, queries.length - 1))));
+  const sources = (await listSources()).filter((source) => source.active !== false);
+  const sourceDomains = [...new Set(sources.map((source) => domainFromUrl(source.url || source.baseUrl)).filter(Boolean))];
+  const domainBatches = [
+    customSites.domains.length ? customSites.domains : [],
+    sourceDomains,
+  ].filter((domains) => domains.length);
+
+  const results = [];
+  for (const q of queries) {
+    const batch = await safeWebSearch(q, { maxResults: perQuery, includeDomains: [] });
+    results.push(...batch);
+    if (results.length >= candidateLimit) break;
+  }
+
+  for (const domains of domainBatches) {
+    for (const q of queries.slice(0, 4)) {
+      const batch = await safeWebSearch(q, { maxResults: perQuery, includeDomains: domains });
+      results.push(...batch);
+      if (results.length >= candidateLimit * 2) break;
+    }
+  }
+
+  return dedupeByUrl(results).slice(0, Math.max(candidateLimit, maxResults));
+}
+
+async function safeWebSearch(query, options) {
+  try {
+    return await searchWeb(query, options);
+  } catch (e) {
+    if (e.code === "WEB_SEARCH_NOT_CONFIGURED") throw e;
+    console.warn("[GRANTS] error", { search: query, error: String(e?.message || e) });
+    return [];
+  }
+}
+
 async function searchCustomSitesIndex(sites = [], params = {}) {
   const out = [];
   for (const site of sites.slice(0, 12)) {
@@ -239,10 +292,10 @@ async function searchExa(query, maxResults, { includeDomains = [] } = {}) {
   return (json?.results || []).map((r) => ({
     title: clean(r.title, 260),
     url: cleanUrl(r.url),
-    snippet: clean(r.text || r.summary || "", 700),
+    snippet: clean(r.text || r.contents?.text || r.summary || "", 700),
     sourceName: hostLabel(r.url),
     publishedDate: clean(r.publishedDate, 80),
-    rawText: clean(r.text || "", 12000),
+    rawText: clean(r.text || r.contents?.text || "", 12000),
   })).filter((r) => r.url);
 }
 
@@ -258,6 +311,47 @@ function buildSearchQuery(params = {}) {
     "deadline open apply now currently accepting applications",
     params.language === "fr" ? "appel a projets subvention bourse financement" : "grant funding scholarship accelerator",
   ].filter(Boolean).join(" ");
+}
+
+function buildAgentQueries(params = {}, baseQuery = "") {
+  const currentYear = new Date().getFullYear();
+  const nextYear = currentYear + 1;
+  const country = clean(params.country, 120);
+  const region = clean(params.region, 120);
+  const sectors = Array.isArray(params.sectors) ? params.sectors : [params.sector].filter(Boolean);
+  const types = Array.isArray(params.types) ? params.types : [params.type].filter(Boolean);
+  const sectorText = sectors.filter(Boolean).join(" ");
+  const typeText = types.filter(Boolean).join(" ");
+  const place = [country, region].filter(Boolean).join(" ");
+  const base = clean(baseQuery || buildSearchQuery(params), 500);
+
+  return dedupeStrings([
+    base,
+    `${base} deadline ${currentYear} ${nextYear} apply now`,
+    `${base} currently accepting applications open call`,
+    `${base} date limite ${currentYear} ${nextYear} candidature ouverte`,
+    `open grants ${typeText} ${sectorText} ${place} deadline ${currentYear}`,
+    `call for proposals ${sectorText} ${place} apply deadline ${currentYear}`,
+    `funding opportunities NGOs nonprofits ${sectorText} ${place} currently open`,
+    `bourses concours incubateurs accélérateurs financement ${sectorText} ${place} date limite ${currentYear}`,
+    `site:fundsforngos.org ${base}`,
+    `site:opportunitydesk.org ${base}`,
+    `site:opportunitiesforafricans.com ${base}`,
+    `site:youthop.com ${base}`,
+  ]).slice(0, 12);
+}
+
+function dedupeStrings(items) {
+  const seen = new Set();
+  const out = [];
+  for (const item of items) {
+    const value = clean(item, 500);
+    const key = value.toLowerCase();
+    if (!value || seen.has(key)) continue;
+    seen.add(key);
+    out.push(value);
+  }
+  return out;
 }
 
 function normalizeCustomSites(value) {

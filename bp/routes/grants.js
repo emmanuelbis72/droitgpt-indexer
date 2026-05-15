@@ -228,6 +228,7 @@ function normalizeSearchBody(body = {}) {
     types: normalizeList(body.types || body.type),
     language: cleanText(body.language || "fr", 20),
     maxResults: clampInt(body.maxResults, 1, 25, 12),
+    candidateLimit: clampInt(body.candidateLimit, 10, 80, Math.max(clampInt(body.maxResults, 1, 25, 12) * 5, 30)),
     sites: normalizeSites(body.sites || body.customSites || body.sourceUrls || body.sources),
   };
 }
