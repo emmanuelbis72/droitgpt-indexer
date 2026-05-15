@@ -8,6 +8,7 @@ import generateNgoProjectRoute from './routes/generateNgoProject.js';
 import generateLicenceMemoireRoute from './routes/generateLicenceMemoire.js';
 import generateExcelAppRoute from './routes/generateExcelApp.js';
 import generateGrantsManagementRoute from './routes/generateGrantsManagement.js';
+import grantsRoute from './routes/grants.js';
 import { initGrantsDb } from './core/grantsDb.js';
 import { startGrantsScheduler } from './core/grantsScheduler.js';
 
@@ -47,7 +48,7 @@ app.use((req, res, next) => {
   }
 
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Cron-Secret, X-Grants-Secret');
   res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
   res.setHeader('Access-Control-Max-Age', '86400');
 
@@ -69,6 +70,7 @@ app.use('/generate-academic', generateLicenceMemoireRoute);
 app.use('/generate-memoire', generateLicenceMemoireRoute);
 app.use('/generate-excel-app', generateExcelAppRoute);
 app.use('/generate-grants-management', generateGrantsManagementRoute);
+app.use('/grants', grantsRoute);
 
 app.get('/grants-dashboard', (_req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'grants-dashboard.html'));
@@ -132,6 +134,13 @@ app.get('/', (_req, res) => {
       '/generate-grants-management?async=1',
       '/generate-grants-management/jobs/:id',
       '/generate-grants-management/jobs/:id/result',
+      '/grants/health',
+      '/grants/opportunities',
+      '/grants/search',
+      '/grants/crawl',
+      '/grants/sources',
+      '/grants/jobs/:id',
+      '/grants/jobs/:id/result',
       '/download-business-plan',
     ],
   });
