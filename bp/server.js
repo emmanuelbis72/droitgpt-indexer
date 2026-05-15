@@ -126,6 +126,7 @@ app.get('/', (_req, res) => {
       '/generate-grants-management/discover',
       '/generate-grants-management/watch/run',
       '/generate-grants-management/opportunities',
+      '/generate-grants-management/opportunities/import',
       '/generate-grants-management/watch',
       '/grants-dashboard',
       '/generate-grants-management?async=1',

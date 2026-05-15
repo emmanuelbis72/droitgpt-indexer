@@ -2,7 +2,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import crypto from "node:crypto";
-import { canonicalOpportunityKey } from "./grantsDiscovery.js";
+import { canonicalOpportunityKey, classifyOpportunityType, getOpportunityFreshness } from "./grantsDiscovery.js";
 
 const DATA_DIR = process.env.GRANTS_DATA_DIR || path.join(process.cwd(), "data");
 const DB_PATH = process.env.GRANTS_DB_PATH || path.join(DATA_DIR, "grants-db.json");
@@ -111,9 +111,13 @@ export async function listOpportunities(filters = {}) {
   const status = String(filters.status || "").toLowerCase().trim();
   const favorite = filters.favorite === "1" || filters.favorite === true;
   const userStatus = String(filters.userStatus || "").toLowerCase().trim();
+  const opportunityType = String(filters.opportunityType || filters.type || "").toLowerCase().trim();
+  const onlyActive = filters.onlyActive !== "0" && filters.onlyActive !== false;
+  const includeSearchLinks = filters.includeSearchLinks === "1" || filters.includeSearchLinks === true;
   const limit = clampInt(filters.limit, 1, 200, 100);
 
   const rows = db.opportunities
+    .map(decorateOpportunityRecord)
     .filter((opp) => {
       if (q) {
         const hay = [opp.title, opp.donor, opp.description, opp.category, opp.enrichment?.summaryText]
@@ -126,6 +130,9 @@ export async function listOpportunities(filters = {}) {
       if (status && String(opp.status || "").toLowerCase() !== status) return false;
       if (favorite && !opp.user?.favorite) return false;
       if (userStatus && String(opp.user?.status || "").toLowerCase() !== userStatus) return false;
+      if (opportunityType && opp.opportunityType !== opportunityType) return false;
+      if (!includeSearchLinks && String(opp.status || "") === "search_link") return false;
+      if (onlyActive && !opp.freshness?.active) return false;
       return true;
     })
     .sort((a, b) => {
@@ -295,6 +302,17 @@ export async function saveApplicationDraft({ opportunityId, questions = [], answ
   return saved;
 }
 
+function decorateOpportunityRecord(opp = {}) {
+  const opportunityType = opp.opportunityType || classifyOpportunityType(opp);
+  return {
+    ...opp,
+    opportunityType,
+    audienceCategory: opp.audienceCategory || opportunityType,
+    categoryLabel: opp.categoryLabel || labelForOpportunityType(opportunityType),
+    freshness: getOpportunityFreshness(opp),
+  };
+}
+
 function normalizeOpportunityRecord(raw, { now, fingerprint }) {
   return {
     id: raw.id || `grant_${crypto.randomUUID()}`,
@@ -310,11 +328,21 @@ function normalizeOpportunityRecord(raw, { now, fingerprint }) {
     eligibility: raw.eligibility || "",
     description: raw.description || "",
     url: raw.url || "",
+    opportunityType: raw.opportunityType || classifyOpportunityType(raw),
+    audienceCategory: raw.audienceCategory || raw.opportunityType || classifyOpportunityType(raw),
+    categoryLabel: raw.categoryLabel || labelForOpportunityType(raw.opportunityType || classifyOpportunityType(raw)),
+    freshness: raw.freshness || getOpportunityFreshness(raw),
     match: raw.match || { score: 0, reasons: [] },
     language: raw.language || raw.enrichment?.language || "unknown",
     lastSeenAt: now,
     raw: raw.raw || null,
   };
+}
+
+function labelForOpportunityType(type) {
+  if (type === "scholarship") return "Bourses";
+  if (type === "entrepreneur") return "Entrepreneurs";
+  return "ONG / appels a projets";
 }
 
 function defaultUserState() {

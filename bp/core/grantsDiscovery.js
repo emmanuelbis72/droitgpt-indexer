@@ -50,9 +50,14 @@ export async function discoverGrantOpportunities(input = {}) {
     }
   }
 
-  const deduped = dedupeOpportunities(opportunities)
+  const normalized = opportunities.map((opp) => normalizeOpportunityForDiscovery(opp, query));
+  const active = normalized.filter((opp) => shouldKeepDiscoveredOpportunity(opp, query));
+  const filteredOut = normalized.length - active.length;
+
+  const deduped = dedupeOpportunities(active)
     .map((opp) => ({
       ...opp,
+      freshness: getOpportunityFreshness(opp),
       match: scoreOpportunity(opp, query),
     }))
     .sort((a, b) => b.match.score - a.match.score)
@@ -63,6 +68,8 @@ export async function discoverGrantOpportunities(input = {}) {
     query,
     sourceStatus,
     total: deduped.length,
+    filteredOut,
+    categories: countOpportunityTypes(deduped),
     generatedAt: new Date().toISOString(),
     startedAt,
     opportunities: deduped,
@@ -190,6 +197,9 @@ function normalizeDiscoveryQuery(input = {}) {
     language: clean(input.language || "fr", 10),
     limit,
     includeClosed: Boolean(input.includeClosed),
+    onlyActive: input.onlyActive !== false,
+    includeUndated: input.includeUndated !== false,
+    includeSearchLinks: Boolean(input.includeSearchLinks),
     prioritizeDrc: input.prioritizeDrc !== false,
   };
 }
@@ -425,7 +435,9 @@ async function searchEuFundingTenders(query) {
     console.warn("[GRANTS][EU] official search fallback", String(e?.message || e));
   }
 
-  return [makeSearchLinkOpportunity({ source: "eu", donor: "European Union Funding & Tenders", url: portalUrl, query })];
+  return query.includeSearchLinks
+    ? [makeSearchLinkOpportunity({ source: "eu", donor: "European Union Funding & Tenders", url: portalUrl, query })]
+    : [];
 }
 
 async function searchWorldBankProjects(query) {
@@ -442,16 +454,20 @@ async function searchWorldBankProjects(query) {
     const json = await resp.json();
     const rows = Object.values(json?.projects || {});
     const opportunities = rows.map(normalizeWorldBankProject).filter(Boolean);
-    opportunities.push(makeSearchLinkOpportunity({
-      source: "worldbank",
-      donor: "World Bank Procurement Notices",
-      url: procurementUrl,
-      query,
-    }));
+    if (query.includeSearchLinks) {
+      opportunities.push(makeSearchLinkOpportunity({
+        source: "worldbank",
+        donor: "World Bank Procurement Notices",
+        url: procurementUrl,
+        query,
+      }));
+    }
     return opportunities;
   } catch (e) {
     console.warn("[GRANTS][WorldBank] official API fallback", String(e?.message || e));
-    return [makeSearchLinkOpportunity({ source: "worldbank", donor: "World Bank", url: procurementUrl, query })];
+    return query.includeSearchLinks
+      ? [makeSearchLinkOpportunity({ source: "worldbank", donor: "World Bank", url: procurementUrl, query })]
+      : [];
   }
 }
 
@@ -534,14 +550,14 @@ async function searchWordPressRest({ source, donor, baseUrl, query }) {
 
 async function searchHtmlSource({ source, donor, url, query, includeHosts = [], fallbackOnly = false }) {
   if (fallbackOnly) {
-    return [makeSearchLinkOpportunity({ source, donor, url, query })];
+    return query.includeSearchLinks ? [makeSearchLinkOpportunity({ source, donor, url, query })] : [];
   }
 
   let html = "";
   try {
     html = await fetchText(url);
   } catch {
-    return [makeSearchLinkOpportunity({ source, donor, url, query })];
+    return query.includeSearchLinks ? [makeSearchLinkOpportunity({ source, donor, url, query })] : [];
   }
   const links = extractLinks(html, url)
     .filter((link) => {
@@ -557,7 +573,7 @@ async function searchHtmlSource({ source, donor, url, query, includeHosts = [], 
     .filter((link) => matchesTerms([link.title, link.url].join(" "), query))
     .slice(0, query.limit);
 
-  if (!links.length) return [makeSearchLinkOpportunity({ source, donor, url, query })];
+  if (!links.length) return query.includeSearchLinks ? [makeSearchLinkOpportunity({ source, donor, url, query })] : [];
 
   return links.map((link, idx) => ({
     id: `${source}:${hash(`${link.url}:${link.title}`)}`,
@@ -585,21 +601,42 @@ async function searchLinkedInPublic(query) {
     keywords
   )}&location=${encodeURIComponent(location)}&f_TPR=r604800`;
 
-  return [
-    {
-      ...makeSearchLinkOpportunity({
-        source: "linkedin",
-        donor: "LinkedIn public search",
-        url,
-        query,
-      }),
-      description:
-        "LinkedIn est ajoute comme lien de recherche public. Le systeme ne contourne pas l'authentification et ne scrape pas les pages protegees.",
-    },
-  ];
+  return query.includeSearchLinks
+    ? [
+        {
+          ...makeSearchLinkOpportunity({
+            source: "linkedin",
+            donor: "LinkedIn public search",
+            url,
+            query,
+          }),
+          description:
+            "LinkedIn est ajoute comme lien de recherche public. Le systeme ne contourne pas l'authentification et ne scrape pas les pages protegees.",
+        },
+      ]
+    : [];
 }
 
-function searchCuratedSearchLinks({ source, donor, query, templates }) {
+async function searchCuratedSearchLinks({ source, donor, query, templates }) {
+  const tasks = templates.slice(0, 8).map((template) => {
+    const url = template.replace("{q}", encodeURIComponent(query.keywords));
+    const host = hostFromUrl(url);
+    return searchHtmlSource({
+      source,
+      donor,
+      url,
+      query,
+      includeHosts: host ? [host] : [],
+    });
+  });
+
+  const batches = await Promise.allSettled(tasks);
+  const rows = [];
+  for (const batch of batches) {
+    if (batch.status === "fulfilled") rows.push(...batch.value);
+  }
+
+  if (rows.length || !query.includeSearchLinks) return rows;
   return templates.map((template) => {
     const url = template.replace("{q}", encodeURIComponent(query.keywords));
     return makeSearchLinkOpportunity({ source, donor, url, query });
@@ -629,6 +666,14 @@ function normalizeCustomSites(customSites) {
     .slice(0, 12);
 }
 
+function hostFromUrl(url) {
+  try {
+    return new URL(String(url || "").replace("{q}", "test")).host.toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
 function makeSearchLinkOpportunity({ source, donor, url, query }) {
   return {
     id: `${source}:search:${hash(url)}`,
@@ -641,6 +686,16 @@ function makeSearchLinkOpportunity({ source, donor, url, query }) {
     closeDate: "",
     category: query.sector || "",
     eligibility: query.organizationType || "",
+    opportunityType: query.opportunityType || "ngo",
+    audienceCategory: query.opportunityType || "ngo",
+    categoryLabel: opportunityTypeLabel(query.opportunityType || "ngo"),
+    freshness: {
+      active: true,
+      status: "search_link",
+      hasDeadline: false,
+      deadline: "",
+      daysUntilDeadline: null,
+    },
     description:
       "Source dynamique ou portail sans API publique simple. Ouvre ce lien pour consulter les resultats et coller l'appel choisi dans l'analyse grants.",
     url,
@@ -748,6 +803,39 @@ function normalizeWorldBankProject(row) {
   };
 }
 
+function normalizeOpportunityForDiscovery(opp = {}, query = {}) {
+  const opportunityType = classifyOpportunityType(opp, query);
+  const freshness = getOpportunityFreshness(opp);
+  return {
+    ...opp,
+    opportunityType,
+    audienceCategory: opportunityType,
+    categoryLabel: opportunityTypeLabel(opportunityType),
+    freshness,
+  };
+}
+
+function shouldKeepDiscoveredOpportunity(opp = {}, query = {}) {
+  if (!query.includeSearchLinks && String(opp.status || "") === "search_link") return false;
+  if (!query.onlyActive) return true;
+
+  const freshness = opp.freshness || getOpportunityFreshness(opp);
+  if (!freshness.active) return false;
+  if (!query.includeUndated && !freshness.hasDeadline) return false;
+  return true;
+}
+
+function countOpportunityTypes(items = []) {
+  return items.reduce(
+    (acc, opp) => {
+      const type = opp.opportunityType || "ngo";
+      acc[type] = (acc[type] || 0) + 1;
+      return acc;
+    },
+    { ngo: 0, entrepreneur: 0, scholarship: 0 }
+  );
+}
+
 function scoreOpportunity(opp, query) {
   const text = [
     opp.title,
@@ -763,7 +851,7 @@ function scoreOpportunity(opp, query) {
 
   const terms = tokenize([query.keywords, query.sector, query.country].filter(Boolean).join(" "));
   let score = 35;
-  const reasons = [];
+  const reasons = [`Categorie: ${opportunityTypeLabel(opp.opportunityType || classifyOpportunityType(opp, query))}`];
 
   for (const term of terms) {
     if (text.includes(term)) {
@@ -826,6 +914,8 @@ function scoreOpportunity(opp, query) {
       score -= 30;
       reasons.push("Deadline probablement depassee");
     }
+  } else if (opp.freshness?.status === "unknown_deadline") {
+    reasons.push("Date limite a verifier");
   }
 
   return {
@@ -840,6 +930,119 @@ function normalizeOpportunityType(v) {
   if (["entrepreneur", "entrepreneurs", "startup", "business", "incubator", "accelerator"].includes(s)) return "entrepreneur";
   if (["ngo", "ong", "appel-projet", "appel_a_projet", "call", "grant"].includes(s)) return "ngo";
   return "ngo";
+}
+
+export function classifyOpportunityType(opp = {}, query = {}) {
+  const source = String(opp.source || "").toLowerCase();
+  const text = [
+    opp.title,
+    opp.description,
+    opp.category,
+    opp.eligibility,
+    opp.donor,
+    opp.url,
+    opp.enrichment?.summaryText,
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+
+  const scores = { ngo: 0, entrepreneur: 0, scholarship: 0 };
+
+  if (/(scholarship|scholarships|bourse|bourses|fellowship|tuition|master|phd|doctorat|students?|etudiant|etudiants|universit)/i.test(text)) {
+    scores.scholarship += 4;
+  }
+  if (/(startup|start-up|entrepreneur|sme|pme|business|accelerator|incubator|seed|venture|innovation|founder|vc4a)/i.test(text)) {
+    scores.entrepreneur += 4;
+  }
+  if (/(grant|subvention|call for proposals|appel.{0,12}projets|ngo|ong|asbl|association|nonprofit|civil society|cso|community based)/i.test(text)) {
+    scores.ngo += 3;
+  }
+
+  if (/(scholarship|scholarshipset|bourse)/i.test(source)) scores.scholarship += 5;
+  if (/(vc4a|entrepreneur|startup|linkedin)/i.test(source)) scores.entrepreneur += 4;
+  if (/(grants\.gov|undp|ungm|ngo|foundation|embass|drc-local|eu)/i.test(source)) scores.ngo += 2;
+
+  const requested = normalizeOpportunityType(query.opportunityType || query.type || "");
+  if (query.opportunityType || query.type) scores[requested] += 1;
+
+  const best = Object.entries(scores).sort((a, b) => b[1] - a[1])[0];
+  return best?.[1] > 0 ? best[0] : requested;
+}
+
+export function getOpportunityFreshness(opp = {}, nowInput = new Date()) {
+  const now = nowInput instanceof Date ? nowInput : new Date(nowInput);
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const statusText = String(opp.status || "").toLowerCase();
+  const deadlineRaw = opp.closeDate || opp.enrichment?.deadline || opp.deadline || "";
+  const deadline = parseDate(deadlineRaw);
+
+  if (/(closed|expired|archived|cancelled|canceled|awarded|inactive|cloture|ferme|expire|passe)/i.test(statusText)) {
+    return {
+      active: false,
+      status: "closed",
+      hasDeadline: Boolean(deadline),
+      deadline: deadline ? deadline.toISOString().slice(0, 10) : clean(deadlineRaw, 80),
+      daysUntilDeadline: deadline ? Math.floor((endOfDay(deadline).getTime() - today.getTime()) / 86400000) : null,
+    };
+  }
+
+  if (deadline) {
+    const days = Math.floor((endOfDay(deadline).getTime() - today.getTime()) / 86400000);
+    return {
+      active: days >= 0,
+      status: days < 0 ? "expired" : days <= 14 ? "closing_soon" : "active",
+      hasDeadline: true,
+      deadline: deadline.toISOString().slice(0, 10),
+      daysUntilDeadline: days,
+    };
+  }
+
+  if (statusText === "search_link") {
+    return {
+      active: true,
+      status: "search_link",
+      hasDeadline: false,
+      deadline: "",
+      daysUntilDeadline: null,
+    };
+  }
+
+  const staleYear = hasOnlyPastYearSignals(opp, now.getFullYear());
+  if (staleYear) {
+    return {
+      active: false,
+      status: "stale_year",
+      hasDeadline: false,
+      deadline: "",
+      daysUntilDeadline: null,
+    };
+  }
+
+  return {
+    active: true,
+    status: "unknown_deadline",
+    hasDeadline: false,
+    deadline: "",
+    daysUntilDeadline: null,
+  };
+}
+
+function hasOnlyPastYearSignals(opp = {}, currentYear) {
+  const text = [opp.title, opp.description, opp.category, opp.url, opp.enrichment?.summaryText]
+    .filter(Boolean)
+    .join(" ");
+  const years = [...String(text).matchAll(/\b(20\d{2}|21\d{2})\b/g)]
+    .map((m) => Number(m[1]))
+    .filter((y) => y >= 2000 && y <= 2200);
+  if (!years.length) return false;
+  return Math.max(...years) < currentYear;
+}
+
+function opportunityTypeLabel(type) {
+  if (type === "scholarship") return "Bourses";
+  if (type === "entrepreneur") return "Entrepreneurs";
+  return "ONG / appels a projets";
 }
 
 function normalizeTarget(v) {
@@ -1034,10 +1237,9 @@ function decodeXml(text) {
 function extractDeadline(text) {
   const s = String(text || "");
   const m =
-    s.match(/deadline[:\s-]+([A-Za-z0-9,\s/:-]{6,40})/i) ||
-    s.match(/closing date[:\s-]+([A-Za-z0-9,\s/:-]{6,40})/i) ||
-    s.match(/close date[:\s-]+([A-Za-z0-9,\s/:-]{6,40})/i);
-  return clean(m?.[1] || "", 80);
+    s.match(/(?:deadline|closing date|close date|closes|apply by|date limite|limite de soumission|date de cloture|cloture)[:\s-]{0,16}([A-Za-zÀ-ÿ0-9,\s/.\-]{6,70})/i) ||
+    s.match(/(?:before|avant le|au plus tard le)\s+([A-Za-zÀ-ÿ0-9,\s/.\-]{6,70})/i);
+  return clean(String(m?.[1] || "").split(/[.;|]/)[0], 80);
 }
 
 function extractEuTopicId(url, fallback = "") {
@@ -1279,10 +1481,103 @@ function tokenize(text) {
 }
 
 function parseDate(v) {
-  const s = String(v || "").trim();
-  if (!s) return null;
-  const d = new Date(s);
+  const raw = clean(v, 160);
+  if (!raw) return null;
+  const s = normalizeDateText(raw);
+
+  let m = s.match(/\b(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})\b/);
+  if (m) return dateFromParts(Number(m[1]), Number(m[2]), Number(m[3]));
+
+  m = s.match(/\b(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})\b/);
+  if (m) {
+    const a = Number(m[1]);
+    const b = Number(m[2]);
+    const y = normalizeYear(Number(m[3]));
+    const dayFirst = a > 12 || b <= 12;
+    return dayFirst ? dateFromParts(y, b, a) : dateFromParts(y, a, b);
+  }
+
+  const monthNames = monthNameMap();
+  const monthPattern = Object.keys(monthNames).join("|");
+  m = s.match(new RegExp(`\\b(\\d{1,2})\\s+(${monthPattern})\\s+(\\d{4})\\b`, "i"));
+  if (m) return dateFromParts(Number(m[3]), monthNames[m[2].toLowerCase()], Number(m[1]));
+
+  m = s.match(new RegExp(`\\b(${monthPattern})\\s+(\\d{1,2}),?\\s+(\\d{4})\\b`, "i"));
+  if (m) return dateFromParts(Number(m[3]), monthNames[m[1].toLowerCase()], Number(m[2]));
+
+  if (!/\b\d{4}\b/.test(raw)) return null;
+  const d = new Date(raw);
   return Number.isNaN(d.getTime()) ? null : d;
+}
+
+function endOfDay(date) {
+  const d = new Date(date);
+  d.setHours(23, 59, 59, 999);
+  return d;
+}
+
+function normalizeDateText(value) {
+  return String(value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[–—]/g, "-")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+function normalizeYear(year) {
+  if (year < 100) return year >= 70 ? 1900 + year : 2000 + year;
+  return year;
+}
+
+function dateFromParts(year, month, day) {
+  if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) return null;
+  if (year < 1900 || year > 2200 || month < 1 || month > 12 || day < 1 || day > 31) return null;
+  const d = new Date(Date.UTC(year, month - 1, day));
+  if (d.getUTCFullYear() !== year || d.getUTCMonth() !== month - 1 || d.getUTCDate() !== day) return null;
+  return d;
+}
+
+function monthNameMap() {
+  return {
+    jan: 1,
+    january: 1,
+    janvier: 1,
+    feb: 2,
+    february: 2,
+    fevrier: 2,
+    mar: 3,
+    march: 3,
+    mars: 3,
+    apr: 4,
+    april: 4,
+    avril: 4,
+    may: 5,
+    mai: 5,
+    jun: 6,
+    june: 6,
+    juin: 6,
+    jul: 7,
+    july: 7,
+    juillet: 7,
+    aug: 8,
+    august: 8,
+    aout: 8,
+    sep: 9,
+    sept: 9,
+    september: 9,
+    septembre: 9,
+    oct: 10,
+    october: 10,
+    octobre: 10,
+    nov: 11,
+    november: 11,
+    novembre: 11,
+    dec: 12,
+    december: 12,
+    decembre: 12,
+  };
 }
 
 function hash(text) {
