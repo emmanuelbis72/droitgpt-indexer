@@ -99,13 +99,13 @@ export async function extractOpportunityFromPage(url, { sourceName, seed = {}, d
 
   let html = "";
   let usedSearchExtract = false;
-  try {
-    html = await fetchText(sourceUrl);
-  } catch (e) {
-    if (seed.rawText) {
-      html = String(seed.rawText || "");
-      usedSearchExtract = true;
-    } else {
+  if (seed.rawText) {
+    html = String(seed.rawText || "");
+    usedSearchExtract = true;
+  } else {
+    try {
+      html = await fetchText(sourceUrl);
+    } catch (e) {
       return verifyOpportunity({
         title: seed.title || titleFromUrl(sourceUrl),
         sourceUrl,
