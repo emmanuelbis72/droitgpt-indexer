@@ -1,4 +1,4 @@
-// bp/core/grantsStorage.js
+﻿// bp/core/grantsStorage.js
 import fs from "node:fs/promises";
 import path from "node:path";
 import crypto from "node:crypto";
@@ -7,6 +7,12 @@ import { clean, cleanUrl, verifyOpportunity } from "./grantsVerifier.js";
 
 const DATA_DIR = process.env.GRANTS_DATA_DIR || path.join(process.cwd(), "data");
 const DB_PATH = process.env.GRANTS_PROD_DB_PATH || path.join(DATA_DIR, "grants-prod-db.json");
+
+const VECTOR_SIZE = 384;
+const OPPORTUNITIES_COLLECTION = process.env.QDRANT_GRANTS_COLLECTION || "grants_opportunities";
+const SOURCES_COLLECTION = process.env.QDRANT_GRANTS_SOURCES_COLLECTION || "grants_sources";
+const JOBS_COLLECTION = process.env.QDRANT_GRANTS_JOBS_COLLECTION || "grants_jobs";
+const QDRANT_SCROLL_LIMIT = clampInt(process.env.QDRANT_GRANTS_SCROLL_LIMIT, 100, 50000, 10000);
 
 const DEFAULT_DB = {
   version: 1,
@@ -17,14 +23,11 @@ const DEFAULT_DB = {
 };
 
 let writeQueue = Promise.resolve();
-let pgPoolPromise;
-let pgUnavailableWarned = false;
+let qdrantInitPromise = null;
 
 export async function initGrantsStorage() {
-  const pg = await getPgPool();
-  if (pg) {
-    await initPgSchema(pg);
-    await seedDefaultPgSources(pg);
+  if (isQdrantConfigured()) {
+    await initQdrantStorage();
     return;
   }
 
@@ -38,63 +41,24 @@ export async function initGrantsStorage() {
 }
 
 export async function listOpportunities(filters = {}) {
-  const pg = await getPgPool();
-  if (pg) return pgListOpportunities(pg, filters);
+  if (isQdrantConfigured()) return qdrantListOpportunities(filters);
 
   const db = await readDb();
-  const q = clean(filters.q, 200).toLowerCase();
-  const type = clean(filters.type, 80);
-  const country = clean(filters.country, 100).toLowerCase();
-  const region = clean(filters.region, 100).toLowerCase();
-  const sector = clean(filters.sector, 100).toLowerCase();
-  const status = clean(filters.status, 60);
-  const source = clean(filters.source, 180).toLowerCase();
-  const deadlineFrom = parseDate(filters.deadlineFrom);
-  const deadlineTo = parseDate(filters.deadlineTo);
+  const rows = filterAndSortOpportunities(db.opportunities, filters);
   const limit = clampInt(filters.limit, 1, 100, 30);
   const offset = clampInt(filters.offset, 0, 10000, 0);
-
-  const rows = db.opportunities
-    .map(refreshStatus)
-    .filter((opp) => {
-      if (q) {
-        const hay = [opp.title, opp.organization, opp.summary, opp.description, opp.eligibility, opp.sourceName]
-          .join(" ")
-          .toLowerCase();
-        if (!hay.includes(q)) return false;
-      }
-      if (type && opp.type !== normalizeGrantType(type)) return false;
-      if (country && !opp.countries.some((c) => c.toLowerCase().includes(country) || country.includes(c.toLowerCase()))) return false;
-      if (region && !String(opp.region || "").toLowerCase().includes(region)) return false;
-      if (sector && !opp.sectors.some((s) => s.toLowerCase().includes(sector))) return false;
-      if (status && opp.status !== normalizeGrantStatus(status)) return false;
-      if (source && !String(opp.sourceName || "").toLowerCase().includes(source)) return false;
-      const deadline = parseDate(opp.deadline);
-      if (deadlineFrom && (!deadline || deadline < deadlineFrom)) return false;
-      if (deadlineTo && (!deadline || deadline > endOfDay(deadlineTo))) return false;
-      return true;
-    })
-    .sort((a, b) => {
-      const as = statusRank(a.status);
-      const bs = statusRank(b.status);
-      if (as !== bs) return as - bs;
-      return Number(b.reliabilityScore || 0) - Number(a.reliabilityScore || 0);
-    });
-
   return { rows: rows.slice(offset, offset + limit), total: rows.length, limit, offset };
 }
 
 export async function getOpportunity(id) {
-  const pg = await getPgPool();
-  if (pg) return pgGetOpportunity(pg, id);
+  if (isQdrantConfigured()) return qdrantGetOpportunity(id);
 
   const db = await readDb();
   return db.opportunities.find((opp) => opp.id === id) || null;
 }
 
 export async function saveOpportunity(input = {}) {
-  const pg = await getPgPool();
-  if (pg) return pgSaveOpportunity(pg, input);
+  if (isQdrantConfigured()) return qdrantSaveOpportunity(input);
 
   const verified = verifyOpportunity(input);
   if (!verified.sourceUrl) {
@@ -136,16 +100,14 @@ export async function saveOpportunities(items = []) {
 }
 
 export async function listSources() {
-  const pg = await getPgPool();
-  if (pg) return pgListSources(pg);
+  if (isQdrantConfigured()) return qdrantListSources();
 
   const db = await readDb();
   return db.sources;
 }
 
 export async function addSource(input = {}) {
-  const pg = await getPgPool();
-  if (pg) return pgAddSource(pg, input);
+  if (isQdrantConfigured()) return qdrantAddSource(input);
 
   const now = new Date().toISOString();
   const record = sourceRecord({
@@ -177,8 +139,7 @@ export async function addSource(input = {}) {
 }
 
 export async function updateOpportunityStatus(id, status) {
-  const pg = await getPgPool();
-  if (pg) return pgUpdateOpportunityStatus(pg, id, status);
+  if (isQdrantConfigured()) return qdrantUpdateOpportunityStatus(id, status);
 
   const safeStatus = normalizeGrantStatus(status);
   let updated = null;
@@ -193,8 +154,7 @@ export async function updateOpportunityStatus(id, status) {
 }
 
 export async function createJob({ query, params }) {
-  const pg = await getPgPool();
-  if (pg) return pgCreateJob(pg, { query, params });
+  if (isQdrantConfigured()) return qdrantCreateJob({ query, params });
 
   const now = new Date().toISOString();
   const job = {
@@ -217,8 +177,7 @@ export async function createJob({ query, params }) {
 }
 
 export async function patchJob(id, patch) {
-  const pg = await getPgPool();
-  if (pg) return pgPatchJob(pg, id, patch);
+  if (isQdrantConfigured()) return qdrantPatchJob(id, patch);
 
   let updated = null;
   await updateDb((db) => {
@@ -232,274 +191,68 @@ export async function patchJob(id, patch) {
 }
 
 export async function getJob(id) {
-  const pg = await getPgPool();
-  if (pg) return pgGetJob(pg, id);
+  if (isQdrantConfigured()) return qdrantGetJob(id);
 
   const db = await readDb();
   return db.jobs.find((job) => job.id === id) || null;
 }
 
-async function getPgPool() {
-  if (!process.env.DATABASE_URL) return null;
-  if (pgPoolPromise !== undefined) return pgPoolPromise;
-
-  pgPoolPromise = (async () => {
-    try {
-      const { Pool } = await import("pg");
-      return new Pool({
-        connectionString: process.env.DATABASE_URL,
-        ssl: shouldUsePgSsl() ? { rejectUnauthorized: false } : undefined,
-        max: 6,
-        idleTimeoutMillis: 30000,
-      });
-    } catch (e) {
-      if (!pgUnavailableWarned) {
-        pgUnavailableWarned = true;
-        console.warn("[GRANTS] PostgreSQL disabled; install package 'pg' to use DATABASE_URL.", String(e?.message || e));
-      }
-      return null;
-    }
-  })();
-
-  return pgPoolPromise;
-}
-
-function shouldUsePgSsl() {
-  if (String(process.env.PGSSLMODE || "").toLowerCase() === "disable") return false;
-  return !/localhost|127\.0\.0\.1/i.test(process.env.DATABASE_URL || "");
-}
-
-async function initPgSchema(pg) {
-  await pg.query(`
-    CREATE EXTENSION IF NOT EXISTS pgcrypto;
-
-    CREATE TABLE IF NOT EXISTS opportunities (
-      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      title TEXT NOT NULL,
-      organization TEXT,
-      type TEXT,
-      summary TEXT,
-      description TEXT,
-      eligibility TEXT,
-      countries JSONB DEFAULT '[]'::jsonb,
-      region TEXT,
-      sectors JSONB DEFAULT '[]'::jsonb,
-      amount TEXT,
-      currency TEXT,
-      deadline TIMESTAMPTZ,
-      deadline_text TEXT,
-      application_url TEXT,
-      source_url TEXT NOT NULL UNIQUE,
-      source_name TEXT,
-      language TEXT,
-      status TEXT NOT NULL DEFAULT 'draft_review',
-      reliability_score INT DEFAULT 0,
-      verification_notes TEXT,
-      raw_content TEXT,
-      extracted_at TIMESTAMPTZ,
-      last_checked_at TIMESTAMPTZ,
-      created_at TIMESTAMPTZ DEFAULT now(),
-      updated_at TIMESTAMPTZ DEFAULT now(),
-      CONSTRAINT opportunities_status_check CHECK (status IN ('open', 'expired', 'unknown', 'draft_review', 'hidden')),
-      CONSTRAINT opportunities_type_check CHECK (type IS NULL OR type IN ('grant', 'scholarship', 'call_for_projects', 'competition', 'accelerator', 'fellowship', 'ngo_funding', 'other')),
-      CONSTRAINT opportunities_reliability_score_check CHECK (reliability_score BETWEEN 0 AND 100)
-    );
-
-    CREATE INDEX IF NOT EXISTS opportunities_status_idx ON opportunities (status);
-    CREATE INDEX IF NOT EXISTS opportunities_type_idx ON opportunities (type);
-    CREATE INDEX IF NOT EXISTS opportunities_deadline_idx ON opportunities (deadline);
-    CREATE INDEX IF NOT EXISTS opportunities_source_name_idx ON opportunities (source_name);
-    CREATE INDEX IF NOT EXISTS opportunities_countries_gin_idx ON opportunities USING gin (countries);
-    CREATE INDEX IF NOT EXISTS opportunities_sectors_gin_idx ON opportunities USING gin (sectors);
-
-    CREATE TABLE IF NOT EXISTS grant_sources (
-      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      name TEXT NOT NULL,
-      url TEXT NOT NULL UNIQUE,
-      type TEXT,
-      region TEXT,
-      active BOOLEAN DEFAULT true,
-      created_at TIMESTAMPTZ DEFAULT now(),
-      updated_at TIMESTAMPTZ DEFAULT now(),
-      CONSTRAINT grant_sources_type_check CHECK (type IS NULL OR type IN ('grant', 'scholarship', 'call_for_projects', 'competition', 'accelerator', 'fellowship', 'ngo_funding', 'other'))
-    );
-
-    CREATE INDEX IF NOT EXISTS grant_sources_active_idx ON grant_sources (active);
-
-    CREATE TABLE IF NOT EXISTS grant_search_jobs (
-      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      status TEXT NOT NULL DEFAULT 'queued',
-      query TEXT,
-      params JSONB DEFAULT '{}'::jsonb,
-      result JSONB,
-      error TEXT,
-      created_at TIMESTAMPTZ DEFAULT now(),
-      started_at TIMESTAMPTZ,
-      done_at TIMESTAMPTZ,
-      CONSTRAINT grant_search_jobs_status_check CHECK (status IN ('queued', 'running', 'done', 'error'))
-    );
-
-    CREATE INDEX IF NOT EXISTS grant_search_jobs_status_idx ON grant_search_jobs (status);
-    CREATE INDEX IF NOT EXISTS grant_search_jobs_created_at_idx ON grant_search_jobs (created_at DESC);
-  `);
-}
-
-async function seedDefaultPgSources(pg) {
-  for (const source of DEFAULT_GRANT_SOURCES.map(sourceRecord)) {
-    await pg.query(
-      `INSERT INTO grant_sources (id, name, url, type, region, active, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-       ON CONFLICT (url) DO UPDATE SET
-         name = EXCLUDED.name,
-         type = EXCLUDED.type,
-         region = EXCLUDED.region,
-         active = grant_sources.active,
-         updated_at = now()`,
-      [source.id, source.name, source.url, source.type, source.region, source.active, source.createdAt, source.updatedAt]
-    );
+async function initQdrantStorage() {
+  if (!qdrantInitPromise) {
+    qdrantInitPromise = (async () => {
+      await ensureQdrantCollection(OPPORTUNITIES_COLLECTION);
+      await ensureQdrantCollection(SOURCES_COLLECTION);
+      await ensureQdrantCollection(JOBS_COLLECTION);
+      await seedDefaultQdrantSources();
+    })();
   }
+  return qdrantInitPromise;
 }
 
-async function pgListOpportunities(pg, filters = {}) {
-  await pg.query("UPDATE opportunities SET status = 'expired', updated_at = now() WHERE status = 'open' AND deadline IS NOT NULL AND deadline < now()");
-
-  const where = [];
-  const values = [];
-  const add = (value) => {
-    values.push(value);
-    return `$${values.length}`;
-  };
-
-  const q = clean(filters.q, 200).toLowerCase();
-  const type = clean(filters.type, 80);
-  const country = clean(filters.country, 100).toLowerCase();
-  const region = clean(filters.region, 100).toLowerCase();
-  const sector = clean(filters.sector, 100).toLowerCase();
-  const status = clean(filters.status, 60);
-  const source = clean(filters.source, 180).toLowerCase();
-  const deadlineFrom = parseDate(filters.deadlineFrom);
-  const deadlineTo = parseDate(filters.deadlineTo);
+async function qdrantListOpportunities(filters = {}) {
+  await initQdrantStorage();
+  const points = await qdrantScrollAll(OPPORTUNITIES_COLLECTION, { limit: QDRANT_SCROLL_LIMIT });
+  const opportunities = points.map((point) => opportunityFromPayload(point.payload)).filter(Boolean);
+  const rows = filterAndSortOpportunities(opportunities, filters);
   const limit = clampInt(filters.limit, 1, 100, 30);
   const offset = clampInt(filters.offset, 0, 10000, 0);
-
-  if (q) {
-    const p = add(`%${q}%`);
-    where.push(`lower(concat_ws(' ', title, organization, summary, description, eligibility, source_name)) LIKE ${p}`);
-  }
-  if (type) where.push(`type = ${add(normalizeGrantType(type))}`);
-  if (country) where.push(`EXISTS (SELECT 1 FROM jsonb_array_elements_text(countries) c WHERE lower(c) LIKE ${add(`%${country}%`)})`);
-  if (region) where.push(`lower(coalesce(region, '')) LIKE ${add(`%${region}%`)}`);
-  if (sector) where.push(`EXISTS (SELECT 1 FROM jsonb_array_elements_text(sectors) s WHERE lower(s) LIKE ${add(`%${sector}%`)})`);
-  if (status) where.push(`status = ${add(normalizeGrantStatus(status))}`);
-  if (source) where.push(`lower(coalesce(source_name, '')) LIKE ${add(`%${source}%`)}`);
-  if (deadlineFrom) where.push(`deadline >= ${add(deadlineFrom.toISOString())}`);
-  if (deadlineTo) where.push(`deadline <= ${add(endOfDay(deadlineTo).toISOString())}`);
-
-  const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
-  const count = await pg.query(`SELECT count(*)::int AS total FROM opportunities ${whereSql}`, values);
-  const rows = await pg.query(
-    `SELECT * FROM opportunities
-     ${whereSql}
-     ORDER BY CASE status
-       WHEN 'open' THEN 1
-       WHEN 'unknown' THEN 2
-       WHEN 'draft_review' THEN 3
-       WHEN 'expired' THEN 4
-       ELSE 5
-     END, reliability_score DESC NULLS LAST, updated_at DESC
-     LIMIT ${add(limit)} OFFSET ${add(offset)}`,
-    values
-  );
-
-  return { rows: rows.rows.map(opportunityFromPg), total: count.rows[0]?.total || 0, limit, offset };
+  return { rows: rows.slice(offset, offset + limit), total: rows.length, limit, offset };
 }
 
-async function pgGetOpportunity(pg, id) {
-  if (!isUuid(id)) return null;
-  const rows = await pg.query("SELECT * FROM opportunities WHERE id = $1", [id]);
-  return rows.rows[0] ? opportunityFromPg(rows.rows[0]) : null;
+async function qdrantGetOpportunity(id) {
+  await initQdrantStorage();
+  const point = await qdrantRetrievePoint(OPPORTUNITIES_COLLECTION, id);
+  return point ? opportunityFromPayload(point.payload) : null;
 }
 
-async function pgSaveOpportunity(pg, input = {}) {
+async function qdrantSaveOpportunity(input = {}) {
+  await initQdrantStorage();
   const verified = verifyOpportunity(input);
   if (!verified.sourceUrl) return { saved: null, skipped: true, reason: "SOURCE_URL_REQUIRED" };
 
-  const values = [
-    verified.id,
-    verified.title,
-    verified.organization,
-    verified.type,
-    verified.summary,
-    verified.description,
-    verified.eligibility,
-    JSON.stringify(verified.countries || []),
-    verified.region,
-    JSON.stringify(verified.sectors || []),
-    verified.amount,
-    verified.currency,
-    verified.deadline,
-    verified.deadlineText,
-    verified.applicationUrl,
-    verified.sourceUrl,
-    verified.sourceName,
-    verified.language,
-    verified.status,
-    verified.reliabilityScore,
-    verified.verificationNotes,
-    verified.rawContent,
-    verified.extractedAt,
-    verified.lastCheckedAt,
-    verified.createdAt,
-    verified.updatedAt,
-  ];
+  const existing = await qdrantRetrievePoint(OPPORTUNITIES_COLLECTION, verified.id);
+  const previous = existing ? opportunityFromPayload(existing.payload) : null;
+  const saved = {
+    ...(previous || {}),
+    ...verified,
+    id: previous?.id || verified.id,
+    createdAt: previous?.createdAt || verified.createdAt,
+    updatedAt: new Date().toISOString(),
+    recordKind: "opportunity",
+  };
 
-  const rows = await pg.query(
-    `INSERT INTO opportunities (
-      id, title, organization, type, summary, description, eligibility, countries, region, sectors,
-      amount, currency, deadline, deadline_text, application_url, source_url, source_name, language,
-      status, reliability_score, verification_notes, raw_content, extracted_at, last_checked_at, created_at, updated_at
-    ) VALUES (
-      $1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10::jsonb,
-      $11, $12, $13, $14, $15, $16, $17, $18,
-      $19, $20, $21, $22, $23, $24, $25, $26
-    )
-    ON CONFLICT (source_url) DO UPDATE SET
-      title = EXCLUDED.title,
-      organization = EXCLUDED.organization,
-      type = EXCLUDED.type,
-      summary = EXCLUDED.summary,
-      description = EXCLUDED.description,
-      eligibility = EXCLUDED.eligibility,
-      countries = EXCLUDED.countries,
-      region = EXCLUDED.region,
-      sectors = EXCLUDED.sectors,
-      amount = EXCLUDED.amount,
-      currency = EXCLUDED.currency,
-      deadline = EXCLUDED.deadline,
-      deadline_text = EXCLUDED.deadline_text,
-      application_url = EXCLUDED.application_url,
-      source_name = EXCLUDED.source_name,
-      language = EXCLUDED.language,
-      status = EXCLUDED.status,
-      reliability_score = EXCLUDED.reliability_score,
-      verification_notes = EXCLUDED.verification_notes,
-      raw_content = EXCLUDED.raw_content,
-      extracted_at = EXCLUDED.extracted_at,
-      last_checked_at = EXCLUDED.last_checked_at,
-      updated_at = now()
-    RETURNING *`,
-    values
-  );
-
-  return { saved: opportunityFromPg(rows.rows[0]), skipped: false };
+  await qdrantUpsert(OPPORTUNITIES_COLLECTION, saved.id, qdrantVectorForOpportunity(saved), opportunityPayload(saved));
+  return { saved, skipped: false };
 }
 
-async function pgListSources(pg) {
-  const rows = await pg.query("SELECT * FROM grant_sources ORDER BY name ASC");
-  return rows.rows.map(sourceFromPg);
+async function qdrantListSources() {
+  await initQdrantStorage();
+  const points = await qdrantScrollAll(SOURCES_COLLECTION, { limit: 2000 });
+  return points.map((point) => sourceFromPayload(point.payload)).filter(Boolean).sort((a, b) => a.name.localeCompare(b.name));
 }
 
-async function pgAddSource(pg, input = {}) {
+async function qdrantAddSource(input = {}) {
+  await initQdrantStorage();
   const record = sourceRecord({
     name: input.name,
     url: input.url || input.baseUrl,
@@ -511,145 +264,297 @@ async function pgAddSource(pg, input = {}) {
   });
   if (!record.name || !record.url) throw new Error("SOURCE_NAME_AND_URL_REQUIRED");
 
-  const rows = await pg.query(
-    `INSERT INTO grant_sources (id, name, url, type, region, active, created_at, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, now(), now())
-     ON CONFLICT (url) DO UPDATE SET
-       name = EXCLUDED.name,
-       type = EXCLUDED.type,
-       region = EXCLUDED.region,
-       active = EXCLUDED.active,
-       updated_at = now()
-     RETURNING *`,
-    [record.id, record.name, record.url, record.type, record.region, record.active]
-  );
-  return sourceFromPg(rows.rows[0]);
+  const existing = await qdrantRetrievePoint(SOURCES_COLLECTION, record.id);
+  const previous = existing ? sourceFromPayload(existing.payload) : null;
+  const saved = {
+    ...(previous || {}),
+    ...record,
+    id: previous?.id || record.id,
+    createdAt: previous?.createdAt || record.createdAt,
+    updatedAt: new Date().toISOString(),
+    recordKind: "source",
+  };
+  await qdrantUpsert(SOURCES_COLLECTION, saved.id, hashVector(`${saved.name} ${saved.url} ${saved.type} ${saved.region}`), sourcePayload(saved));
+  return saved;
 }
 
-async function pgUpdateOpportunityStatus(pg, id, status) {
-  if (!isUuid(id)) return null;
-  const rows = await pg.query(
-    "UPDATE opportunities SET status = $2, updated_at = now() WHERE id = $1 RETURNING *",
-    [id, normalizeGrantStatus(status)]
-  );
-  return rows.rows[0] ? opportunityFromPg(rows.rows[0]) : null;
+async function qdrantUpdateOpportunityStatus(id, status) {
+  const opportunity = await qdrantGetOpportunity(id);
+  if (!opportunity) return null;
+  const updated = { ...opportunity, status: normalizeGrantStatus(status), updatedAt: new Date().toISOString(), recordKind: "opportunity" };
+  await qdrantUpsert(OPPORTUNITIES_COLLECTION, updated.id, qdrantVectorForOpportunity(updated), opportunityPayload(updated));
+  return updated;
 }
 
-async function pgCreateJob(pg, { query, params }) {
-  const id = crypto.randomUUID();
-  const rows = await pg.query(
-    `INSERT INTO grant_search_jobs (id, status, query, params, result, error, created_at)
-     VALUES ($1, 'queued', $2, $3::jsonb, NULL, NULL, now())
-     RETURNING *`,
-    [id, clean(query, 500), JSON.stringify(params || {})]
-  );
-  return jobFromPg(rows.rows[0]);
+async function qdrantCreateJob({ query, params }) {
+  await initQdrantStorage();
+  const now = new Date().toISOString();
+  const job = {
+    id: crypto.randomUUID(),
+    status: "queued",
+    query: clean(query, 500),
+    params: params || {},
+    result: null,
+    error: null,
+    createdAt: now,
+    startedAt: null,
+    doneAt: null,
+    recordKind: "job",
+  };
+  await qdrantUpsert(JOBS_COLLECTION, job.id, hashVector(`${job.query} ${job.status}`), jobPayload(job));
+  return job;
 }
 
-async function pgPatchJob(pg, id, patch = {}) {
-  if (!isUuid(id)) return null;
-  const current = await pgGetJob(pg, id);
+async function qdrantPatchJob(id, patch = {}) {
+  await initQdrantStorage();
+  const current = await qdrantGetJob(id);
   if (!current) return null;
-  const next = { ...current, ...patch };
-  const rows = await pg.query(
-    `UPDATE grant_search_jobs
-     SET status = $2,
-         query = $3,
-         params = $4::jsonb,
-         result = $5::jsonb,
-         error = $6,
-         started_at = $7,
-         done_at = $8
-     WHERE id = $1
-     RETURNING *`,
-    [
-      id,
-      next.status,
-      next.query,
-      JSON.stringify(next.params || {}),
-      next.result ? JSON.stringify(next.result) : null,
-      next.error || null,
-      next.startedAt || null,
-      next.doneAt || null,
-    ]
-  );
-  return rows.rows[0] ? jobFromPg(rows.rows[0]) : null;
+  const updated = { ...current, ...patch, result: compactJobResult(patch.result ?? current.result), recordKind: "job" };
+  await qdrantUpsert(JOBS_COLLECTION, updated.id, hashVector(`${updated.query} ${updated.status}`), jobPayload(updated));
+  return updated;
 }
 
-async function pgGetJob(pg, id) {
+async function qdrantGetJob(id) {
+  await initQdrantStorage();
+  const point = await qdrantRetrievePoint(JOBS_COLLECTION, id);
+  return point ? jobFromPayload(point.payload) : null;
+}
+
+async function seedDefaultQdrantSources() {
+  for (const source of DEFAULT_GRANT_SOURCES.map(sourceRecord)) {
+    const existing = await qdrantRetrievePoint(SOURCES_COLLECTION, source.id);
+    if (existing) continue;
+    await qdrantUpsert(SOURCES_COLLECTION, source.id, hashVector(`${source.name} ${source.url} ${source.type} ${source.region}`), sourcePayload({ ...source, recordKind: "source" }));
+  }
+}
+
+async function ensureQdrantCollection(collection) {
+  const response = await qdrantFetch(`/collections/${encodeURIComponent(collection)}`, { method: "GET" });
+  if (response.ok) return;
+  if (response.status !== 404) await throwQdrantError(response, `Qdrant collection check failed: ${collection}`);
+
+  const create = await qdrantFetch(`/collections/${encodeURIComponent(collection)}`, {
+    method: "PUT",
+    body: JSON.stringify({ vectors: { size: VECTOR_SIZE, distance: "Cosine" } }),
+  });
+  if (!create.ok) await throwQdrantError(create, `Qdrant collection create failed: ${collection}`);
+}
+
+async function qdrantUpsert(collection, id, vector, payload) {
+  const response = await qdrantFetch(`/collections/${encodeURIComponent(collection)}/points?wait=true`, {
+    method: "PUT",
+    body: JSON.stringify({ points: [{ id, vector, payload }] }),
+  });
+  if (!response.ok) await throwQdrantError(response, `Qdrant upsert failed: ${collection}`);
+}
+
+async function qdrantRetrievePoint(collection, id) {
   if (!isUuid(id)) return null;
-  const rows = await pg.query("SELECT * FROM grant_search_jobs WHERE id = $1", [id]);
-  return rows.rows[0] ? jobFromPg(rows.rows[0]) : null;
-}
-
-function opportunityFromPg(row = {}) {
-  return refreshStatus({
-    id: row.id,
-    title: row.title,
-    organization: row.organization,
-    type: row.type,
-    summary: row.summary,
-    description: row.description,
-    eligibility: row.eligibility,
-    countries: Array.isArray(row.countries) ? row.countries : [],
-    region: row.region,
-    sectors: Array.isArray(row.sectors) ? row.sectors : [],
-    amount: row.amount,
-    currency: row.currency,
-    deadline: toIso(row.deadline),
-    deadlineText: row.deadline_text,
-    applicationUrl: row.application_url,
-    sourceUrl: row.source_url,
-    sourceName: row.source_name,
-    language: row.language,
-    status: row.status,
-    reliabilityScore: row.reliability_score,
-    verificationNotes: row.verification_notes,
-    rawContent: row.raw_content,
-    extractedAt: toIso(row.extracted_at),
-    lastCheckedAt: toIso(row.last_checked_at),
-    createdAt: toIso(row.created_at),
-    updatedAt: toIso(row.updated_at),
+  const response = await qdrantFetch(`/collections/${encodeURIComponent(collection)}/points`, {
+    method: "POST",
+    body: JSON.stringify({ ids: [id], with_payload: true, with_vector: false }),
   });
+  if (!response.ok) await throwQdrantError(response, `Qdrant retrieve failed: ${collection}`);
+  const json = await response.json();
+  return json?.result?.[0] || null;
 }
 
-function sourceFromPg(row = {}) {
-  return sourceRecord({
-    id: row.id,
-    name: row.name,
-    url: row.url,
-    baseUrl: row.url,
-    type: row.type,
-    category: row.type,
-    region: row.region,
-    active: row.active,
-    createdAt: toIso(row.created_at),
-    updatedAt: toIso(row.updated_at),
-  });
+async function qdrantScrollAll(collection, { limit = 10000 } = {}) {
+  const out = [];
+  let offset = null;
+  while (out.length < limit) {
+    const response = await qdrantFetch(`/collections/${encodeURIComponent(collection)}/points/scroll`, {
+      method: "POST",
+      body: JSON.stringify({
+        limit: Math.min(256, limit - out.length),
+        with_payload: true,
+        with_vector: false,
+        ...(offset ? { offset } : {}),
+      }),
+    });
+    if (!response.ok) await throwQdrantError(response, `Qdrant scroll failed: ${collection}`);
+    const json = await response.json();
+    const points = Array.isArray(json?.result?.points) ? json.result.points : [];
+    out.push(...points);
+    offset = json?.result?.next_page_offset || null;
+    if (!offset || !points.length) break;
+  }
+  return out;
 }
 
-function jobFromPg(row = {}) {
+async function qdrantFetch(pathname, options = {}) {
+  const base = String(process.env.QDRANT_URL || "").replace(/\/$/, "");
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), Number(process.env.QDRANT_TIMEOUT_MS || 15000));
+  try {
+    return await fetch(`${base}${pathname}`, {
+      ...options,
+      signal: controller.signal,
+      headers: {
+        "Content-Type": "application/json",
+        ...(process.env.QDRANT_API_KEY ? { "api-key": process.env.QDRANT_API_KEY } : {}),
+        ...(options.headers || {}),
+      },
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function throwQdrantError(response, message) {
+  const text = await response.text().catch(() => "");
+  throw new Error(`${message}: HTTP ${response.status} ${text.slice(0, 300)}`);
+}
+
+function filterAndSortOpportunities(items = [], filters = {}) {
+  const q = clean(filters.q, 200).toLowerCase();
+  const type = clean(filters.type, 80);
+  const country = clean(filters.country, 100).toLowerCase();
+  const region = clean(filters.region, 100).toLowerCase();
+  const sector = clean(filters.sector, 100).toLowerCase();
+  const status = clean(filters.status, 60);
+  const source = clean(filters.source, 180).toLowerCase();
+  const deadlineFrom = parseDate(filters.deadlineFrom);
+  const deadlineTo = parseDate(filters.deadlineTo);
+
+  return items
+    .map(refreshStatus)
+    .filter((opp) => {
+      if (q) {
+        const hay = [opp.title, opp.organization, opp.summary, opp.description, opp.eligibility, opp.sourceName]
+          .join(" ")
+          .toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
+      if (type && opp.type !== normalizeGrantType(type)) return false;
+      if (country && !opp.countries.some((c) => c.toLowerCase().includes(country) || country.includes(c.toLowerCase()))) return false;
+      if (region && !String(opp.region || "").toLowerCase().includes(region)) return false;
+      if (sector && !opp.sectors.some((s) => s.toLowerCase().includes(sector))) return false;
+      if (status && opp.status !== normalizeGrantStatus(status)) return false;
+      if (source && !String(opp.sourceName || "").toLowerCase().includes(source)) return false;
+      const deadline = parseDate(opp.deadline);
+      if (deadlineFrom && (!deadline || deadline < deadlineFrom)) return false;
+      if (deadlineTo && (!deadline || deadline > endOfDay(deadlineTo))) return false;
+      return true;
+    })
+    .sort((a, b) => {
+      const as = statusRank(a.status);
+      const bs = statusRank(b.status);
+      if (as !== bs) return as - bs;
+      return Number(b.reliabilityScore || 0) - Number(a.reliabilityScore || 0);
+    });
+}
+
+function opportunityPayload(opp = {}) {
   return {
-    id: row.id,
-    status: row.status,
-    query: row.query,
-    params: row.params || {},
-    result: row.result || null,
-    error: row.error || null,
-    createdAt: toIso(row.created_at),
-    startedAt: toIso(row.started_at),
-    doneAt: toIso(row.done_at),
+    ...opp,
+    recordKind: "opportunity",
+    countries: Array.isArray(opp.countries) ? opp.countries : [],
+    sectors: Array.isArray(opp.sectors) ? opp.sectors : [],
+    searchText: [opp.title, opp.organization, opp.summary, opp.description, opp.eligibility, (opp.countries || []).join(" "), (opp.sectors || []).join(" ")].filter(Boolean).join(" ").slice(0, 12000),
   };
 }
 
-function isUuid(value) {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(value || ""));
+function sourcePayload(source = {}) {
+  return { ...source, recordKind: "source" };
 }
 
-function toIso(value) {
-  if (!value) return null;
-  const d = new Date(value);
-  return Number.isNaN(d.getTime()) ? null : d.toISOString();
+function jobPayload(job = {}) {
+  return { ...job, recordKind: "job", result: compactJobResult(job.result) };
+}
+
+function opportunityFromPayload(payload = {}) {
+  if (!payload || payload.recordKind !== "opportunity") return null;
+  return refreshStatus({
+    id: payload.id,
+    title: clean(payload.title, 300),
+    organization: clean(payload.organization, 220),
+    type: normalizeGrantType(payload.type),
+    summary: clean(payload.summary, 900),
+    description: clean(payload.description, 6000),
+    eligibility: clean(payload.eligibility, 2500),
+    countries: Array.isArray(payload.countries) ? payload.countries.map((x) => clean(x, 120)).filter(Boolean) : [],
+    region: clean(payload.region, 120),
+    sectors: Array.isArray(payload.sectors) ? payload.sectors.map((x) => clean(x, 120)).filter(Boolean) : [],
+    amount: clean(payload.amount, 160),
+    currency: clean(payload.currency, 24),
+    deadline: clean(payload.deadline, 80) || null,
+    deadlineText: clean(payload.deadlineText, 220),
+    applicationUrl: cleanUrl(payload.applicationUrl),
+    sourceUrl: cleanUrl(payload.sourceUrl),
+    sourceName: clean(payload.sourceName, 180),
+    language: clean(payload.language || "unknown", 20),
+    status: normalizeGrantStatus(payload.status),
+    reliabilityScore: clampInt(payload.reliabilityScore, 0, 100, 0),
+    verificationNotes: clean(payload.verificationNotes, 1200),
+    rawContent: clean(payload.rawContent, 18000),
+    extractedAt: clean(payload.extractedAt, 80),
+    lastCheckedAt: clean(payload.lastCheckedAt, 80),
+    createdAt: clean(payload.createdAt, 80),
+    updatedAt: clean(payload.updatedAt, 80),
+  });
+}
+
+function sourceFromPayload(payload = {}) {
+  if (!payload || payload.recordKind !== "source") return null;
+  return sourceRecord(payload);
+}
+
+function jobFromPayload(payload = {}) {
+  if (!payload || payload.recordKind !== "job") return null;
+  return {
+    id: payload.id,
+    status: clean(payload.status || "queued", 30),
+    query: clean(payload.query, 500),
+    params: payload.params || {},
+    result: payload.result || null,
+    error: clean(payload.error, 1000) || null,
+    createdAt: clean(payload.createdAt, 80),
+    startedAt: clean(payload.startedAt, 80) || null,
+    doneAt: clean(payload.doneAt, 80) || null,
+  };
+}
+
+function compactJobResult(result) {
+  if (!result || typeof result !== "object") return result || null;
+  return {
+    ...result,
+    results: Array.isArray(result.results)
+      ? result.results.map(({ rawContent, ...opp }) => opp)
+      : result.results,
+    skipped: Array.isArray(result.skipped) ? result.skipped.slice(0, 50) : result.skipped,
+  };
+}
+
+function qdrantVectorForOpportunity(opportunity = {}) {
+  return hashVector([
+    opportunity.title,
+    opportunity.summary,
+    opportunity.description,
+    opportunity.eligibility,
+    (opportunity.countries || []).join(" "),
+    (opportunity.sectors || []).join(" "),
+    opportunity.organization,
+    opportunity.sourceUrl,
+    opportunity.deadline,
+  ].filter(Boolean).join(" "));
+}
+
+function hashVector(text) {
+  const vector = new Array(VECTOR_SIZE).fill(0);
+  const tokens = String(text || "").toLowerCase().split(/[^a-z0-9\u00c0-\u017f]+/i).filter((x) => x.length >= 2);
+  for (const token of tokens) {
+    const hash = crypto.createHash("sha256").update(token).digest();
+    const idx = hash.readUInt16BE(0) % VECTOR_SIZE;
+    const sign = hash[2] % 2 === 0 ? 1 : -1;
+    vector[idx] += sign;
+  }
+  const norm = Math.sqrt(vector.reduce((sum, value) => sum + value * value, 0)) || 1;
+  return vector.map((value) => value / norm);
+}
+
+function isQdrantConfigured() {
+  return Boolean(process.env.QDRANT_URL);
 }
 
 async function readDb() {
@@ -758,6 +663,10 @@ function endOfDay(date) {
 function stableUuid(seed) {
   const hex = crypto.createHash("sha256").update(String(seed || crypto.randomUUID())).digest("hex");
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-a${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
+}
+
+function isUuid(value) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(value || ""));
 }
 
 function clampInt(value, min, max, fallback) {

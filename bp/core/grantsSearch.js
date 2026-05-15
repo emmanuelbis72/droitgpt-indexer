@@ -10,12 +10,11 @@ export async function searchWeb(query, { maxResults = 10 } = {}) {
   const q = clean(query, 500);
   if (!q) return [];
 
-  if (process.env.BRAVE_SEARCH_API_KEY) return searchBrave(q, maxResults);
-  if (process.env.SERPER_API_KEY) return searchSerper(q, maxResults);
-  if (process.env.TAVILY_API_KEY) return searchTavily(q, maxResults);
+  if (process.env.EXA_API_KEY) return searchExa(q, maxResults);
 
   const err = new Error("WEB_SEARCH_NOT_CONFIGURED");
   err.code = "WEB_SEARCH_NOT_CONFIGURED";
+  err.details = "EXA_API_KEY is required for live web search.";
   throw err;
 }
 
@@ -99,20 +98,26 @@ export async function extractOpportunityFromPage(url, { sourceName, seed = {}, d
   if (!sourceUrl) return null;
 
   let html = "";
+  let usedSearchExtract = false;
   try {
     html = await fetchText(sourceUrl);
   } catch (e) {
-    return verifyOpportunity({
-      title: seed.title || titleFromUrl(sourceUrl),
-      sourceUrl,
-      applicationUrl: sourceUrl,
-      sourceName,
-      type: defaults.type,
-      region: defaults.region,
-      status: "draft_review",
-      reliabilityScore: 30,
-      verificationNotes: `Contenu source inaccessible: ${String(e?.message || e)}`,
-    });
+    if (seed.rawText) {
+      html = String(seed.rawText || "");
+      usedSearchExtract = true;
+    } else {
+      return verifyOpportunity({
+        title: seed.title || titleFromUrl(sourceUrl),
+        sourceUrl,
+        applicationUrl: sourceUrl,
+        sourceName,
+        type: defaults.type,
+        region: defaults.region,
+        status: "draft_review",
+        reliabilityScore: 30,
+        verificationNotes: `Contenu source inaccessible: ${String(e?.message || e)}`,
+      });
+    }
   }
 
   const text = stripTags(html);
@@ -123,6 +128,10 @@ export async function extractOpportunityFromPage(url, { sourceName, seed = {}, d
     ...dropEmpty(ai),
     sourceUrl,
     applicationUrl: ai.applicationUrl || heuristic.applicationUrl || sourceUrl,
+    verificationNotes: [
+      usedSearchExtract ? "Texte extrait via Exa utilise car la page source bloque le fetch direct." : "",
+      ai.verificationNotes || heuristic.verificationNotes || "",
+    ].filter(Boolean).join(" "),
     rawContent: clean(text, 18000),
     extractedAt: new Date().toISOString(),
   };
@@ -178,42 +187,24 @@ function extractHeuristicOpportunity({ html, text, sourceUrl, sourceName, seed, 
   };
 }
 
-async function searchBrave(query, maxResults) {
-  const url = `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=${maxResults}`;
-  const json = await fetchJson(url, { headers: { "X-Subscription-Token": process.env.BRAVE_SEARCH_API_KEY } });
-  return (json?.web?.results || []).map((r) => ({
-    title: clean(r.title, 260),
-    url: cleanUrl(r.url),
-    snippet: clean(r.description, 700),
-    sourceName: hostLabel(r.url),
-  })).filter((r) => r.url);
-}
-
-async function searchSerper(query, maxResults) {
-  const json = await fetchJson("https://google.serper.dev/search", {
+async function searchExa(query, maxResults) {
+  const json = await fetchJson("https://api.exa.ai/search", {
     method: "POST",
-    headers: { "X-API-KEY": process.env.SERPER_API_KEY, "Content-Type": "application/json" },
-    body: JSON.stringify({ q: query, num: maxResults }),
-  });
-  return (json?.organic || []).map((r) => ({
-    title: clean(r.title, 260),
-    url: cleanUrl(r.link),
-    snippet: clean(r.snippet, 700),
-    sourceName: hostLabel(r.link),
-  })).filter((r) => r.url);
-}
-
-async function searchTavily(query, maxResults) {
-  const json = await fetchJson("https://api.tavily.com/search", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ api_key: process.env.TAVILY_API_KEY, query, max_results: maxResults }),
+    headers: { "Content-Type": "application/json", "x-api-key": process.env.EXA_API_KEY },
+    body: JSON.stringify({
+      query,
+      type: process.env.EXA_SEARCH_TYPE || "auto",
+      numResults: maxResults,
+      text: true,
+    }),
   });
   return (json?.results || []).map((r) => ({
     title: clean(r.title, 260),
     url: cleanUrl(r.url),
-    snippet: clean(r.content, 700),
+    snippet: clean(r.text || r.summary || "", 700),
     sourceName: hostLabel(r.url),
+    publishedDate: clean(r.publishedDate, 80),
+    rawText: clean(r.text || "", 12000),
   })).filter((r) => r.url);
 }
 
