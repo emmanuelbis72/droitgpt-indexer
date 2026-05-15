@@ -34,7 +34,8 @@ router.get("/health", (_req, res) => {
 
 router.get("/opportunities", async (req, res, next) => {
   try {
-    const data = await listOpportunities(req.query);
+    const filters = { ...req.query, status: req.query.status || "open" };
+    const data = await listOpportunities(filters);
     res.json({ ok: true, ...data });
   } catch (e) {
     next(e);
@@ -49,7 +50,7 @@ router.get("/opportunities/semantic", async (req, res, next) => {
 
     const semantic = await searchIndexedOpportunities(q, { limit });
     if (!semantic.ok) {
-      const fallback = await listOpportunities({ ...req.query, limit });
+      const fallback = await listOpportunities({ ...req.query, status: "open", limit });
       return res.json({ ok: true, semantic: false, reason: semantic.reason || semantic.error || "QDRANT_NOT_AVAILABLE", ...fallback });
     }
 
@@ -57,7 +58,7 @@ router.get("/opportunities/semantic", async (req, res, next) => {
     for (const hit of semantic.results || []) {
       const id = hit?.payload?.id;
       const opportunity = id ? await getOpportunity(id) : null;
-      if (opportunity && opportunity.status !== "expired" && opportunity.status !== "hidden") {
+      if (isCurrentOpenOpportunity(opportunity)) {
         rows.push({ ...opportunity, semanticScore: hit.score });
       }
     }
@@ -144,7 +145,8 @@ router.get("/jobs/:id/result", async (req, res, next) => {
     if (job.status !== "done") {
       return res.status(202).json({ ok: true, jobId: job.id, status: job.status, result: null, error: job.error || null });
     }
-    res.json({ ok: true, jobId: job.id, status: job.status, result: job.result, opportunities: job.result?.results || [] });
+    const opportunities = (job.result?.results || []).filter(isCurrentOpenOpportunity);
+    res.json({ ok: true, jobId: job.id, status: job.status, result: { ...(job.result || {}), results: opportunities, total: opportunities.length }, opportunities });
   } catch (e) {
     next(e);
   }
@@ -256,6 +258,12 @@ function clampInt(value, min, max, fallback) {
   const n = Number.parseInt(String(value ?? ""), 10);
   if (!Number.isFinite(n)) return fallback;
   return Math.max(min, Math.min(max, n));
+}
+
+function isCurrentOpenOpportunity(opportunity = {}) {
+  if (opportunity.status !== "open" || !opportunity.deadline) return false;
+  const deadline = new Date(opportunity.deadline);
+  return !Number.isNaN(deadline.getTime()) && deadline.getTime() >= Date.now();
 }
 
 export default router;

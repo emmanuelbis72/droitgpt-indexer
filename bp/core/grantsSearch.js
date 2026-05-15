@@ -45,9 +45,14 @@ export async function searchAndIndexOpportunities(params = {}) {
   }
 
   const saved = [];
+  const skippedInactive = [];
   for (const raw of extracted) {
     const verified = verifyOpportunity(raw);
     if (!verified.sourceUrl) continue;
+    if (!isCurrentOpenOpportunity(verified)) {
+      skippedInactive.push({ title: verified.title, sourceUrl: verified.sourceUrl, status: verified.status, deadline: verified.deadline });
+      continue;
+    }
     const write = await saveOpportunity(verified);
     if (write.saved) {
       saved.push(write.saved);
@@ -56,7 +61,7 @@ export async function searchAndIndexOpportunities(params = {}) {
     }
   }
 
-  return { query, warning, results: saved, total: saved.length };
+  return { query, warning, results: saved, total: saved.length, skippedInactive: skippedInactive.length };
 }
 
 export async function crawlConfiguredSources(params = {}) {
@@ -88,9 +93,11 @@ export async function crawlConfiguredSources(params = {}) {
   }
 
   const verified = collected.map(verifyOpportunity).filter((opp) => opp.sourceUrl);
-  const write = await saveOpportunities(verified);
+  const current = verified.filter(isCurrentOpenOpportunity);
+  const skippedInactive = verified.length - current.length;
+  const write = await saveOpportunities(current);
   for (const opp of write.saved) await indexOpportunity(opp);
-  return { sourceStatus, results: write.saved, skipped: write.skipped, total: write.saved.length };
+  return { sourceStatus, results: write.saved, skipped: write.skipped, skippedInactive, total: write.saved.length };
 }
 
 export async function extractOpportunityFromPage(url, { sourceName, seed = {}, defaults = {} } = {}) {
@@ -209,12 +216,15 @@ async function searchExa(query, maxResults) {
 }
 
 function buildSearchQuery(params = {}) {
+  const currentYear = new Date().getFullYear();
   return [
     params.query,
     params.country,
     params.region,
     ...(Array.isArray(params.sectors) ? params.sectors : [params.sector]).filter(Boolean),
     ...(Array.isArray(params.types) ? params.types : [params.type]).filter(Boolean),
+    currentYear,
+    "deadline open apply now currently accepting applications",
     params.language === "fr" ? "appel a projets subvention bourse financement" : "grant funding scholarship accelerator",
   ].filter(Boolean).join(" ");
 }
@@ -389,6 +399,10 @@ function dedupeByUrl(items) {
     out.push({ ...item, url: key });
   }
   return out;
+}
+
+function isCurrentOpenOpportunity(opportunity = {}) {
+  return opportunity.status === "open" && Boolean(opportunity.deadline) && new Date(opportunity.deadline).getTime() >= Date.now();
 }
 
 function dropEmpty(obj = {}) {
