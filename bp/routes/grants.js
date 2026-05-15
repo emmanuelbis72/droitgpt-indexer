@@ -34,9 +34,10 @@ router.get("/health", (_req, res) => {
 
 router.get("/opportunities", async (req, res, next) => {
   try {
-    const filters = { ...req.query, status: req.query.status || "open" };
-    const data = await listOpportunities(filters);
-    res.json({ ok: true, ...data });
+    const data = await listOpportunities(req.query);
+    if (req.query.status) return res.json({ ok: true, ...data });
+    const rows = data.rows.filter(isCurrentOpportunity);
+    res.json({ ok: true, ...data, rows, total: rows.length });
   } catch (e) {
     next(e);
   }
@@ -50,7 +51,9 @@ router.get("/opportunities/semantic", async (req, res, next) => {
 
     const semantic = await searchIndexedOpportunities(q, { limit });
     if (!semantic.ok) {
-      const fallback = await listOpportunities({ ...req.query, status: "open", limit });
+      const fallback = await listOpportunities({ ...req.query, limit });
+      fallback.rows = fallback.rows.filter(isCurrentOpportunity);
+      fallback.total = fallback.rows.length;
       return res.json({ ok: true, semantic: false, reason: semantic.reason || semantic.error || "QDRANT_NOT_AVAILABLE", ...fallback });
     }
 
@@ -58,7 +61,7 @@ router.get("/opportunities/semantic", async (req, res, next) => {
     for (const hit of semantic.results || []) {
       const id = hit?.payload?.id;
       const opportunity = id ? await getOpportunity(id) : null;
-      if (isCurrentOpenOpportunity(opportunity)) {
+      if (isCurrentOpportunity(opportunity)) {
         rows.push({ ...opportunity, semanticScore: hit.score });
       }
     }
@@ -145,7 +148,7 @@ router.get("/jobs/:id/result", async (req, res, next) => {
     if (job.status !== "done") {
       return res.status(202).json({ ok: true, jobId: job.id, status: job.status, result: null, error: job.error || null });
     }
-    const opportunities = (job.result?.results || []).filter(isCurrentOpenOpportunity);
+    const opportunities = (job.result?.results || []).filter(isCurrentOpportunity);
     res.json({ ok: true, jobId: job.id, status: job.status, result: { ...(job.result || {}), results: opportunities, total: opportunities.length }, opportunities });
   } catch (e) {
     next(e);
@@ -225,6 +228,7 @@ function normalizeSearchBody(body = {}) {
     types: normalizeList(body.types || body.type),
     language: cleanText(body.language || "fr", 20),
     maxResults: clampInt(body.maxResults, 1, 25, 12),
+    sites: normalizeSites(body.sites || body.customSites || body.sourceUrls || body.sources),
   };
 }
 
@@ -250,6 +254,15 @@ function normalizeList(value) {
     .slice(0, 20);
 }
 
+function normalizeSites(value) {
+  if (Array.isArray(value)) return value.slice(0, 30);
+  return String(value || "")
+    .split(/\r?\n/)
+    .map((v) => cleanText(v, 900))
+    .filter(Boolean)
+    .slice(0, 30);
+}
+
 function cleanText(value, max) {
   return String(value || "").replace(/\s+/g, " ").trim().slice(0, max);
 }
@@ -260,8 +273,9 @@ function clampInt(value, min, max, fallback) {
   return Math.max(min, Math.min(max, n));
 }
 
-function isCurrentOpenOpportunity(opportunity = {}) {
-  if (opportunity.status !== "open" || !opportunity.deadline) return false;
+function isCurrentOpportunity(opportunity = {}) {
+  if (opportunity.status === "expired" || opportunity.status === "hidden") return false;
+  if (!opportunity.deadline) return true;
   const deadline = new Date(opportunity.deadline);
   return !Number.isNaN(deadline.getTime()) && deadline.getTime() >= Date.now();
 }

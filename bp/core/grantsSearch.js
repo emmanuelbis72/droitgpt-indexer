@@ -6,11 +6,11 @@ import { clean, cleanUrl, normalizeArray, verifyOpportunity } from "./grantsVeri
 
 const USER_AGENT = process.env.GRANTS_DISCOVERY_USER_AGENT || "DroitGPT-Grants/1.0 (+https://www.droitgpt.com)";
 
-export async function searchWeb(query, { maxResults = 10 } = {}) {
+export async function searchWeb(query, { maxResults = 10, includeDomains = [] } = {}) {
   const q = clean(query, 500);
   if (!q) return [];
 
-  if (process.env.EXA_API_KEY) return searchExa(q, maxResults);
+  if (process.env.EXA_API_KEY) return searchExa(q, maxResults, { includeDomains });
 
   const err = new Error("WEB_SEARCH_NOT_CONFIGURED");
   err.code = "WEB_SEARCH_NOT_CONFIGURED";
@@ -21,16 +21,21 @@ export async function searchWeb(query, { maxResults = 10 } = {}) {
 export async function searchAndIndexOpportunities(params = {}) {
   const maxResults = clampInt(params.maxResults, 1, 25, 12);
   const query = buildSearchQuery(params);
+  const customSites = normalizeCustomSites(params.sites || params.customSites || params.sourceUrls || params.sources);
   console.log("[GRANTS] search started", { query, maxResults });
 
   let searchResults = [];
   let warning = null;
   try {
-    searchResults = await searchWeb(query, { maxResults });
+    searchResults = await searchWeb(query, { maxResults, includeDomains: customSites.domains });
   } catch (e) {
     if (e.code !== "WEB_SEARCH_NOT_CONFIGURED") throw e;
     warning = "WEB_SEARCH_NOT_CONFIGURED";
     searchResults = await searchConfiguredSourcesIndex({ ...params, query, maxResults });
+  }
+  if (customSites.urls.length) {
+    const customLinks = await searchCustomSitesIndex(customSites.urls, params);
+    searchResults = dedupeByUrl([...customLinks, ...searchResults]);
   }
 
   const extracted = [];
@@ -49,7 +54,7 @@ export async function searchAndIndexOpportunities(params = {}) {
   for (const raw of extracted) {
     const verified = verifyOpportunity(raw);
     if (!verified.sourceUrl) continue;
-    if (!isCurrentOpenOpportunity(verified)) {
+    if (!isCurrentOpportunity(verified)) {
       skippedInactive.push({ title: verified.title, sourceUrl: verified.sourceUrl, status: verified.status, deadline: verified.deadline });
       continue;
     }
@@ -61,7 +66,7 @@ export async function searchAndIndexOpportunities(params = {}) {
     }
   }
 
-  return { query, warning, results: saved, total: saved.length, skippedInactive: skippedInactive.length };
+  return { query, warning, results: saved, total: saved.length, skippedInactive: skippedInactive.length, customSites: customSites.urls.length };
 }
 
 export async function crawlConfiguredSources(params = {}) {
@@ -93,7 +98,7 @@ export async function crawlConfiguredSources(params = {}) {
   }
 
   const verified = collected.map(verifyOpportunity).filter((opp) => opp.sourceUrl);
-  const current = verified.filter(isCurrentOpenOpportunity);
+  const current = verified.filter(isCurrentOpportunity);
   const skippedInactive = verified.length - current.length;
   const write = await saveOpportunities(current);
   for (const opp of write.saved) await indexOpportunity(opp);
@@ -159,6 +164,24 @@ async function searchConfiguredSourcesIndex(params = {}) {
   return out.slice(0, clampInt(params.maxResults, 1, 25, 10));
 }
 
+async function searchCustomSitesIndex(sites = [], params = {}) {
+  const out = [];
+  for (const site of sites.slice(0, 12)) {
+    try {
+      const links = await extractLinksFromSource({
+        name: site.name || hostLabel(site.url),
+        url: site.url,
+        baseUrl: site.url,
+      }, params);
+      out.push(...links);
+    } catch (e) {
+      console.warn("[GRANTS] error", { customSite: site.url, error: String(e?.message || e) });
+      out.push({ title: site.name || titleFromUrl(site.url), url: site.url, sourceName: site.name || hostLabel(site.url) });
+    }
+  }
+  return dedupeByUrl(out);
+}
+
 async function extractLinksFromSource(source, params = {}) {
   const html = await fetchText(source.url || source.baseUrl);
   const links = extractLinks(html, source.url || source.baseUrl);
@@ -194,16 +217,24 @@ function extractHeuristicOpportunity({ html, text, sourceUrl, sourceName, seed, 
   };
 }
 
-async function searchExa(query, maxResults) {
+async function searchExa(query, maxResults, { includeDomains = [] } = {}) {
+  const body = {
+    query,
+    type: process.env.EXA_SEARCH_TYPE || "auto",
+    numResults: maxResults,
+    contents: { text: { maxCharacters: 12000 } },
+    additionalQueries: [
+      `${query} deadline apply now`,
+      `${query} currently accepting applications`,
+      `${query} date limite candidature ouverte`,
+    ],
+  };
+  if (includeDomains.length) body.includeDomains = includeDomains.slice(0, 1200);
+
   const json = await fetchJson("https://api.exa.ai/search", {
     method: "POST",
     headers: { "Content-Type": "application/json", "x-api-key": process.env.EXA_API_KEY },
-    body: JSON.stringify({
-      query,
-      type: process.env.EXA_SEARCH_TYPE || "auto",
-      numResults: maxResults,
-      text: true,
-    }),
+    body: JSON.stringify(body),
   });
   return (json?.results || []).map((r) => ({
     title: clean(r.title, 260),
@@ -227,6 +258,22 @@ function buildSearchQuery(params = {}) {
     "deadline open apply now currently accepting applications",
     params.language === "fr" ? "appel a projets subvention bourse financement" : "grant funding scholarship accelerator",
   ].filter(Boolean).join(" ");
+}
+
+function normalizeCustomSites(value) {
+  const raw = Array.isArray(value) ? value : String(value || "").split(/\r?\n|[,;]/);
+  const urls = raw
+    .map((item) => {
+      if (item && typeof item === "object") {
+        return { name: clean(item.name, 180), url: cleanUrl(item.url || item.baseUrl) };
+      }
+      const line = clean(item, 900);
+      if (!line) return null;
+      const [maybeName, maybeUrl] = line.includes("|") ? line.split("|").map((x) => x.trim()) : ["", line];
+      return { name: clean(maybeName, 180), url: cleanUrl(maybeUrl || maybeName) };
+    })
+    .filter((site) => site?.url);
+  return { urls, domains: [...new Set(urls.map((site) => domainFromUrl(site.url)).filter(Boolean))] };
 }
 
 async function fetchJson(url, options = {}) {
@@ -401,8 +448,11 @@ function dedupeByUrl(items) {
   return out;
 }
 
-function isCurrentOpenOpportunity(opportunity = {}) {
-  return opportunity.status === "open" && Boolean(opportunity.deadline) && new Date(opportunity.deadline).getTime() >= Date.now();
+function isCurrentOpportunity(opportunity = {}) {
+  if (opportunity.status === "expired" || opportunity.status === "hidden") return false;
+  if (!opportunity.deadline) return true;
+  const deadline = new Date(opportunity.deadline);
+  return !Number.isNaN(deadline.getTime()) && deadline.getTime() >= Date.now();
 }
 
 function dropEmpty(obj = {}) {
@@ -417,6 +467,14 @@ function dropEmpty(obj = {}) {
 
 function tokenize(text) {
   return String(text || "").toLowerCase().split(/[^a-z0-9\u00c0-\u017f]+/i).filter((x) => x.length >= 3).slice(0, 20);
+}
+
+function domainFromUrl(url) {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return "";
+  }
 }
 
 function clampInt(value, min, max, fallback) {
