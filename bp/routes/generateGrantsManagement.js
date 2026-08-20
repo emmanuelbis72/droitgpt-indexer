@@ -3,14 +3,14 @@ import express from "express";
 import { generateGrantsManagementWorkspace, buildDemoGrantsWorkspace } from "../core/grantsOrchestrator.js";
 import { writeGrantsManagementPdf } from "../core/grantsPdfAssembler.js";
 import { normalizeLang, safeStr } from "../core/sanitize.js";
-import { makeJobId, nowMs, putJob, getJob, patchJob } from "../core/jobStore.js";
+import { makeJobId, getJob } from "../core/jobStore.js";
+import { enqueueGenerationJob } from "../core/generationQueue.js";
 import grantsDiscoveryRoute from "./grantsDiscovery.js";
 
 const router = express.Router();
 
 const JOB_TTL_MS = Number(process.env.GRANTS_JOB_TTL_MS || 1000 * 60 * 60);
 const JOB_NAMESPACE = "grants";
-let generationInFlight = false;
 
 router.use("/", grantsDiscoveryRoute);
 
@@ -74,96 +74,84 @@ router.get("/jobs/:id/result", async (req, res) => {
 });
 
 router.post("/", async (req, res) => {
-  const wantAsync = String(req.query?.async || "") === "1";
+  try {
+    const wantAsync = String(req.query?.async || "") === "1";
+    const lang = normalizeLang(req.body?.lang || "fr");
+    const output = String(req.body?.output || "pdf").toLowerCase() === "json" ? "json" : "pdf";
+    const ctx = normalizeGrantsContext(req.body || {});
+    const title =
+      lang === "en"
+        ? `${ctx.projectName} - AI Assisted Grants Management`
+        : `${ctx.projectName} - Gestion de subventions assistee par IA`;
 
-  if (generationInFlight && !wantAsync) {
-    return res.status(429).json({
-      error: "BUSY",
-      details: "Une generation grants est deja en cours sur le serveur. Reessaie dans quelques minutes.",
-    });
-  }
+    if (req.body?.test === true) {
+      const workspace = buildDemoGrantsWorkspace(ctx);
+      if (output === "json") return res.json({ ok: true, title, lang, ctx, workspace });
+      return writeGrantsManagementPdf({ res, title, ctx, workspace });
+    }
 
-  const lang = normalizeLang(req.body?.lang || "fr");
-  const output = String(req.body?.output || "pdf").toLowerCase() === "json" ? "json" : "pdf";
-  const ctx = normalizeGrantsContext(req.body || {});
-  const title =
-    lang === "en"
-      ? `${ctx.projectName} - AI Assisted Grants Management`
-      : `${ctx.projectName} - Gestion de subventions assistee par IA`;
+    if (!ctx.projectName || !ctx.goal) {
+      return res.status(400).json({
+        error: "INVALID_INPUT",
+        details: "Champs requis: projectName et goal. Ajoute donor/callText pour une analyse plus precise.",
+      });
+    }
 
-  if (req.body?.test === true) {
-    const workspace = buildDemoGrantsWorkspace(ctx);
-    if (output === "json") return res.json({ ok: true, title, lang, ctx, workspace });
-    return writeGrantsManagementPdf({ res, title, ctx, workspace });
-  }
-
-  if (!ctx.projectName || !ctx.goal) {
-    return res.status(400).json({
-      error: "INVALID_INPUT",
-      details: "Champs requis: projectName et goal. Ajoute donor/callText pour une analyse plus precise.",
-    });
-  }
-
-  if (wantAsync) {
     const id = makeJobId();
-    await putJob(
-      { id, status: "queued", createdAt: nowMs(), error: null, result: null },
-      { ttlMs: JOB_TTL_MS, namespace: JOB_NAMESPACE }
-    );
-
-    (async () => {
-      if (generationInFlight) {
-        await patchJob(
-          id,
-          { status: "rejected", error: "GENERATION_IN_FLIGHT", doneAt: nowMs() },
-          { ttlMs: JOB_TTL_MS, namespace: JOB_NAMESPACE }
-        );
-        return;
-      }
-
-      generationInFlight = true;
-      await patchJob(id, { status: "running", startedAt: nowMs() }, { ttlMs: JOB_TTL_MS, namespace: JOB_NAMESPACE });
-      try {
-        const workspace = await generateGrantsManagementWorkspace({ lang, ctx });
-        await patchJob(
-          id,
-          { status: "done", doneAt: nowMs(), result: { title, lang, ctx, workspace } },
-          { ttlMs: JOB_TTL_MS, namespace: JOB_NAMESPACE }
-        );
-      } catch (e) {
-        await patchJob(
-          id,
-          { status: "error", error: String(e?.message || e), doneAt: nowMs() },
-          { ttlMs: JOB_TTL_MS, namespace: JOB_NAMESPACE }
-        );
-      } finally {
-        generationInFlight = false;
-      }
-    })();
-
-    return res.status(202).json({
-      ok: true,
+    const queued = await enqueueGenerationJob({
+      req,
       jobId: id,
-      status: "queued",
-      next: {
-        status: `/generate-grants-management/jobs/${id}`,
-        result: `/generate-grants-management/jobs/${id}/result`,
+      namespace: JOB_NAMESPACE,
+      ttlMs: JOB_TTL_MS,
+      meta: { documentType: "grants_management" },
+      task: async () => {
+        const workspace = await generateGrantsManagementWorkspace({ lang, ctx });
+        return { title, lang, ctx, workspace };
       },
     });
-  }
 
-  generationInFlight = true;
-  try {
-    const workspace = await generateGrantsManagementWorkspace({ lang, ctx });
-    if (output === "json") return res.json({ ok: true, title, lang, ctx, workspace });
-    return writeGrantsManagementPdf({ res, title, ctx, workspace });
+    if (!queued.accepted) {
+      return res.status(queued.statusCode || 429).json(queued.body);
+    }
+
+    if (wantAsync) {
+      return res.status(202).json({
+        ok: true,
+        jobId: id,
+        status: "queued",
+        queue: queued.queue,
+        next: {
+          status: `/generate-grants-management/jobs/${id}`,
+          result: `/generate-grants-management/jobs/${id}/result`,
+        },
+      });
+    }
+
+    const doneJob = await queued.completion;
+    const result = doneJob?.result;
+    if (!result?.workspace) return res.status(500).json({ error: "JOB_RESULT_MISSING" });
+
+    if (output === "json") {
+      return res.json({
+        ok: true,
+        title: result.title,
+        lang,
+        ctx: result.ctx,
+        workspace: result.workspace,
+      });
+    }
+
+    return writeGrantsManagementPdf({
+      res,
+      title: result.title,
+      ctx: result.ctx,
+      workspace: result.workspace,
+    });
   } catch (e) {
     return res.status(500).json({
       error: "GRANTS_GENERATION_FAILED",
       details: String(e?.message || e),
     });
-  } finally {
-    generationInFlight = false;
   }
 });
 

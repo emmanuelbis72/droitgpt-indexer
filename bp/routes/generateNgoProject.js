@@ -3,16 +3,16 @@ import express from "express";
 import { generateNgoProjectPremium } from "../core/ngoOrchestrator.js";
 import { writeNgoProjectPdfPremium } from "../core/ngoPdfAssembler.js";
 import { normalizeLang, safeStr } from "../core/sanitize.js";
-import { makeJobId, nowMs, putJob, getJob, patchJob } from "../core/jobStore.js";
+import { makeJobId, getJob } from "../core/jobStore.js";
+import { enqueueGenerationJob } from "../core/generationQueue.js";
 
 const router = express.Router();
 
 /* =========================================================
-   ✅ JOB MODE + Anti-concurrency lock (same pattern as BP)
+   ✅ JOB MODE + shared concurrent queue
 ========================================================= */
 const JOB_TTL_MS = Number(process.env.NGO_JOB_TTL_MS || 1000 * 60 * 60); // 1h
 const JOB_NAMESPACE = "ngo";
-let generationInFlight = false;
 
 router.get("/premium", (_req, res) => {
   res.json({
@@ -96,135 +96,97 @@ router.get("/premium/jobs/:id/result", async (req, res) => {
  * Query: ?async=1 (optional)
  */
 router.post("/premium", async (req, res) => {
-  const wantAsync = String(req.query?.async || "") === "1";
+  try {
+    const wantAsync = String(req.query?.async || "") === "1";
 
-  // ✅ Prevent parallel generations on one Render instance
-  if (generationInFlight && !wantAsync) {
-    return res.status(429).json({
-      error: "BUSY",
-      details: "Une génération ONG est déjà en cours sur le serveur. Réessaie dans quelques minutes.",
-    });
-  }
+    const lang = normalizeLang(req.body?.lang || "fr");
+    const lite = Boolean(req.body?.lite);
 
-  const lang = normalizeLang(req.body?.lang || "fr");
-  const lite = Boolean(req.body?.lite);
+    const ctx = {
+      projectTitle: safeStr(req.body?.ctx?.projectTitle, 160),
+      organization: safeStr(req.body?.ctx?.organization, 160),
+      country: safeStr(req.body?.ctx?.country || "RDC", 80),
+      provinceCity: safeStr(req.body?.ctx?.provinceCity, 120),
+      donorStyle: safeStr(req.body?.ctx?.donorStyle, 40),
+      sector: safeStr(req.body?.ctx?.sector, 120),
+      problem: safeStr(req.body?.ctx?.problem, 3500),
+      targetGroups: safeStr(req.body?.ctx?.targetGroups, 2500),
+      overallGoal: safeStr(req.body?.ctx?.overallGoal, 1200),
+      specificObjectives: safeStr(req.body?.ctx?.specificObjectives, 1800),
+      durationMonths: Number(req.body?.ctx?.durationMonths || 0) || null,
+      budgetTotal: safeStr(req.body?.ctx?.budgetTotal, 60),
+      startDate: safeStr(req.body?.ctx?.startDate, 40),
+      assumptions: safeStr(req.body?.ctx?.assumptions, 2500),
+      risks: safeStr(req.body?.ctx?.risks, 2500),
+      partners: safeStr(req.body?.ctx?.partners, 1500),
+      implementationApproach: safeStr(req.body?.ctx?.implementationApproach, 2000),
+      sustainability: safeStr(req.body?.ctx?.sustainability, 2000),
+      safeguarding: safeStr(req.body?.ctx?.safeguarding, 1200),
+    };
 
-  const ctx = {
-    projectTitle: safeStr(req.body?.ctx?.projectTitle, 160),
-    organization: safeStr(req.body?.ctx?.organization, 160),
-    country: safeStr(req.body?.ctx?.country || "RDC", 80),
-    provinceCity: safeStr(req.body?.ctx?.provinceCity, 120),
-    donorStyle: safeStr(req.body?.ctx?.donorStyle, 40),
-    sector: safeStr(req.body?.ctx?.sector, 120),
-    problem: safeStr(req.body?.ctx?.problem, 3500),
-    targetGroups: safeStr(req.body?.ctx?.targetGroups, 2500),
-    overallGoal: safeStr(req.body?.ctx?.overallGoal, 1200),
-    specificObjectives: safeStr(req.body?.ctx?.specificObjectives, 1800),
-    durationMonths: Number(req.body?.ctx?.durationMonths || 0) || null,
-    budgetTotal: safeStr(req.body?.ctx?.budgetTotal, 60),
-    startDate: safeStr(req.body?.ctx?.startDate, 40),
-    assumptions: safeStr(req.body?.ctx?.assumptions, 2500),
-    risks: safeStr(req.body?.ctx?.risks, 2500),
-    partners: safeStr(req.body?.ctx?.partners, 1500),
-    implementationApproach: safeStr(req.body?.ctx?.implementationApproach, 2000),
-    sustainability: safeStr(req.body?.ctx?.sustainability, 2000),
-    safeguarding: safeStr(req.body?.ctx?.safeguarding, 1200),
-  };
+    if (!ctx.projectTitle || !ctx.organization) {
+      return res.status(400).json({
+        error: "INVALID_INPUT",
+        details: "Champs requis: ctx.projectTitle et ctx.organization.",
+      });
+    }
 
-  if (!ctx.projectTitle || !ctx.organization) {
-    return res.status(400).json({
-      error: "INVALID_INPUT",
-      details: "Champs requis: ctx.projectTitle et ctx.organization.",
-    });
-  }
+    const title =
+      lang === "en"
+        ? `${ctx.projectTitle} — NGO Project Proposal (Premium)`
+        : `${ctx.projectTitle} — Projet ONG (Premium)`;
 
-  const title =
-    lang === "en"
-      ? `${ctx.projectTitle} — NGO Project Proposal (Premium)`
-      : `${ctx.projectTitle} — Projet ONG (Premium)`;
-
-  // ✅ JOB mode
-  if (wantAsync) {
     const id = makeJobId();
-    await putJob(
-      { id, status: "queued", createdAt: nowMs(), error: null, result: null },
-      { ttlMs: JOB_TTL_MS, namespace: JOB_NAMESPACE }
-    );
-
-    (async () => {
-      const j = await getJob(id, { namespace: JOB_NAMESPACE });
-      if (!j) return;
-
-      if (generationInFlight) {
-        await patchJob(
-          id,
-          { status: "rejected", error: "GENERATION_IN_FLIGHT", doneAt: nowMs() },
-          { ttlMs: JOB_TTL_MS, namespace: JOB_NAMESPACE }
-        );
-        return;
-      }
-
-      generationInFlight = true;
-      await patchJob(
-        id,
-        { status: "running", startedAt: nowMs() },
-        { ttlMs: JOB_TTL_MS, namespace: JOB_NAMESPACE }
-      );
-
-      try {
-        const result = await generateNgoProjectPremium({ lang, ctx, lite });
-        await patchJob(
-          id,
-          {
-            status: "done",
-            result: {
-              title,
-              ctx,
-              sections: result?.sections || [],
-            },
-            doneAt: nowMs(),
-          },
-          { ttlMs: JOB_TTL_MS, namespace: JOB_NAMESPACE }
-        );
-      } catch (e) {
-        console.error("[NGO][JOB] generation failed", { msg: String(e?.message || e), stack: e?.stack });
-        await patchJob(
-          id,
-          { status: "error", error: String(e?.message || e), doneAt: nowMs() },
-          { ttlMs: JOB_TTL_MS, namespace: JOB_NAMESPACE }
-        );
-      } finally {
-        generationInFlight = false;
-      }
-    })();
-
-    return res.status(202).json({
-      ok: true,
+    const queued = await enqueueGenerationJob({
+      req,
       jobId: id,
-      status: "queued",
-      next: {
-        status: `/generate-ngo-project/premium/jobs/${id}`,
-        result: `/generate-ngo-project/premium/jobs/${id}/result`,
+      namespace: JOB_NAMESPACE,
+      ttlMs: JOB_TTL_MS,
+      meta: { documentType: "ngo_project" },
+      task: async () => {
+        const result = await generateNgoProjectPremium({ lang, ctx, lite });
+        return {
+          title,
+          ctx,
+          sections: result?.sections || [],
+        };
       },
     });
-  }
 
-  generationInFlight = true;
-  try {
-    const result = await generateNgoProjectPremium({ lang, ctx, lite });
+    if (!queued.accepted) {
+      return res.status(queued.statusCode || 429).json(queued.body);
+    }
+
+    // ✅ JOB mode
+    if (wantAsync) {
+      return res.status(202).json({
+        ok: true,
+        jobId: id,
+        status: "queued",
+        queue: queued.queue,
+        next: {
+          status: `/generate-ngo-project/premium/jobs/${id}`,
+          result: `/generate-ngo-project/premium/jobs/${id}/result`,
+        },
+      });
+    }
+
+    const doneJob = await queued.completion;
+    const result = doneJob?.result;
+    if (!result?.sections) return res.status(500).json({ error: "JOB_RESULT_MISSING" });
+
     return writeNgoProjectPdfPremium({
       res,
-      title,
-      ctx,
-      sections: result?.sections || [],
+      title: result.title,
+      ctx: result.ctx,
+      sections: result.sections,
     });
   } catch (e) {
+    console.error("[NGO] generation failed", { msg: String(e?.message || e), stack: e?.stack });
     return res.status(500).json({
       error: "NGO_GENERATION_FAILED",
       details: String(e?.message || e),
     });
-  } finally {
-    generationInFlight = false;
   }
 });
 

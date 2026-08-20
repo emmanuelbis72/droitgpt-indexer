@@ -5,7 +5,8 @@ import multer from "multer";
 import path from "path";
 import { generateBusinessPlanPremium } from "../core/orchestrator.js";
 import { writeBusinessPlanPdfPremium } from "../core/pdfAssembler.js";
-import { makeJobId, nowMs, putJob, getJob, patchJob } from "../core/jobStore.js";
+import { makeJobId, getJob } from "../core/jobStore.js";
+import { enqueueGenerationJob } from "../core/generationQueue.js";
 import {
   normalizeLang,
   normalizeDocType,
@@ -16,14 +17,13 @@ import {
 const router = express.Router();
 
 /* =========================================================
-   ✅ JOB MODE (optional) + Anti-concurrency lock
-   Why: prevents browser timeout/veille AND prevents parallel generations
-   that make a 11 min run become 17+ min on small Render instances.
+   ✅ JOB MODE (optional) + shared concurrent queue
+   Why: avoids browser timeouts and allows several users to generate
+   documents at the same time, while blocking double-generation per user.
 ========================================================= */
 
 const JOB_TTL_MS = Number(process.env.BP_JOB_TTL_MS || 1000 * 60 * 60); // 1h
 const JOB_NAMESPACE = "bp";
-let generationInFlight = false; // per-instance lock (Render)
 
 router.get("/premium/jobs/:id", async (req, res) => {
   const id = String(req.params.id || "");
@@ -161,16 +161,6 @@ router.post("/premium", async (req, res) => {
 
     const wantAsync = String(req.query?.async || "") === "1";
 
-    // ✅ Prevent parallel generations on a single Render instance
-    // Parallel runs are the #1 reason a 11 min generation becomes 17+ min.
-    if (generationInFlight) {
-      return res.status(429).json({
-        error: "BUSY",
-        details:
-          "Une génération est déjà en cours sur le serveur. Réessaie dans quelques minutes.",
-      });
-    }
-
     // ✅ mode test instantané (debug)
     if (b?.test === true) {
       return res.json({ ok: true, message: "✅ Route premium OK (test mode)" });
@@ -207,92 +197,56 @@ router.post("/premium", async (req, res) => {
     const output = String(b.output || "pdf").toLowerCase();
     const lite = Boolean(b.lite);
 
-    // ✅ JOB mode: return quickly with jobId, run generation in background
-    if (wantAsync) {
-      const jobId = makeJobId();
-      await putJob(
-        { id: jobId, status: "queued", createdAt: nowMs(), error: null, result: null },
-        { ttlMs: JOB_TTL_MS, namespace: JOB_NAMESPACE }
-      );
-
-      // IMPORTANT: set lock BEFORE replying to avoid race conditions
-      generationInFlight = true;
-
-      res.status(202).json({ ok: true, jobId });
-
-      // background run
-      (async () => {
-        const j = await getJob(jobId, { namespace: JOB_NAMESPACE });
-        if (!j) {
-          generationInFlight = false;
-          return;
-        }
-
-        await patchJob(
-          jobId,
-          { status: "running", startedAt: nowMs() },
-          { ttlMs: JOB_TTL_MS, namespace: JOB_NAMESPACE }
-        );
-
-        try {
-          const { sections } = await generateBusinessPlanPremium({ lang, ctx, lite });
-          await patchJob(
-            jobId,
-            {
-              result: { title, lang, ctx, lite, sections },
-              status: "done",
-              doneAt: nowMs(),
-            },
-            { ttlMs: JOB_TTL_MS, namespace: JOB_NAMESPACE }
-          );
-        } catch (e) {
-          await patchJob(
-            jobId,
-            { status: "error", error: String(e?.message || e), doneAt: nowMs() },
-            { ttlMs: JOB_TTL_MS, namespace: JOB_NAMESPACE }
-          );
-        } finally {
-          generationInFlight = false;
-        }
-      })();
-
-      return;
-    }
-
-    // ✅ Sync mode (legacy)
-    generationInFlight = true;
-
-    // Best-effort stop if client disconnects
-    let clientClosed = false;
-    req.on("close", () => {
-      clientClosed = true;
+    const jobId = makeJobId();
+    const queued = await enqueueGenerationJob({
+      req,
+      jobId,
+      namespace: JOB_NAMESPACE,
+      ttlMs: JOB_TTL_MS,
+      meta: { documentType: "businessplan" },
+      task: async () => {
+        const { sections, fullText } = await generateBusinessPlanPremium({ lang, ctx, lite });
+        return { title, lang, ctx, lite, sections, fullText };
+      },
     });
 
-    const { sections, fullText } = await generateBusinessPlanPremium({ lang, ctx, lite });
+    if (!queued.accepted) {
+      return res.status(queued.statusCode || 429).json(queued.body);
+    }
 
-    if (clientClosed) {
-      generationInFlight = false;
+    // ✅ JOB mode: return quickly with jobId, run generation in queue
+    if (wantAsync) {
+      res.status(202).json({
+        ok: true,
+        jobId,
+        status: "queued",
+        queue: queued.queue,
+        next: {
+          status: `/generate-business-plan/premium/jobs/${jobId}`,
+          result: `/generate-business-plan/premium/jobs/${jobId}/result`,
+        },
+      });
       return;
     }
 
+    // ✅ Sync mode (legacy): still goes through the same queue.
+    const doneJob = await queued.completion;
+    const result = doneJob?.result;
+    if (!result?.sections) return res.status(500).json({ error: "JOB_RESULT_MISSING" });
+
     if (output === "json") {
-      generationInFlight = false;
-      return res.json({ title, lang, ctx, lite, sections, fullText });
+      return res.json(result);
     }
 
     // ✅ PDF Premium (TOC, pages, tableaux Canvas/SWOT/Finances)
-    // Ensure lock is released when stream finishes
-    res.on("finish", () => {
-      generationInFlight = false;
+    return writeBusinessPlanPdfPremium({
+      res,
+      title: result.title,
+      ctx: result.ctx,
+      sections: result.sections,
     });
-    res.on("close", () => {
-      generationInFlight = false;
-    });
-
-    return writeBusinessPlanPdfPremium({ res, title, ctx, sections });
   } catch (e) {
     console.error("❌ /generate-business-plan/premium error:", e);
-    generationInFlight = false;
     return res.status(500).json({
       error: "Erreur serveur",
       details: String(e?.message || e),
@@ -367,19 +321,38 @@ router.post("/premium/rewrite", upload.single("file"), async (req, res) => {
         ? `${safeName} — Business Plan (Premium, Revised)`
         : `${safeName} — Plan d’affaires (Premium, corrigé)`;
 
-    // 2) Génération orchestrée Premium (mêmes sections, mais prompts peuvent tenir compte du brouillon)
-    const { sections } = await generateBusinessPlanPremium({
-      lang,
-      ctx,
-      lite: false,
+    // 2) Génération orchestrée Premium via la queue partagée.
+    const jobId = makeJobId();
+    const queued = await enqueueGenerationJob({
+      req,
+      jobId,
+      namespace: JOB_NAMESPACE,
+      ttlMs: JOB_TTL_MS,
+      meta: { documentType: "businessplan_rewrite" },
+      task: async () => {
+        const { sections } = await generateBusinessPlanPremium({
+          lang,
+          ctx,
+          lite: false,
+        });
+        return { title, lang, ctx, lite: false, sections };
+      },
     });
+
+    if (!queued.accepted) {
+      return res.status(queued.statusCode || 429).json(queued.body);
+    }
+
+    const doneJob = await queued.completion;
+    const result = doneJob?.result;
+    if (!result?.sections) return res.status(500).json({ error: "JOB_RESULT_MISSING" });
 
     res.setHeader("X-BP-Mode", "rewrite");
     return writeBusinessPlanPdfPremium({
       res,
-      title,
-      ctx,
-      sections,
+      title: result.title,
+      ctx: result.ctx,
+      sections: result.sections,
     });
   } catch (e) {
     console.error("❌ /generate-business-plan/premium/rewrite error:", e);
