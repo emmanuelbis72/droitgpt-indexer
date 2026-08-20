@@ -5,6 +5,7 @@ import { writeNgoProjectPdfPremium } from "../core/ngoPdfAssembler.js";
 import { normalizeLang, safeStr } from "../core/sanitize.js";
 import { makeJobId, getJob } from "../core/jobStore.js";
 import { enqueueGenerationJob } from "../core/generationQueue.js";
+import { consumePaymentForGeneration, verifyPaidPaymentForRequest } from "../core/flexpayPayments.js";
 
 const router = express.Router();
 
@@ -131,6 +132,11 @@ router.post("/premium", async (req, res) => {
       });
     }
 
+    const paymentCheck = await verifyPaidPaymentForRequest(req, "ngo_project");
+    if (!paymentCheck.ok) {
+      return res.status(paymentCheck.statusCode || 402).json(paymentCheck.body);
+    }
+
     const title =
       lang === "en"
         ? `${ctx.projectTitle} — NGO Project Proposal (Premium)`
@@ -156,6 +162,11 @@ router.post("/premium", async (req, res) => {
     if (!queued.accepted) {
       return res.status(queued.statusCode || 429).json(queued.body);
     }
+
+    await consumePaymentForGeneration(paymentCheck.orderNumber, {
+      documentType: "ngo_project",
+      jobId: id,
+    });
 
     // ✅ JOB mode
     if (wantAsync) {

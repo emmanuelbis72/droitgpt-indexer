@@ -5,6 +5,7 @@ import { writeGrantsManagementPdf } from "../core/grantsPdfAssembler.js";
 import { normalizeLang, safeStr } from "../core/sanitize.js";
 import { makeJobId, getJob } from "../core/jobStore.js";
 import { enqueueGenerationJob } from "../core/generationQueue.js";
+import { consumePaymentForGeneration, verifyPaidPaymentForRequest } from "../core/flexpayPayments.js";
 import grantsDiscoveryRoute from "./grantsDiscovery.js";
 
 const router = express.Router();
@@ -97,6 +98,11 @@ router.post("/", async (req, res) => {
       });
     }
 
+    const paymentCheck = await verifyPaidPaymentForRequest(req, "grants_management");
+    if (!paymentCheck.ok) {
+      return res.status(paymentCheck.statusCode || 402).json(paymentCheck.body);
+    }
+
     const id = makeJobId();
     const queued = await enqueueGenerationJob({
       req,
@@ -113,6 +119,11 @@ router.post("/", async (req, res) => {
     if (!queued.accepted) {
       return res.status(queued.statusCode || 429).json(queued.body);
     }
+
+    await consumePaymentForGeneration(paymentCheck.orderNumber, {
+      documentType: "grants_management",
+      jobId: id,
+    });
 
     if (wantAsync) {
       return res.status(202).json({

@@ -2,7 +2,7 @@ services:
   - type: web
     name: droitgpt-indexer
     env: node
-    plan: standard
+    plan: starter
     buildCommand: npm install --legacy-peer-deps
     startCommand: node query.js
     rootDir: indexer
@@ -43,3 +43,31 @@ services:
         sync: false
       - key: REDIS_URL
         sync: false
+      - key: FLEXPAY_ENABLED
+        value: "true"
+      - key: FLEXPAY_PAYMENT_REQUIRED
+        value: "true"
+      - key: FLEXPAY_TOKEN
+        sync: false
+      - key: FLEXPAY_MERCHANT
+        sync: false
+      - key: FLEXPAY_MOBILE_URL
+        value: "https://backend.flexpay.cd/api/rest/v1/paymentService"
+      - key: FLEXPAY_CHECK_URL
+        value: "https://apicheck.flexpaie.com/api/rest/v1/check"
+      - key: FLEXPAY_CALLBACK_URL
+        value: "https://businessplan-v9yy.onrender.com/payments/flexpay/callback"
+      - key: FLEXPAY_CURRENCY
+        value: "USD"
+      - key: PAYMENT_DEFAULT_PRICE_USD
+        value: "4"
+      - key: PAYMENT_PRICE_BUSINESSPLAN_USD
+        value: "4"
+      - key: PAYMENT_PRICE_MEMOIRE_USD
+        value: "4"
+      - key: PAYMENT_PRICE_NGO_PROJECT_USD
+        value: "4"
+      - key: PAYMENT_PRICE_GRANTS_MANAGEMENT_USD
+        value: "4"
+      - key: QDRANT_PAYMENTS_COLLECTION
+        value: "droitgpt_payments"

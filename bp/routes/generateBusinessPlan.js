@@ -7,6 +7,7 @@ import { generateBusinessPlanPremium } from "../core/orchestrator.js";
 import { writeBusinessPlanPdfPremium } from "../core/pdfAssembler.js";
 import { makeJobId, getJob } from "../core/jobStore.js";
 import { enqueueGenerationJob } from "../core/generationQueue.js";
+import { consumePaymentForGeneration, verifyPaidPaymentForRequest } from "../core/flexpayPayments.js";
 import {
   normalizeLang,
   normalizeDocType,
@@ -166,6 +167,11 @@ router.post("/premium", async (req, res) => {
       return res.json({ ok: true, message: "✅ Route premium OK (test mode)" });
     }
 
+    const paymentCheck = await verifyPaidPaymentForRequest(req, "businessplan");
+    if (!paymentCheck.ok) {
+      return res.status(paymentCheck.statusCode || 402).json(paymentCheck.body);
+    }
+
     const lang = normalizeLang(b.lang || process.env.BP_LANG_DEFAULT || "fr");
 
     const ctx = {
@@ -213,6 +219,11 @@ router.post("/premium", async (req, res) => {
     if (!queued.accepted) {
       return res.status(queued.statusCode || 429).json(queued.body);
     }
+
+    await consumePaymentForGeneration(paymentCheck.orderNumber, {
+      documentType: "businessplan",
+      jobId,
+    });
 
     // ✅ JOB mode: return quickly with jobId, run generation in queue
     if (wantAsync) {
@@ -289,6 +300,11 @@ router.post("/premium/rewrite", upload.single("file"), async (req, res) => {
       });
     }
 
+    const paymentCheck = await verifyPaidPaymentForRequest(req, "businessplan");
+    if (!paymentCheck.ok) {
+      return res.status(paymentCheck.statusCode || 402).json(paymentCheck.body);
+    }
+
     const ctx = {
       companyName: safeStr(b.companyName || "Projet", 120),
       country: safeStr(b.country || "RDC", 80),
@@ -342,6 +358,11 @@ router.post("/premium/rewrite", upload.single("file"), async (req, res) => {
     if (!queued.accepted) {
       return res.status(queued.statusCode || 429).json(queued.body);
     }
+
+    await consumePaymentForGeneration(paymentCheck.orderNumber, {
+      documentType: "businessplan",
+      jobId,
+    });
 
     const doneJob = await queued.completion;
     const result = doneJob?.result;

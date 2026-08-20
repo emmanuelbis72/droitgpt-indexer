@@ -6,6 +6,7 @@ import { generateLicenceMemoire, reviseLicenceMemoireFromDraft } from "../core/a
 import { writeLicenceMemoirePdf } from "../core/academicPdfAssembler.js";
 import { makeJobId, getJob } from "../core/jobStore.js";
 import { enqueueGenerationJob } from "../core/generationQueue.js";
+import { consumePaymentForGeneration, verifyPaidPaymentForRequest } from "../core/flexpayPayments.js";
 
 const router = express.Router();
 const JOB_TTL_MS = Number(process.env.MEMOIRE_JOB_TTL_MS || 1000 * 60 * 60); // 1h
@@ -149,6 +150,12 @@ async function generateMemoire(req, res) {
   try {
     const wantAsync = String(req.query?.async || "") === "1";
     const { lang, ctx, title } = buildMemoireRequest(req.body || {});
+
+    const paymentCheck = await verifyPaidPaymentForRequest(req, "memoire");
+    if (!paymentCheck.ok) {
+      return res.status(paymentCheck.statusCode || 402).json(paymentCheck.body);
+    }
+
     const jobId = makeJobId();
 
     const queued = await enqueueGenerationJob({
@@ -170,6 +177,11 @@ async function generateMemoire(req, res) {
     if (!queued.accepted) {
       return res.status(queued.statusCode || 429).json(queued.body);
     }
+
+    await consumePaymentForGeneration(paymentCheck.orderNumber, {
+      documentType: "memoire",
+      jobId,
+    });
 
     if (wantAsync) {
       return res.status(202).json({
@@ -203,6 +215,17 @@ async function reviseMemoire(req, res) {
     const ctx = b.ctx ? (typeof b.ctx === "string" ? JSON.parse(b.ctx) : b.ctx) : {};
 
     const draftText = await extractDraftText(req.file);
+
+    const paymentCheck = await verifyPaidPaymentForRequest(req, "memoire");
+    if (!paymentCheck.ok) {
+      return res.status(paymentCheck.statusCode || 402).json(paymentCheck.body);
+    }
+
+    const reviseJobId = makeJobId();
+    await consumePaymentForGeneration(paymentCheck.orderNumber, {
+      documentType: "memoire",
+      jobId: reviseJobId,
+    });
 
     const result = await reviseLicenceMemoireFromDraft({ lang, title, ctx, draftText });
 
