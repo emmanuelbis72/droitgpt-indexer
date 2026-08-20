@@ -10,6 +10,7 @@ import generateExcelAppRoute from './routes/generateExcelApp.js';
 import generateGrantsManagementRoute from './routes/generateGrantsManagement.js';
 import grantsRoute from './routes/grants.js';
 import paymentsRoute from './routes/payments.js';
+import generatedDocumentsRoute from './routes/generatedDocuments.js';
 import { initGrantsDb } from './core/grantsDb.js';
 import { startGrantsScheduler } from './core/grantsScheduler.js';
 
@@ -51,7 +52,7 @@ app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
   res.setHeader(
     'Access-Control-Allow-Headers',
-    'Content-Type, Authorization, X-Cron-Secret, X-Grants-Secret, X-Generation-User, X-Payment-Order'
+    'Content-Type, Authorization, X-Cron-Secret, X-Grants-Secret, X-Generation-User, X-DroitGPT-User, X-User-Email, X-User-Id, X-Payment-Order'
   );
   res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
   res.setHeader('Access-Control-Max-Age', '86400');
@@ -76,6 +77,7 @@ app.use('/generate-excel-app', generateExcelAppRoute);
 app.use('/generate-grants-management', generateGrantsManagementRoute);
 app.use('/grants', grantsRoute);
 app.use('/payments', paymentsRoute);
+app.use('/documents', generatedDocumentsRoute);
 
 app.get('/grants-dashboard', (_req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'grants-dashboard.html'));
@@ -154,6 +156,8 @@ app.get('/', (_req, res) => {
       '/payments/mobile-money',
       '/payments/status/:orderNumber',
       '/payments/flexpay/callback',
+      '/documents/health',
+      '/documents',
       '/download-business-plan',
     ],
   });

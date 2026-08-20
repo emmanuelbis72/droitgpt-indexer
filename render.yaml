@@ -15,6 +15,20 @@ services:
         sync: false
       - key: QDRANT_API_KEY
         sync: false
+      - key: JWT_ACCESS_SECRET
+        sync: false
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_PORT
+        sync: false
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASS
+        sync: false
+      - key: SMTP_FROM
+        sync: false
+      - key: FRONTEND_URL
+        value: "https://droitgpt-ui.vercel.app"
 
   - type: web
     name: droitgpt-pdf-api
@@ -73,3 +87,11 @@ services:
         value: "4"
       - key: QDRANT_PAYMENTS_COLLECTION
         value: "droitgpt_payments"
+      - key: QDRANT_URL
+        sync: false
+      - key: QDRANT_API_KEY
+        sync: false
+      - key: JWT_ACCESS_SECRET
+        sync: false
+      - key: QDRANT_GENERATED_DOCUMENTS_COLLECTION
+        value: "droitgpt_generated_documents"

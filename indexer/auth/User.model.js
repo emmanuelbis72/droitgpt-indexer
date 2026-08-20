@@ -4,7 +4,7 @@ import mongoose from "mongoose";
 /**
  * Modèle utilisateur DroitGPT
  * Utilisé pour l’authentification (register / login)
- * Identifiant = phone (numéro WhatsApp, format E.164 recommandé: +243816307451)
+ * Identifiants = phone et email (format E.164 recommande: +243816307451)
  */
 
 const UserSchema = new mongoose.Schema(
@@ -25,9 +25,42 @@ const UserSchema = new mongoose.Schema(
       index: true,
     },
 
+    email: {
+      type: String,
+      trim: true,
+      lowercase: true,
+      unique: true,
+      sparse: true,
+      index: true,
+      maxlength: 180,
+    },
+
     passwordHash: {
       type: String,
       required: true,
+    },
+
+    passwordResetTokenHash: {
+      type: String,
+      default: null,
+      select: false,
+    },
+
+    passwordResetExpiresAt: {
+      type: Date,
+      default: null,
+      select: false,
+    },
+
+    passwordResetRequestedAt: {
+      type: Date,
+      default: null,
+      select: false,
+    },
+
+    passwordChangedAt: {
+      type: Date,
+      default: null,
     },
 
     role: {
@@ -50,6 +83,7 @@ const UserSchema = new mongoose.Schema(
 UserSchema.methods.toJSON = function () {
   const obj = this.toObject();
   delete obj.passwordHash;
+  delete obj.passwordResetTokenHash;
   return obj;
 };
 

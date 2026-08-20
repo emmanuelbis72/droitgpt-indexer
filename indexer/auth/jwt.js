@@ -21,6 +21,7 @@ export function signAccessToken(user) {
     {
       sub: user._id?.toString?.() || user.id, // Mongo ou SQL
       phone: user.phone,
+      email: user.email || null,
       fullName: user.fullName,
       role: user.role || "user",
     },
