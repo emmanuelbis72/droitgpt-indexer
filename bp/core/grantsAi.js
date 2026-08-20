@@ -15,7 +15,7 @@ Retourne uniquement un JSON strict:
 {
   "title": null,
   "organization": null,
-  "type": "grant|scholarship|call_for_projects|competition|accelerator|fellowship|ngo_funding|other",
+  "type": "grant|scholarship|call_for_projects|tender|competition|accelerator|fellowship|ngo_funding|other",
   "summary": null,
   "description": null,
   "eligibility": null,

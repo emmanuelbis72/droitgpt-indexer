@@ -95,3 +95,15 @@ services:
         sync: false
       - key: QDRANT_GENERATED_DOCUMENTS_COLLECTION
         value: "droitgpt_generated_documents"
+      - key: QDRANT_GRANTS_COLLECTION
+        value: "grants_opportunities"
+      - key: EXA_API_KEY
+        sync: false
+      - key: CRON_SECRET
+        sync: false
+      - key: GRANTS_AUTO_PATROL_ENABLED
+        value: "true"
+      - key: GRANTS_PATROL_INTERVAL_MINUTES
+        value: "360"
+      - key: GRANTS_PATROL_WEB_SEARCH_ENABLED
+        value: "true"

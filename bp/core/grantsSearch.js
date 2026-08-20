@@ -309,7 +309,7 @@ function buildSearchQuery(params = {}) {
     ...(Array.isArray(params.types) ? params.types : [params.type]).filter(Boolean),
     currentYear,
     "deadline open apply now currently accepting applications",
-    params.language === "fr" ? "appel a projets subvention bourse financement" : "grant funding scholarship accelerator",
+    params.language === "fr" ? "appel a projets appel d offres subvention bourse financement" : "grant funding scholarship accelerator tender procurement",
   ].filter(Boolean).join(" ");
 }
 
@@ -334,6 +334,7 @@ function buildAgentQueries(params = {}, baseQuery = "") {
     `call for proposals ${sectorText} ${place} apply deadline ${currentYear}`,
     `funding opportunities NGOs nonprofits ${sectorText} ${place} currently open`,
     `bourses concours incubateurs accélérateurs financement ${sectorText} ${place} date limite ${currentYear}`,
+    `appels d'offres marchés publics procurement tenders ${sectorText} ${place} deadline ${currentYear}`,
     `site:fundsforngos.org ${base}`,
     `site:opportunitydesk.org ${base}`,
     `site:opportunitiesforafricans.com ${base}`,
@@ -411,7 +412,7 @@ function extractLinks(html, baseUrl) {
 }
 
 function isOpportunityLike(text) {
-  return /(grant|subvention|funding|appel|bourse|scholarship|fellowship|accelerator|incubator|challenge|competition|concours|apply|application|proposal)/i.test(text);
+  return /(grant|subvention|funding|appel|offre|tender|procurement|rfp|rfq|bid|bourse|scholarship|fellowship|accelerator|incubator|challenge|competition|concours|apply|application|proposal)/i.test(text);
 }
 
 function stripTags(html) {
@@ -477,6 +478,7 @@ function inferRegion(text) {
 
 function inferType(text) {
   if (/(scholarship|bourse|tuition|students?|master|phd)/i.test(text)) return "scholarship";
+  if (/(tender|procurement|rfp|rfq|bid|bidding|appel d.?offres?|march[eé] public|avis d.?appel)/i.test(text)) return "tender";
   if (/(accelerator|incubator|startup|entrepreneur)/i.test(text)) return "accelerator";
   if (/(challenge|competition|concours|prize)/i.test(text)) return "competition";
   if (/(fellowship|fellows)/i.test(text)) return "fellowship";

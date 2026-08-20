@@ -13,6 +13,7 @@ import paymentsRoute from './routes/payments.js';
 import generatedDocumentsRoute from './routes/generatedDocuments.js';
 import { initGrantsDb } from './core/grantsDb.js';
 import { startGrantsScheduler } from './core/grantsScheduler.js';
+import { startGrantsPatrolScheduler } from './core/grantsPatrol.js';
 
 dotenv.config();
 
@@ -148,6 +149,8 @@ app.get('/', (_req, res) => {
       '/grants/opportunities',
       '/grants/search',
       '/grants/crawl',
+      '/grants/patrol/status',
+      '/grants/patrol/run',
       '/grants/sources',
       '/grants/jobs/:id',
       '/grants/jobs/:id/result',
@@ -194,6 +197,7 @@ app.use((err, req, res, _next) => {
 
 await initGrantsDb();
 startGrantsScheduler();
+startGrantsPatrolScheduler();
 
 app.listen(PORT, () => {
   console.log(`PDF Service en ligne sur http://localhost:${PORT}`);

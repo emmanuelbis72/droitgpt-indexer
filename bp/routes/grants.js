@@ -3,6 +3,7 @@ import express from "express";
 import { generateApplicationAdvice, matchOpportunityToUserProfile } from "../core/grantsAi.js";
 import { crawlConfiguredSources } from "../core/grantsCrawler.js";
 import { searchIndexedOpportunities } from "../core/grantsIndexer.js";
+import { getGrantsPatrolStatus, runGrantsPatrol } from "../core/grantsPatrol.js";
 import { searchAndIndexOpportunities } from "../core/grantsSearch.js";
 import {
   addSource,
@@ -29,7 +30,11 @@ router.use(async (_req, _res, next) => {
 });
 
 router.get("/health", (_req, res) => {
-  res.json({ ok: true, module: "grants", message: "Grants module operational" });
+  res.json({ ok: true, module: "grants", message: "Grants module operational", patrol: getGrantsPatrolStatus() });
+});
+
+router.get("/patrol/status", (_req, res) => {
+  res.json(getGrantsPatrolStatus());
 });
 
 router.get("/opportunities", async (req, res, next) => {
@@ -175,6 +180,33 @@ router.post("/crawl", async (req, res, next) => {
     const job = await createJob({ query: params.query, params: { ...params, mode: "crawl" } });
     runJob(job.id, () => crawlConfiguredSources(params));
     res.status(202).json({ ok: true, jobId: job.id, status: "queued" });
+  } catch (e) {
+    next(e);
+  }
+});
+
+router.post("/patrol/run", async (req, res, next) => {
+  try {
+    const expected = process.env.CRON_SECRET;
+    if (!expected) return res.status(503).json({ ok: false, error: "CRON_SECRET_NOT_CONFIGURED" });
+    if (!hasValidCronSecret(req, expected)) return res.status(401).json({ ok: false, error: "UNAUTHORIZED" });
+
+    if (getGrantsPatrolStatus().running) {
+      return res.status(202).json({ ok: true, status: "running", message: "Une patrouille Grant est deja en cours." });
+    }
+
+    const params = {
+      trigger: "manual",
+      maxSources: req.body?.maxSources,
+      maxPerSource: req.body?.maxPerSource,
+      webMaxResults: req.body?.webMaxResults,
+      webCandidateLimit: req.body?.webCandidateLimit,
+      maxWebPresets: req.body?.maxWebPresets,
+    };
+    setImmediate(() => {
+      runGrantsPatrol(params).catch((error) => console.error("[GRANTS] manual patrol failed", String(error?.message || error)));
+    });
+    res.status(202).json({ ok: true, status: "queued", patrol: getGrantsPatrolStatus() });
   } catch (e) {
     next(e);
   }
