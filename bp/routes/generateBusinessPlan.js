@@ -279,6 +279,7 @@ router.post("/premium", async (req, res) => {
 router.post("/premium/rewrite", upload.single("file"), async (req, res) => {
   try {
     const b = req.body || {};
+    const wantAsync = String(req.query?.async || "") === "1";
 
     const lang = normalizeLang(b.lang || process.env.BP_LANG_DEFAULT || "fr");
 
@@ -363,6 +364,19 @@ router.post("/premium/rewrite", upload.single("file"), async (req, res) => {
       documentType: "businessplan",
       jobId,
     });
+
+    if (wantAsync) {
+      return res.status(202).json({
+        ok: true,
+        jobId,
+        status: "queued",
+        queue: queued.queue,
+        next: {
+          status: `/generate-business-plan/premium/jobs/${jobId}`,
+          result: `/generate-business-plan/premium/jobs/${jobId}/result`,
+        },
+      });
+    }
 
     const doneJob = await queued.completion;
     const result = doneJob?.result;
