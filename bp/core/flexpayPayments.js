@@ -28,6 +28,11 @@ const DOCUMENTS = {
     envBase: "PAYMENT_PRICE_GRANTS_MANAGEMENT",
     prefix: "GRANTS",
   },
+  excel_app: {
+    label: "Progiciel Excel IA",
+    envBase: "PAYMENT_PRICE_EXCEL_APP",
+    prefix: "EXCEL",
+  },
 };
 
 let qdrantInitPromise = null;
@@ -64,6 +69,9 @@ function normalizeDocumentType(value) {
     ong: "ngo_project",
     project_ong: "ngo_project",
     grants: "grants_management",
+    excel: "excel_app",
+    excel_app: "excel_app",
+    spreadsheet: "excel_app",
   };
   const normalized = aliases[raw] || raw;
   return DOCUMENTS[normalized] ? normalized : "";
@@ -231,6 +239,7 @@ function inferDocumentTypeFromReference(reference) {
   if (ref.includes("-MEM-")) return "memoire";
   if (ref.includes("-ONG-")) return "ngo_project";
   if (ref.includes("-GRANTS-")) return "grants_management";
+  if (ref.includes("-EXCEL-")) return "excel_app";
   return "";
 }
 

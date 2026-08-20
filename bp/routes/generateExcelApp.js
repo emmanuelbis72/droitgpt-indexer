@@ -5,6 +5,7 @@ import path from "node:path";
 
 import { generateExcelApp } from "../core/excelOrchestrator.js";
 import { makeJobId, nowMs, putJob, getJob, patchJob } from "../core/jobStore.js";
+import { consumePaymentForGeneration, verifyPaidPaymentForRequest } from "../core/flexpayPayments.js";
 
 const router = express.Router();
 
@@ -55,6 +56,11 @@ router.post("/", async (req, res) => {
   const lang = body.lang || "fr";
   const ctx = body.ctx || {};
 
+  const paymentCheck = await verifyPaidPaymentForRequest(req, "excel_app");
+  if (!paymentCheck.ok) {
+    return res.status(paymentCheck.statusCode || 402).json(paymentCheck.body);
+  }
+
   if (asyncMode) {
     const id = makeJobId();
     await putJob(
@@ -72,10 +78,19 @@ router.post("/", async (req, res) => {
     );
 
     runJob(id);
+    await consumePaymentForGeneration(paymentCheck.orderNumber, {
+      documentType: "excel_app",
+      jobId: id,
+    });
     return res.json({ jobId: id, status: "queued" });
   }
 
   try {
+    const syncJobId = makeJobId();
+    await consumePaymentForGeneration(paymentCheck.orderNumber, {
+      documentType: "excel_app",
+      jobId: syncJobId,
+    });
     const out = await generateExcelApp({ lang, ctx });
     const fileName = `${out.fileNameBase || "excel-app"}.xlsx`;
     res.setHeader(

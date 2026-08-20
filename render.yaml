@@ -69,5 +69,7 @@ services:
         value: "4"
       - key: PAYMENT_PRICE_GRANTS_MANAGEMENT_USD
         value: "4"
+      - key: PAYMENT_PRICE_EXCEL_APP_USD
+        value: "4"
       - key: QDRANT_PAYMENTS_COLLECTION
         value: "droitgpt_payments"
