@@ -91,6 +91,8 @@ services:
         value: "4"
       - key: PAYMENT_PRICE_EXCEL_APP_USD
         value: "4"
+      - key: PAYMENT_PRICE_BUSINESSPLAN_PACK_USD
+        value: "20"
       - key: QDRANT_PAYMENTS_COLLECTION
         value: "droitgpt_payments"
       - key: QDRANT_URL

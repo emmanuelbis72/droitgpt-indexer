@@ -33,6 +33,11 @@ const DOCUMENTS = {
     envBase: "PAYMENT_PRICE_EXCEL_APP",
     prefix: "EXCEL",
   },
+  businessplan_pack: {
+    label: "Lot de plans d'affaires prêts à adapter",
+    envBase: "PAYMENT_PRICE_BUSINESSPLAN_PACK",
+    prefix: "BPPACK",
+  },
 };
 
 let qdrantInitPromise = null;
@@ -72,6 +77,11 @@ function normalizeDocumentType(value) {
     excel: "excel_app",
     excel_app: "excel_app",
     spreadsheet: "excel_app",
+    pack_bp: "businessplan_pack",
+    bp_pack: "businessplan_pack",
+    business_plan_pack: "businessplan_pack",
+    businessplan_pack: "businessplan_pack",
+    businessplans_pack: "businessplan_pack",
   };
   const normalized = aliases[raw] || raw;
   return DOCUMENTS[normalized] ? normalized : "";
@@ -240,6 +250,7 @@ function inferDocumentTypeFromReference(reference) {
   if (ref.includes("-ONG-")) return "ngo_project";
   if (ref.includes("-GRANTS-")) return "grants_management";
   if (ref.includes("-EXCEL-")) return "excel_app";
+  if (ref.includes("-BPPACK-")) return "businessplan_pack";
   return "";
 }
 
@@ -250,6 +261,7 @@ function jobNamespaceForDocumentType(documentType) {
   if (type === "ngo_project") return "ngo";
   if (type === "grants_management") return "grants";
   if (type === "excel_app") return "excel";
+  if (type === "businessplan_pack") return "payments";
   return "excel";
 }
 

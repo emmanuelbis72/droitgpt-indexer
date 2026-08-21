@@ -11,6 +11,7 @@ import generateGrantsManagementRoute from './routes/generateGrantsManagement.js'
 import grantsRoute from './routes/grants.js';
 import paymentsRoute from './routes/payments.js';
 import generatedDocumentsRoute from './routes/generatedDocuments.js';
+import businessPlanPackRoute from './routes/businessPlanPack.js';
 import { initGrantsDb } from './core/grantsDb.js';
 import { startGrantsScheduler } from './core/grantsScheduler.js';
 import { startGrantsPatrolScheduler } from './core/grantsPatrol.js';
@@ -79,6 +80,7 @@ app.use('/generate-grants-management', generateGrantsManagementRoute);
 app.use('/grants', grantsRoute);
 app.use('/payments', paymentsRoute);
 app.use('/documents', generatedDocumentsRoute);
+app.use('/business-plan-pack', businessPlanPackRoute);
 
 app.get('/grants-dashboard', (_req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'grants-dashboard.html'));
@@ -161,6 +163,8 @@ app.get('/', (_req, res) => {
       '/payments/flexpay/callback',
       '/documents/health',
       '/documents',
+      '/business-plan-pack/health',
+      '/business-plan-pack/download',
       '/download-business-plan',
     ],
   });
