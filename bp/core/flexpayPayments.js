@@ -243,6 +243,27 @@ function inferDocumentTypeFromReference(reference) {
   return "";
 }
 
+function jobNamespaceForDocumentType(documentType) {
+  const type = normalizeDocumentType(documentType);
+  if (type === "businessplan") return "bp";
+  if (type === "memoire") return "memoire";
+  if (type === "ngo_project") return "ngo";
+  if (type === "grants_management") return "grants";
+  if (type === "excel_app") return "excel";
+  return "excel";
+}
+
+async function consumedJobExists(payment = {}) {
+  const jobId = clean(payment.consumedByJobId, 120);
+  if (!jobId) return false;
+  try {
+    const job = await getJob(jobId, { namespace: jobNamespaceForDocumentType(payment.documentType) });
+    return Boolean(job);
+  } catch {
+    return false;
+  }
+}
+
 function publicPayment(record) {
   if (!record) return null;
   return {
@@ -339,7 +360,7 @@ function isQdrantConfigured() {
 }
 
 async function qdrantFetch(pathname, options = {}) {
-  const base = String(process.env.QDRANT_URL || "").replace(/\/$/, "");
+  const base = normalizeQdrantBaseUrl();
   const timeoutMs = Math.max(5000, Number(process.env.QDRANT_TIMEOUT_MS || 15000));
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -360,7 +381,24 @@ async function qdrantFetch(pathname, options = {}) {
 
 async function throwQdrantError(response, message) {
   const text = await response.text().catch(() => "");
-  throw new Error(`${message}: ${response.status} ${text.slice(0, 300)}`);
+  const hint = text.includes("404 page not found")
+    ? " Check QDRANT_URL: use the Qdrant REST cluster endpoint, not the dashboard URL."
+    : "";
+  throw new Error(`${message}: ${response.status} ${text.slice(0, 300)}${hint}`);
+}
+
+function normalizeQdrantBaseUrl() {
+  const raw = String(process.env.QDRANT_URL || "").trim();
+  if (!raw) return "";
+  try {
+    const url = new URL(raw);
+    url.pathname = "";
+    url.search = "";
+    url.hash = "";
+    return url.toString().replace(/\/$/, "");
+  } catch {
+    return raw.replace(/\/$/, "");
+  }
 }
 
 async function ensureQdrantPaymentsCollection() {
@@ -651,8 +689,9 @@ export async function verifyPaidPaymentForRequest(req, documentType) {
     };
   }
 
-  let payment = await getPaymentStatus(orderNumber);
-  if (!payment) {
+  const payment = await getPaymentStatus(orderNumber);
+  const fullPayment = (await getStoredPayment(orderNumber)) || payment;
+  if (!payment || !fullPayment) {
     return {
       ok: false,
       statusCode: 402,
@@ -660,7 +699,7 @@ export async function verifyPaidPaymentForRequest(req, documentType) {
     };
   }
 
-  const paymentType = normalizeDocumentType(payment.documentType);
+  const paymentType = normalizeDocumentType(fullPayment.documentType || payment.documentType);
   if (!paymentType) {
     return {
       ok: false,
@@ -689,7 +728,18 @@ export async function verifyPaidPaymentForRequest(req, documentType) {
     };
   }
 
-  if (payment.consumedAt) {
+  if (fullPayment.consumedAt) {
+    const recoveryEnabled = envBool("PAYMENT_ALLOW_RECOVERY_ON_MISSING_JOB", true);
+    const relatedJobExists = await consumedJobExists(fullPayment);
+    if (recoveryEnabled && fullPayment.status === "paid" && !relatedJobExists) {
+      console.warn("[PAYMENTS] consumed payment recovery allowed", {
+        orderNumber,
+        documentType: paymentType,
+        previousJobId: fullPayment.consumedByJobId || null,
+      });
+      return { ok: true, required: true, orderNumber, payment: publicPayment(fullPayment), recovery: true };
+    }
+
     return {
       ok: false,
       statusCode: 402,
@@ -697,7 +747,7 @@ export async function verifyPaidPaymentForRequest(req, documentType) {
     };
   }
 
-  if (payment.status !== "paid") {
+  if (fullPayment.status !== "paid") {
     return {
       ok: false,
       statusCode: 402,
@@ -706,12 +756,12 @@ export async function verifyPaidPaymentForRequest(req, documentType) {
         error: "PAYMENT_NOT_CONFIRMED",
         details: "Paiement non encore confirme par FlexPay.",
         orderNumber,
-        status: payment.status,
+        status: fullPayment.status,
       },
     };
   }
 
-  return { ok: true, required: true, orderNumber, payment };
+  return { ok: true, required: true, orderNumber, payment: publicPayment(fullPayment) };
 }
 
 export async function consumePaymentForGeneration(orderNumber, { documentType, jobId } = {}) {
@@ -719,10 +769,12 @@ export async function consumePaymentForGeneration(orderNumber, { documentType, j
   const current = await getStoredPayment(orderNumber);
   if (!current) return null;
   const now = nowIso();
+  const previousJobId = clean(current.consumedByJobId, 120);
+  const replaceMissingJob = current.consumedAt && previousJobId && !(await consumedJobExists(current));
   const next = await patchStoredPayment(orderNumber, {
     status: current.status,
     consumedAt: current.consumedAt || now,
-    consumedByJobId: current.consumedByJobId || clean(jobId, 120),
+    consumedByJobId: replaceMissingJob ? clean(jobId, 120) : current.consumedByJobId || clean(jobId, 120),
     consumedForDocumentType: normalizeDocumentType(documentType) || current.documentType,
   });
   return publicPayment(next);

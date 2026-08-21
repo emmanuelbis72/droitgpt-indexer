@@ -24,11 +24,12 @@ const DEFAULT_DB = {
 
 let writeQueue = Promise.resolve();
 let qdrantInitPromise = null;
+let qdrantDisabled = false;
 
 export async function initGrantsStorage() {
   if (isQdrantConfigured()) {
-    await initQdrantStorage();
-    return;
+    const ready = await initQdrantStorage();
+    if (ready) return;
   }
 
   await fs.mkdir(DATA_DIR, { recursive: true });
@@ -198,19 +199,25 @@ export async function getJob(id) {
 }
 
 async function initQdrantStorage() {
+  if (qdrantDisabled) return false;
   if (!qdrantInitPromise) {
     qdrantInitPromise = (async () => {
       await ensureQdrantCollection(OPPORTUNITIES_COLLECTION);
       await ensureQdrantCollection(SOURCES_COLLECTION);
       await ensureQdrantCollection(JOBS_COLLECTION);
       await seedDefaultQdrantSources();
-    })();
+      return true;
+    })().catch((error) => {
+      qdrantDisabled = true;
+      console.warn("[GRANTS] Qdrant storage disabled, falling back to JSON:", String(error?.message || error));
+      return false;
+    });
   }
   return qdrantInitPromise;
 }
 
 async function qdrantListOpportunities(filters = {}) {
-  await initQdrantStorage();
+  if (!(await initQdrantStorage())) return listOpportunities(filters);
   const points = await qdrantScrollAll(OPPORTUNITIES_COLLECTION, { limit: QDRANT_SCROLL_LIMIT });
   const opportunities = points.map((point) => opportunityFromPayload(point.payload)).filter(Boolean);
   const rows = filterAndSortOpportunities(opportunities, filters);
@@ -220,13 +227,13 @@ async function qdrantListOpportunities(filters = {}) {
 }
 
 async function qdrantGetOpportunity(id) {
-  await initQdrantStorage();
+  if (!(await initQdrantStorage())) return getOpportunity(id);
   const point = await qdrantRetrievePoint(OPPORTUNITIES_COLLECTION, id);
   return point ? opportunityFromPayload(point.payload) : null;
 }
 
 async function qdrantSaveOpportunity(input = {}) {
-  await initQdrantStorage();
+  if (!(await initQdrantStorage())) return saveOpportunity(input);
   const verified = verifyOpportunity(input);
   if (!verified.sourceUrl) return { saved: null, skipped: true, reason: "SOURCE_URL_REQUIRED" };
 
@@ -246,13 +253,13 @@ async function qdrantSaveOpportunity(input = {}) {
 }
 
 async function qdrantListSources() {
-  await initQdrantStorage();
+  if (!(await initQdrantStorage())) return listSources();
   const points = await qdrantScrollAll(SOURCES_COLLECTION, { limit: 2000 });
   return points.map((point) => sourceFromPayload(point.payload)).filter(Boolean).sort((a, b) => a.name.localeCompare(b.name));
 }
 
 async function qdrantAddSource(input = {}) {
-  await initQdrantStorage();
+  if (!(await initQdrantStorage())) return addSource(input);
   const record = sourceRecord({
     name: input.name,
     url: input.url || input.baseUrl,
@@ -279,6 +286,7 @@ async function qdrantAddSource(input = {}) {
 }
 
 async function qdrantUpdateOpportunityStatus(id, status) {
+  if (!(await initQdrantStorage())) return updateOpportunityStatus(id, status);
   const opportunity = await qdrantGetOpportunity(id);
   if (!opportunity) return null;
   const updated = { ...opportunity, status: normalizeGrantStatus(status), updatedAt: new Date().toISOString(), recordKind: "opportunity" };
@@ -287,7 +295,7 @@ async function qdrantUpdateOpportunityStatus(id, status) {
 }
 
 async function qdrantCreateJob({ query, params }) {
-  await initQdrantStorage();
+  if (!(await initQdrantStorage())) return createJob({ query, params });
   const now = new Date().toISOString();
   const job = {
     id: crypto.randomUUID(),
@@ -306,7 +314,7 @@ async function qdrantCreateJob({ query, params }) {
 }
 
 async function qdrantPatchJob(id, patch = {}) {
-  await initQdrantStorage();
+  if (!(await initQdrantStorage())) return patchJob(id, patch);
   const current = await qdrantGetJob(id);
   if (!current) return null;
   const updated = { ...current, ...patch, result: compactJobResult(patch.result ?? current.result), recordKind: "job" };
@@ -315,7 +323,7 @@ async function qdrantPatchJob(id, patch = {}) {
 }
 
 async function qdrantGetJob(id) {
-  await initQdrantStorage();
+  if (!(await initQdrantStorage())) return getJob(id);
   const point = await qdrantRetrievePoint(JOBS_COLLECTION, id);
   return point ? jobFromPayload(point.payload) : null;
 }
@@ -383,7 +391,7 @@ async function qdrantScrollAll(collection, { limit = 10000 } = {}) {
 }
 
 async function qdrantFetch(pathname, options = {}) {
-  const base = String(process.env.QDRANT_URL || "").replace(/\/$/, "");
+  const base = normalizeQdrantBaseUrl();
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), Number(process.env.QDRANT_TIMEOUT_MS || 15000));
   try {
@@ -403,7 +411,10 @@ async function qdrantFetch(pathname, options = {}) {
 
 async function throwQdrantError(response, message) {
   const text = await response.text().catch(() => "");
-  throw new Error(`${message}: HTTP ${response.status} ${text.slice(0, 300)}`);
+  const hint = text.includes("404 page not found")
+    ? " Check QDRANT_URL: use the Qdrant REST cluster endpoint, not the dashboard URL."
+    : "";
+  throw new Error(`${message}: HTTP ${response.status} ${text.slice(0, 300)}${hint}`);
 }
 
 function filterAndSortOpportunities(items = [], filters = {}) {
@@ -554,7 +565,21 @@ function hashVector(text) {
 }
 
 function isQdrantConfigured() {
-  return Boolean(process.env.QDRANT_URL);
+  return Boolean(process.env.QDRANT_URL) && !qdrantDisabled;
+}
+
+function normalizeQdrantBaseUrl() {
+  const raw = String(process.env.QDRANT_URL || "").trim();
+  if (!raw) return "";
+  try {
+    const url = new URL(raw);
+    url.pathname = "";
+    url.search = "";
+    url.hash = "";
+    return url.toString().replace(/\/$/, "");
+  } catch {
+    return raw.replace(/\/$/, "");
+  }
 }
 
 async function readDb() {

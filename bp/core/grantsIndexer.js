@@ -80,7 +80,7 @@ async function ensureCollection() {
 }
 
 async function qdrantFetch(path, options = {}) {
-  const base = String(process.env.QDRANT_URL || "").replace(/\/$/, "");
+  const base = normalizeQdrantBaseUrl();
   return fetch(`${base}${path}`, {
     ...options,
     headers: {
@@ -89,6 +89,20 @@ async function qdrantFetch(path, options = {}) {
       ...(options.headers || {}),
     },
   });
+}
+
+function normalizeQdrantBaseUrl() {
+  const raw = String(process.env.QDRANT_URL || "").trim();
+  if (!raw) return "";
+  try {
+    const url = new URL(raw);
+    url.pathname = "";
+    url.search = "";
+    url.hash = "";
+    return url.toString().replace(/\/$/, "");
+  } catch {
+    return raw.replace(/\/$/, "");
+  }
 }
 
 function hashVector(text) {

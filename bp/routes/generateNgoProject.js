@@ -12,7 +12,7 @@ const router = express.Router();
 /* =========================================================
    ✅ JOB MODE + shared concurrent queue
 ========================================================= */
-const JOB_TTL_MS = Number(process.env.NGO_JOB_TTL_MS || 1000 * 60 * 60); // 1h
+const JOB_TTL_MS = Number(process.env.NGO_JOB_TTL_MS || 1000 * 60 * 60 * 24 * 30); // 30 days
 const JOB_NAMESPACE = "ngo";
 
 router.get("/premium", (_req, res) => {

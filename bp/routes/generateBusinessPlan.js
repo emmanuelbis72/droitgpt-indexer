@@ -23,7 +23,7 @@ const router = express.Router();
    documents at the same time, while blocking double-generation per user.
 ========================================================= */
 
-const JOB_TTL_MS = Number(process.env.BP_JOB_TTL_MS || 1000 * 60 * 60); // 1h
+const JOB_TTL_MS = Number(process.env.BP_JOB_TTL_MS || 1000 * 60 * 60 * 24 * 30); // 30 days
 const JOB_NAMESPACE = "bp";
 
 router.get("/premium/jobs/:id", async (req, res) => {

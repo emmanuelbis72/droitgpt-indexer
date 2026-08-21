@@ -10,7 +10,7 @@ import grantsDiscoveryRoute from "./grantsDiscovery.js";
 
 const router = express.Router();
 
-const JOB_TTL_MS = Number(process.env.GRANTS_JOB_TTL_MS || 1000 * 60 * 60);
+const JOB_TTL_MS = Number(process.env.GRANTS_JOB_TTL_MS || 1000 * 60 * 60 * 24 * 30);
 const JOB_NAMESPACE = "grants";
 
 router.use("/", grantsDiscoveryRoute);

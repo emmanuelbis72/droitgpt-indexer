@@ -9,7 +9,7 @@ import { consumePaymentForGeneration, verifyPaidPaymentForRequest } from "../cor
 
 const router = express.Router();
 
-const JOB_TTL_MS = Number(process.env.EXCEL_JOB_TTL_MS || 2 * 60 * 60 * 1000); // 2h
+const JOB_TTL_MS = Number(process.env.EXCEL_JOB_TTL_MS || 1000 * 60 * 60 * 24 * 30); // 30 days
 
 function tmpFilePath(id) {
   return path.join("/tmp", `droitgpt_excel_${id}.xlsx`);
@@ -35,6 +35,7 @@ async function runJob(jobId) {
           fileNameBase: out.fileNameBase,
           blueprint: out.blueprint,
           filePath,
+          xlsxBase64: out.xlsxBuffer.toString("base64"),
         },
       },
       { ttlMs: JOB_TTL_MS }
@@ -128,12 +129,13 @@ router.get("/jobs/:id/result", (req, res) => {
   getJob(id)
     .then((job) => {
       if (!job) return res.status(404).json({ error: "JOB_NOT_FOUND" });
-      if (job.status !== "done" || !job.result?.filePath) {
+      if (job.status !== "done" || (!job.result?.filePath && !job.result?.xlsxBase64)) {
         return res.status(409).json({ error: "JOB_NOT_READY", status: job.status, message: job.error || null });
       }
 
       const fp = job.result.filePath;
-      if (!fs.existsSync(fp)) {
+      const buffer = fp && fs.existsSync(fp) ? fs.readFileSync(fp) : job.result.xlsxBase64 ? Buffer.from(job.result.xlsxBase64, "base64") : null;
+      if (!buffer) {
         return res.status(410).json({ error: "RESULT_EXPIRED" });
       }
 
@@ -143,7 +145,7 @@ router.get("/jobs/:id/result", (req, res) => {
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
       );
       res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
-      return res.status(200).send(fs.readFileSync(fp));
+      return res.status(200).send(buffer);
     })
     .catch(() => res.status(500).json({ error: "JOB_STORE_ERROR" }));
 });
