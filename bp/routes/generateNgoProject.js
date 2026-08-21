@@ -6,6 +6,7 @@ import { normalizeLang, safeStr } from "../core/sanitize.js";
 import { makeJobId, getJob } from "../core/jobStore.js";
 import { enqueueGenerationJob } from "../core/generationQueue.js";
 import { consumePaymentForGeneration, verifyPaidPaymentForRequest } from "../core/flexpayPayments.js";
+import { rememberGeneratedDocument } from "../core/generatedDocumentTracker.js";
 
 const router = express.Router();
 
@@ -166,6 +167,20 @@ router.post("/premium", async (req, res) => {
     await consumePaymentForGeneration(paymentCheck.orderNumber, {
       documentType: "ngo_project",
       jobId: id,
+    });
+    await rememberGeneratedDocument(req, {
+      jobId: id,
+      documentType: "ngo_project",
+      label: "Projet ONG",
+      title,
+      fileName: "projet-ong.pdf",
+      paymentOrderNumber: paymentCheck.orderNumber,
+      regenerationBody: req.body || {},
+      regeneratePath: "/generate-ngo-project/premium?async=1",
+      statusPath: `/generate-ngo-project/premium/jobs/${id}`,
+      resultPath: `/generate-ngo-project/premium/jobs/${id}/result`,
+      statusTemplate: "/generate-ngo-project/premium/jobs/{jobId}",
+      resultTemplate: "/generate-ngo-project/premium/jobs/{jobId}/result",
     });
 
     // ✅ JOB mode

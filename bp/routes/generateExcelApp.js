@@ -6,6 +6,7 @@ import path from "node:path";
 import { generateExcelApp } from "../core/excelOrchestrator.js";
 import { makeJobId, nowMs, putJob, getJob, patchJob } from "../core/jobStore.js";
 import { consumePaymentForGeneration, verifyPaidPaymentForRequest } from "../core/flexpayPayments.js";
+import { rememberGeneratedDocument } from "../core/generatedDocumentTracker.js";
 
 const router = express.Router();
 
@@ -82,6 +83,20 @@ router.post("/", async (req, res) => {
     await consumePaymentForGeneration(paymentCheck.orderNumber, {
       documentType: "excel_app",
       jobId: id,
+    });
+    await rememberGeneratedDocument(req, {
+      jobId: id,
+      documentType: "excel_app",
+      label: "Progiciel Excel",
+      title: ctx?.appName || "Progiciel Excel",
+      fileName: "progiciel-excel.xlsx",
+      paymentOrderNumber: paymentCheck.orderNumber,
+      regenerationBody: { lang, ctx },
+      regeneratePath: "/generate-excel-app?async=1",
+      statusPath: `/generate-excel-app/jobs/${id}`,
+      resultPath: `/generate-excel-app/jobs/${id}/result`,
+      statusTemplate: "/generate-excel-app/jobs/{jobId}",
+      resultTemplate: "/generate-excel-app/jobs/{jobId}/result",
     });
     return res.json({ jobId: id, status: "queued" });
   }

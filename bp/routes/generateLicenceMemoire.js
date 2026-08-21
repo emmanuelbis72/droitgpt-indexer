@@ -7,6 +7,7 @@ import { writeLicenceMemoirePdf } from "../core/academicPdfAssembler.js";
 import { makeJobId, getJob } from "../core/jobStore.js";
 import { enqueueGenerationJob } from "../core/generationQueue.js";
 import { consumePaymentForGeneration, verifyPaidPaymentForRequest } from "../core/flexpayPayments.js";
+import { rememberGeneratedDocument } from "../core/generatedDocumentTracker.js";
 
 const router = express.Router();
 const JOB_TTL_MS = Number(process.env.MEMOIRE_JOB_TTL_MS || 1000 * 60 * 60 * 24 * 30); // 30 days
@@ -181,6 +182,20 @@ async function generateMemoire(req, res) {
     await consumePaymentForGeneration(paymentCheck.orderNumber, {
       documentType: "memoire",
       jobId,
+    });
+    await rememberGeneratedDocument(req, {
+      jobId,
+      documentType: "memoire",
+      label: "Memoire",
+      title,
+      fileName: "memoire-licence.pdf",
+      paymentOrderNumber: paymentCheck.orderNumber,
+      regenerationBody: req.body || {},
+      regeneratePath: "/generate-academic/licence-memoire?async=1",
+      statusPath: `/generate-academic/licence-memoire/jobs/${jobId}`,
+      resultPath: `/generate-academic/licence-memoire/jobs/${jobId}/result`,
+      statusTemplate: "/generate-academic/licence-memoire/jobs/{jobId}",
+      resultTemplate: "/generate-academic/licence-memoire/jobs/{jobId}/result",
     });
 
     if (wantAsync) {

@@ -6,6 +6,7 @@ import { normalizeLang, safeStr } from "../core/sanitize.js";
 import { makeJobId, getJob } from "../core/jobStore.js";
 import { enqueueGenerationJob } from "../core/generationQueue.js";
 import { consumePaymentForGeneration, verifyPaidPaymentForRequest } from "../core/flexpayPayments.js";
+import { rememberGeneratedDocument } from "../core/generatedDocumentTracker.js";
 import grantsDiscoveryRoute from "./grantsDiscovery.js";
 
 const router = express.Router();
@@ -123,6 +124,20 @@ router.post("/", async (req, res) => {
     await consumePaymentForGeneration(paymentCheck.orderNumber, {
       documentType: "grants_management",
       jobId: id,
+    });
+    await rememberGeneratedDocument(req, {
+      jobId: id,
+      documentType: "grants_management",
+      label: "Gestion de subventions",
+      title,
+      fileName: "gestion-subventions.pdf",
+      paymentOrderNumber: paymentCheck.orderNumber,
+      regenerationBody: req.body || {},
+      regeneratePath: "/generate-grants-management?async=1",
+      statusPath: `/generate-grants-management/jobs/${id}`,
+      resultPath: `/generate-grants-management/jobs/${id}/result`,
+      statusTemplate: "/generate-grants-management/jobs/{jobId}",
+      resultTemplate: "/generate-grants-management/jobs/{jobId}/result",
     });
 
     if (wantAsync) {

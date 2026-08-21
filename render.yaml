@@ -15,8 +15,12 @@ services:
         sync: false
       - key: QDRANT_API_KEY
         sync: false
+      - key: MONGODB_URI
+        sync: false
       - key: JWT_ACCESS_SECRET
         sync: false
+      - key: ACCESS_TOKEN_TTL
+        value: "7d"
       - key: SMTP_HOST
         sync: false
       - key: SMTP_PORT
@@ -29,6 +33,8 @@ services:
         sync: false
       - key: FRONTEND_URL
         value: "https://droitgpt-ui.vercel.app"
+      - key: ALLOWED_ORIGINS
+        value: "https://droitgpt-ui.vercel.app,https://www.droitgpt.com,https://droitgpt.com"
 
   - type: web
     name: droitgpt-pdf-api

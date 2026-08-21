@@ -15,7 +15,7 @@ const DEFAULT_DB = {
 
 let writeQueue = Promise.resolve();
 let qdrantInitPromise = null;
-let qdrantDisabled = false;
+let qdrantDisabledUntil = 0;
 
 function envBool(name, fallback = false) {
   const value = process.env[name];
@@ -44,6 +44,46 @@ function cleanDate(value) {
 function cleanUrl(value, max = 1200) {
   const url = clean(value, max);
   return /^https?:\/\//i.test(url) ? url : "";
+}
+
+function markQdrantTemporarilyDisabled(error) {
+  const cooldownMs = Math.max(30_000, Number(process.env.QDRANT_RETRY_COOLDOWN_MS || 120_000));
+  qdrantDisabledUntil = Date.now() + cooldownMs;
+  qdrantInitPromise = null;
+  console.warn("[DOCUMENTS] Qdrant temporarily unavailable, falling back to JSON:", String(error?.message || error));
+}
+
+function safeJsonValue(value, maxChars = 60000) {
+  if (value == null) return null;
+  try {
+    const json = JSON.stringify(value);
+    if (!json || json.length > maxChars) return null;
+    return JSON.parse(json);
+  } catch {
+    return null;
+  }
+}
+
+function normalizeRegeneration(input = {}) {
+  const raw = input && typeof input === "object" ? input : {};
+  return {
+    method: clean(raw.method || "POST", 12).toUpperCase() === "POST" ? "POST" : "POST",
+    url: cleanUrl(raw.url, 1200),
+    contentType: clean(raw.contentType || "application/json", 120),
+    body: safeJsonValue(raw.body),
+    statusUrlTemplate: cleanUrl(raw.statusUrlTemplate, 1200),
+    resultUrlTemplate: cleanUrl(raw.resultUrlTemplate, 1200),
+  };
+}
+
+function hasUsableRegeneration(regeneration = {}) {
+  return Boolean(regeneration?.url && regeneration?.body);
+}
+
+function mergeRegeneration(next, previous) {
+  if (hasUsableRegeneration(next)) return next;
+  if (hasUsableRegeneration(previous)) return previous;
+  return next || previous || normalizeRegeneration();
 }
 
 function deterministicUuid(value) {
@@ -205,6 +245,7 @@ function normalizeRecord(input = {}, owner) {
     updatedAt: now,
     doneAt: cleanDate(input.doneAt),
     downloadedAt: cleanDate(input.downloadedAt),
+    regeneration: normalizeRegeneration(input.regeneration),
   };
 }
 
@@ -230,7 +271,13 @@ function recordVector(record = {}) {
 }
 
 function isQdrantConfigured() {
-  return Boolean(process.env.QDRANT_URL) && !envBool("GENERATED_DOCUMENTS_DISABLE_QDRANT_STORE", false) && !qdrantDisabled;
+  if (!process.env.QDRANT_URL || envBool("GENERATED_DOCUMENTS_DISABLE_QDRANT_STORE", false)) return false;
+  if (qdrantDisabledUntil && Date.now() < qdrantDisabledUntil) return false;
+  if (qdrantDisabledUntil && Date.now() >= qdrantDisabledUntil) {
+    qdrantDisabledUntil = 0;
+    qdrantInitPromise = null;
+  }
+  return true;
 }
 
 async function qdrantFetch(pathname, options = {}) {
@@ -291,8 +338,7 @@ async function ensureQdrantCollection() {
       if (!created.ok) await throwQdrantError(created, "Qdrant documents collection create failed");
       return true;
     })().catch((error) => {
-      qdrantDisabled = true;
-      console.warn("[DOCUMENTS] Qdrant store disabled, falling back to JSON:", String(error?.message || error));
+      markQdrantTemporarilyDisabled(error);
       return false;
     });
   }
@@ -413,8 +459,7 @@ async function safeQdrant(operation) {
   try {
     return await operation();
   } catch (error) {
-    qdrantDisabled = true;
-    console.warn("[DOCUMENTS] Qdrant failed, falling back to JSON:", String(error?.message || error));
+    markQdrantTemporarilyDisabled(error);
     return null;
   }
 }
@@ -446,6 +491,7 @@ export async function saveGeneratedDocument(input = {}, owner) {
           id: existing.id,
           createdAt: existing.createdAt || normalized.createdAt,
           updatedAt: nowIso(),
+          regeneration: mergeRegeneration(normalized.regeneration, existing.regeneration),
         }
       : normalized;
     await qdrantUpsertDocument(merged);
@@ -464,6 +510,7 @@ export async function saveGeneratedDocument(input = {}, owner) {
         id: db.documents[idx].id,
         createdAt: db.documents[idx].createdAt || normalized.createdAt,
         updatedAt: nowIso(),
+        regeneration: mergeRegeneration(normalized.regeneration, db.documents[idx].regeneration),
       };
       db.documents[idx] = record;
     } else {
@@ -486,6 +533,7 @@ export async function patchGeneratedDocument(idOrJobId, patch = {}, owner) {
     if (!existing) return null;
     const merged = normalizeRecord({ ...existing, ...patch, id: existing.id, jobId: existing.jobId }, owner);
     merged.createdAt = existing.createdAt || merged.createdAt;
+    merged.regeneration = mergeRegeneration(merged.regeneration, existing.regeneration);
     await qdrantUpsertDocument(merged);
     return merged;
   });
@@ -497,6 +545,7 @@ export async function patchGeneratedDocument(idOrJobId, patch = {}, owner) {
     if (idx < 0) return db;
     record = normalizeRecord({ ...db.documents[idx], ...patch, id: db.documents[idx].id, jobId: db.documents[idx].jobId }, owner);
     record.createdAt = db.documents[idx].createdAt || record.createdAt;
+    record.regeneration = mergeRegeneration(record.regeneration, db.documents[idx].regeneration);
     db.documents[idx] = record;
     return db;
   });

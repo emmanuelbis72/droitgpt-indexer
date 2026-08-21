@@ -8,6 +8,7 @@ import { writeBusinessPlanPdfPremium } from "../core/pdfAssembler.js";
 import { makeJobId, getJob } from "../core/jobStore.js";
 import { enqueueGenerationJob } from "../core/generationQueue.js";
 import { consumePaymentForGeneration, verifyPaidPaymentForRequest } from "../core/flexpayPayments.js";
+import { rememberGeneratedDocument } from "../core/generatedDocumentTracker.js";
 import {
   normalizeLang,
   normalizeDocType,
@@ -224,6 +225,20 @@ router.post("/premium", async (req, res) => {
       documentType: "businessplan",
       jobId,
     });
+    await rememberGeneratedDocument(req, {
+      jobId,
+      documentType: "businessplan",
+      label: "Business Plan",
+      title,
+      fileName: `${safeFilenameBase(ctx.companyName || "business-plan")}.pdf`,
+      paymentOrderNumber: paymentCheck.orderNumber,
+      regenerationBody: { ...b, output, lite },
+      regeneratePath: "/generate-business-plan/premium?async=1",
+      statusPath: `/generate-business-plan/premium/jobs/${jobId}`,
+      resultPath: `/generate-business-plan/premium/jobs/${jobId}/result`,
+      statusTemplate: "/generate-business-plan/premium/jobs/{jobId}",
+      resultTemplate: "/generate-business-plan/premium/jobs/{jobId}/result",
+    });
 
     // ✅ JOB mode: return quickly with jobId, run generation in queue
     if (wantAsync) {
@@ -363,6 +378,20 @@ router.post("/premium/rewrite", upload.single("file"), async (req, res) => {
     await consumePaymentForGeneration(paymentCheck.orderNumber, {
       documentType: "businessplan",
       jobId,
+    });
+    await rememberGeneratedDocument(req, {
+      jobId,
+      documentType: "businessplan_rewrite",
+      label: "Business Plan corrige",
+      title,
+      fileName: `${safeName || "business-plan-corrige"}.pdf`,
+      paymentOrderNumber: paymentCheck.orderNumber,
+      regenerationBody: { ...b, text: draftText },
+      regeneratePath: "/generate-business-plan/premium/rewrite?async=1",
+      statusPath: `/generate-business-plan/premium/jobs/${jobId}`,
+      resultPath: `/generate-business-plan/premium/jobs/${jobId}/result`,
+      statusTemplate: "/generate-business-plan/premium/jobs/{jobId}",
+      resultTemplate: "/generate-business-plan/premium/jobs/{jobId}/result",
     });
 
     if (wantAsync) {
