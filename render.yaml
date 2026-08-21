@@ -80,17 +80,17 @@ services:
       - key: FLEXPAY_CURRENCY
         value: "USD"
       - key: PAYMENT_DEFAULT_PRICE_USD
-        value: "4"
+        value: "3"
       - key: PAYMENT_PRICE_BUSINESSPLAN_USD
-        value: "4"
+        value: "3"
       - key: PAYMENT_PRICE_MEMOIRE_USD
-        value: "4"
+        value: "3"
       - key: PAYMENT_PRICE_NGO_PROJECT_USD
-        value: "4"
+        value: "3"
       - key: PAYMENT_PRICE_GRANTS_MANAGEMENT_USD
-        value: "4"
+        value: "3"
       - key: PAYMENT_PRICE_EXCEL_APP_USD
-        value: "4"
+        value: "3"
       - key: PAYMENT_PRICE_BUSINESSPLAN_PACK_USD
         value: "20"
       - key: QDRANT_PAYMENTS_COLLECTION

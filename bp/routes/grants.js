@@ -9,6 +9,7 @@ import {
   addSource,
   createJob,
   getJob,
+  getGrantsStorageStatus,
   getOpportunity,
   initGrantsStorage,
   listOpportunities,
@@ -30,7 +31,13 @@ router.use(async (_req, _res, next) => {
 });
 
 router.get("/health", (_req, res) => {
-  res.json({ ok: true, module: "grants", message: "Grants module operational", patrol: getGrantsPatrolStatus() });
+  res.json({
+    ok: true,
+    module: "grants",
+    message: "Grants module operational",
+    patrol: getGrantsPatrolStatus(),
+    storage: getGrantsStorageStatus(),
+  });
 });
 
 router.get("/patrol/status", (_req, res) => {

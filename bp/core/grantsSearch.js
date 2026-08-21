@@ -338,8 +338,12 @@ function buildAgentQueries(params = {}, baseQuery = "") {
     `site:fundsforngos.org ${base}`,
     `site:opportunitydesk.org ${base}`,
     `site:opportunitiesforafricans.com ${base}`,
+    `site:opportunitiesforyouth.org ${base}`,
     `site:youthop.com ${base}`,
-  ]).slice(0, 12);
+    `site:vc4a.com ${base}`,
+    `site:f6s.com ${base}`,
+    `site:linkedin.com/jobs ${base}`,
+  ]).slice(0, 16);
 }
 
 function dedupeStrings(items) {

@@ -1,5 +1,6 @@
 // bp/core/grantsIndexer.js
 import crypto from "node:crypto";
+import { normalizeQdrantBaseUrl } from "./qdrantUrl.js";
 
 const COLLECTION = process.env.QDRANT_GRANTS_COLLECTION || "grants_opportunities";
 const VECTOR_SIZE = 384;
@@ -89,20 +90,6 @@ async function qdrantFetch(path, options = {}) {
       ...(options.headers || {}),
     },
   });
-}
-
-function normalizeQdrantBaseUrl() {
-  const raw = String(process.env.QDRANT_URL || "").trim();
-  if (!raw) return "";
-  try {
-    const url = new URL(raw);
-    url.pathname = "";
-    url.search = "";
-    url.hash = "";
-    return url.toString().replace(/\/$/, "");
-  } catch {
-    return raw.replace(/\/$/, "");
-  }
 }
 
 function hashVector(text) {

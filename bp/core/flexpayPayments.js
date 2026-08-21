@@ -1,6 +1,7 @@
 // bp/core/flexpayPayments.js
 import crypto from "node:crypto";
 import { getJob, nowMs, patchJob, putJob } from "./jobStore.js";
+import { normalizeQdrantBaseUrl, qdrantUrlErrorHint } from "./qdrantUrl.js";
 
 const PAYMENT_NAMESPACE = "payments";
 const DEFAULT_PAYMENT_TTL_MS = 1000 * 60 * 60 * 24 * 14; // 14 days
@@ -393,24 +394,8 @@ async function qdrantFetch(pathname, options = {}) {
 
 async function throwQdrantError(response, message) {
   const text = await response.text().catch(() => "");
-  const hint = text.includes("404 page not found")
-    ? " Check QDRANT_URL: use the Qdrant REST cluster endpoint, not the dashboard URL."
-    : "";
+  const hint = qdrantUrlErrorHint(text);
   throw new Error(`${message}: ${response.status} ${text.slice(0, 300)}${hint}`);
-}
-
-function normalizeQdrantBaseUrl() {
-  const raw = String(process.env.QDRANT_URL || "").trim();
-  if (!raw) return "";
-  try {
-    const url = new URL(raw);
-    url.pathname = "";
-    url.search = "";
-    url.hash = "";
-    return url.toString().replace(/\/$/, "");
-  } catch {
-    return raw.replace(/\/$/, "");
-  }
 }
 
 async function ensureQdrantPaymentsCollection() {

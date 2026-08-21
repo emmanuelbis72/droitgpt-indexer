@@ -164,6 +164,8 @@ app.get('/', (_req, res) => {
       '/documents/health',
       '/documents',
       '/business-plan-pack/health',
+      '/business-plan-pack/samples',
+      '/business-plan-pack/samples/:id/download',
       '/business-plan-pack/download',
       '/download-business-plan',
     ],

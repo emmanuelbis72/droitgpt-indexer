@@ -19,6 +19,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import http from "http";
 import https from "https";
+import { normalizeQdrantUrl } from "./qdrantUrl.js";
 
 // 🔐 Auth
 import authRoutes from "./auth/auth.routes.js";
@@ -69,7 +70,7 @@ if (process.env.MONGODB_URI) {
    Clients
 ======================= */
 const qdrant = new QdrantClient({
-  url: process.env.QDRANT_URL,
+  url: normalizeQdrantUrl(),
   apiKey: process.env.QDRANT_API_KEY,
 });
 

@@ -4,6 +4,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { DEFAULT_GRANT_SOURCES, normalizeGrantStatus, normalizeGrantType } from "./grantsSources.js";
 import { clean, cleanUrl, verifyOpportunity } from "./grantsVerifier.js";
+import { normalizeQdrantBaseUrl, qdrantUrlErrorHint, qdrantUrlInfo } from "./qdrantUrl.js";
 
 const DATA_DIR = process.env.GRANTS_DATA_DIR || path.join(process.cwd(), "data");
 const DB_PATH = process.env.GRANTS_PROD_DB_PATH || path.join(DATA_DIR, "grants-prod-db.json");
@@ -196,6 +197,25 @@ export async function getJob(id) {
 
   const db = await readDb();
   return db.jobs.find((job) => job.id === id) || null;
+}
+
+export function getGrantsStorageStatus() {
+  const info = qdrantUrlInfo();
+  return {
+    storage: isQdrantConfigured() ? "qdrant" : "json",
+    qdrantConfigured: info.configured,
+    qdrantEnabled: isQdrantConfigured(),
+    qdrantDisabled,
+    qdrantHost: info.host,
+    qdrantPort: info.port,
+    qdrantLikelyDashboardUrl: info.likelyDashboardUrl,
+    collections: {
+      opportunities: OPPORTUNITIES_COLLECTION,
+      sources: SOURCES_COLLECTION,
+      jobs: JOBS_COLLECTION,
+    },
+    fallbackPath: DB_PATH,
+  };
 }
 
 async function initQdrantStorage() {
@@ -411,9 +431,7 @@ async function qdrantFetch(pathname, options = {}) {
 
 async function throwQdrantError(response, message) {
   const text = await response.text().catch(() => "");
-  const hint = text.includes("404 page not found")
-    ? " Check QDRANT_URL: use the Qdrant REST cluster endpoint, not the dashboard URL."
-    : "";
+  const hint = qdrantUrlErrorHint(text);
   throw new Error(`${message}: HTTP ${response.status} ${text.slice(0, 300)}${hint}`);
 }
 
@@ -566,20 +584,6 @@ function hashVector(text) {
 
 function isQdrantConfigured() {
   return Boolean(process.env.QDRANT_URL) && !qdrantDisabled;
-}
-
-function normalizeQdrantBaseUrl() {
-  const raw = String(process.env.QDRANT_URL || "").trim();
-  if (!raw) return "";
-  try {
-    const url = new URL(raw);
-    url.pathname = "";
-    url.search = "";
-    url.hash = "";
-    return url.toString().replace(/\/$/, "");
-  } catch {
-    return raw.replace(/\/$/, "");
-  }
 }
 
 async function readDb() {

@@ -4,6 +4,7 @@
 
 import crypto from "node:crypto";
 import zlib from "node:zlib";
+import { normalizeQdrantBaseUrl, qdrantUrlErrorHint } from "./qdrantUrl.js";
 
 const DEFAULT_NAMESPACE = "excel";
 const QDRANT_COLLECTION = process.env.QDRANT_GENERATION_JOBS_COLLECTION || "droitgpt_generation_jobs";
@@ -135,20 +136,6 @@ function isQdrantConfigured() {
   return Boolean(process.env.QDRANT_URL) && !envBool("GENERATION_JOBS_DISABLE_QDRANT_STORE", false) && !qdrantDisabled;
 }
 
-function normalizeQdrantBaseUrl() {
-  const raw = String(process.env.QDRANT_URL || "").trim();
-  if (!raw) return "";
-  try {
-    const url = new URL(raw);
-    url.pathname = "";
-    url.search = "";
-    url.hash = "";
-    return url.toString().replace(/\/$/, "");
-  } catch {
-    return raw.replace(/\/$/, "");
-  }
-}
-
 async function qdrantFetch(pathname, options = {}) {
   const base = normalizeQdrantBaseUrl();
   const timeoutMs = Math.max(5000, Number(process.env.QDRANT_TIMEOUT_MS || 15000));
@@ -171,9 +158,7 @@ async function qdrantFetch(pathname, options = {}) {
 
 async function throwQdrantError(response, message) {
   const text = await response.text().catch(() => "");
-  const hint = text.includes("404 page not found")
-    ? " Check QDRANT_URL: use the Qdrant REST cluster endpoint, not the dashboard URL."
-    : "";
+  const hint = qdrantUrlErrorHint(text);
   throw new Error(`${message}: HTTP ${response.status} ${text.slice(0, 300)}${hint}`);
 }
 

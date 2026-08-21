@@ -10,6 +10,7 @@ import { OpenAIEmbeddings } from '@langchain/openai';
 import { QdrantVectorStore } from '@langchain/community/vectorstores/qdrant';
 import { QdrantClient } from '@qdrant/js-client-rest';
 import dotenv from 'dotenv';
+import { normalizeQdrantUrl } from './qdrantUrl.js';
 
 dotenv.config();
 
@@ -18,7 +19,7 @@ const __dirname = dirname(__filename);
 const directoryPath = path.join(__dirname, './docs');
 
 const client = new QdrantClient({
-  url: process.env.QDRANT_URL,
+  url: normalizeQdrantUrl(),
   apiKey: process.env.QDRANT_API_KEY,
 });
 

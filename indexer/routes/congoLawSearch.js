@@ -2,12 +2,13 @@ import express from "express";
 import { OpenAIEmbeddings } from "@langchain/openai";
 import { QdrantClient } from "@qdrant/js-client-rest";
 import dotenv from "dotenv";
+import { normalizeQdrantUrl } from "../qdrantUrl.js";
 dotenv.config();
 
 const router = express.Router();
 
 const qdrant = new QdrantClient({
-  url: process.env.QDRANT_URL,
+  url: normalizeQdrantUrl(),
   apiKey: process.env.QDRANT_API_KEY,
 });
 
