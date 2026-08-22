@@ -53,6 +53,16 @@ router.get("/premium/jobs/:id/result", async (req, res) => {
     return res.status(500).json({ error: "JOB_RESULT_MISSING" });
   }
 
+  const format = normalizeResultFormat(req.query?.format || req.query?.output || result.output || "pdf");
+  if (format === "doc") {
+    return writeBusinessPlanWordDoc({
+      res,
+      title: result.title,
+      ctx: result.ctx,
+      sections: result.sections,
+    });
+  }
+
   // ✅ One-pass PDF (render once here only)
   return writeBusinessPlanPdfPremium({
     res,
@@ -85,6 +95,95 @@ function normalizeBoolean(value) {
   if (value === true || value === false) return value;
   const text = String(value ?? "").trim().toLowerCase();
   return ["1", "true", "yes", "oui", "on"].includes(text);
+}
+
+function normalizeResultFormat(value) {
+  const text = String(value || "pdf").trim().toLowerCase();
+  if (["doc", "word", "docx"].includes(text)) return "doc";
+  return "pdf";
+}
+
+function normalizeOutput(value) {
+  const text = String(value || "pdf").trim().toLowerCase();
+  if (["doc", "word", "docx"].includes(text)) return "doc";
+  if (text === "both") return "both";
+  if (text === "json") return "json";
+  return "pdf";
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function sectionText(section) {
+  const content = String(section?.content || "").trim();
+  if (content) return content;
+  if (section?.meta) return JSON.stringify(section.meta, null, 2);
+  return "";
+}
+
+function buildBusinessPlanWordHtml({ title, ctx, sections }) {
+  const rows = [
+    ["Entreprise", ctx?.companyName],
+    ["Pays", ctx?.country],
+    ["Ville(s)", ctx?.city],
+    ["Secteur", ctx?.sector],
+    ["Audience", ctx?.audience],
+    ["Type", ctx?.docType],
+    ["Stade", ctx?.stage],
+    ["Date", new Date().toLocaleDateString("fr-FR")],
+  ].filter(([, value]) => String(value || "").trim());
+
+  const metaRows = rows
+    .map(([label, value]) => `<tr><th>${escapeHtml(label)}</th><td>${escapeHtml(value)}</td></tr>`)
+    .join("");
+
+  const body = (Array.isArray(sections) ? sections : [])
+    .map((section) => {
+      const heading = escapeHtml(section?.title || section?.key || "Section");
+      const text = escapeHtml(sectionText(section))
+        .replace(/\r\n/g, "\n")
+        .replace(/\n{3,}/g, "\n\n")
+        .replace(/\n/g, "<br>");
+      return `<section><h2>${heading}</h2><p>${text || "Information non precisee."}</p></section>`;
+    })
+    .join("");
+
+  return `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>${escapeHtml(title || "Business Plan")}</title>
+  <style>
+    body { font-family: Calibri, Arial, sans-serif; color: #111827; line-height: 1.45; margin: 42px; }
+    h1 { color: #064e3b; font-size: 28px; margin-bottom: 10px; }
+    h2 { color: #065f46; font-size: 19px; margin-top: 28px; border-bottom: 1px solid #d1fae5; padding-bottom: 6px; }
+    table { border-collapse: collapse; margin: 18px 0 26px; width: 100%; }
+    th, td { border: 1px solid #d1d5db; padding: 8px 10px; text-align: left; vertical-align: top; }
+    th { width: 150px; background: #ecfdf5; color: #064e3b; }
+    p { margin: 10px 0; }
+    .note { color: #64748b; font-size: 12px; margin-top: 22px; }
+  </style>
+</head>
+<body>
+  <h1>${escapeHtml(title || "Business Plan")}</h1>
+  <table>${metaRows}</table>
+  ${body}
+  <p class="note">Document genere automatiquement par DroitGPT a partir des informations fournies. Verifier les chiffres avant tout depot officiel.</p>
+</body>
+</html>`;
+}
+
+function writeBusinessPlanWordDoc({ res, title, ctx, sections }) {
+  const filename = `${safeFilenameBase(title || ctx?.companyName || "business-plan")}.doc`;
+  res.setHeader("Content-Type", "application/msword; charset=utf-8");
+  res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+  return res.send(Buffer.from(`\ufeff${buildBusinessPlanWordHtml({ title, ctx, sections })}`, "utf8"));
 }
 
 async function extractDraftTextFromUpload(file) {
@@ -139,7 +238,7 @@ async function extractDraftTextFromUpload(file) {
 router.get("/premium", (_req, res) => {
   res.json({
     ok: true,
-    message: "✅ Endpoint premium OK. Utilise POST pour générer le business plan (pdf/json).",
+    message: "✅ Endpoint premium OK. Utilise POST pour générer le business plan (pdf/doc/json).",
     example: {
       method: "POST",
       url: "/generate-business-plan/premium",
@@ -158,7 +257,7 @@ router.get("/premium", (_req, res) => {
  *   companyName, country, city, sector, stage,
  *   product, customers, businessModel, traction, competition, risks,
  *   finAssumptions, fundingAsk,
- *   output: "pdf" | "json",
+ *   output: "pdf" | "doc" | "both" | "json",
  *   lite: true/false (lite => Canvas+SWOT+Finances seulement)
  *   test: true (retour instantané)
  * }
@@ -207,8 +306,9 @@ router.post("/premium", async (req, res) => {
         ? `${ctx.companyName} — Business Plan (Premium)`
         : `${ctx.companyName} — Plan d’affaires (Premium)`;
 
-    const output = String(b.output || "pdf").toLowerCase();
+    const output = normalizeOutput(b.output);
     const lite = normalizeBoolean(b.lite);
+    const resultFormat = normalizeResultFormat(output);
 
     const jobId = makeJobId();
     const queued = await enqueueGenerationJob({
@@ -219,7 +319,7 @@ router.post("/premium", async (req, res) => {
       meta: { documentType: "businessplan" },
       task: async () => {
         const { sections, fullText } = await generateBusinessPlanPremium({ lang, ctx, lite });
-        return { title, lang, ctx, lite, sections, fullText };
+        return { title, lang, ctx, lite, output, sections, fullText };
       },
     });
 
@@ -236,14 +336,14 @@ router.post("/premium", async (req, res) => {
       documentType: "businessplan",
       label: "Business Plan",
       title,
-      fileName: `${safeFilenameBase(ctx.companyName || "business-plan")}.pdf`,
+      fileName: `${safeFilenameBase(ctx.companyName || "business-plan")}.${resultFormat === "doc" ? "doc" : "pdf"}`,
       paymentOrderNumber: paymentCheck.orderNumber,
       regenerationBody: { ...b, output, lite },
       regeneratePath: "/generate-business-plan/premium?async=1",
       statusPath: `/generate-business-plan/premium/jobs/${jobId}`,
-      resultPath: `/generate-business-plan/premium/jobs/${jobId}/result`,
+      resultPath: `/generate-business-plan/premium/jobs/${jobId}/result${resultFormat === "doc" ? "?format=doc" : ""}`,
       statusTemplate: "/generate-business-plan/premium/jobs/{jobId}",
-      resultTemplate: "/generate-business-plan/premium/jobs/{jobId}/result",
+      resultTemplate: `/generate-business-plan/premium/jobs/{jobId}/result${resultFormat === "doc" ? "?format=doc" : ""}`,
     });
 
     // ✅ JOB mode: return quickly with jobId, run generation in queue
@@ -268,6 +368,15 @@ router.post("/premium", async (req, res) => {
 
     if (output === "json") {
       return res.json(result);
+    }
+
+    if (resultFormat === "doc") {
+      return writeBusinessPlanWordDoc({
+        res,
+        title: result.title,
+        ctx: result.ctx,
+        sections: result.sections,
+      });
     }
 
     // ✅ PDF Premium (TOC, pages, tableaux Canvas/SWOT/Finances)
@@ -295,7 +404,7 @@ router.post("/premium", async (req, res) => {
  *  - notes: consignes (optionnel)
  *  - + champs habituels (companyName, country, ... docType, audience, lang)
  *
- * Sortie: PDF (stable) — même assembleur que /premium
+ * Sortie: PDF ou Word — même contenu que /premium
  */
 router.post("/premium/rewrite", upload.single("file"), async (req, res) => {
   try {
@@ -358,6 +467,8 @@ router.post("/premium/rewrite", upload.single("file"), async (req, res) => {
       lang === "en"
         ? `${safeName} — Business Plan (Premium, Revised)`
         : `${safeName} — Plan d’affaires (Premium, corrigé)`;
+    const output = normalizeOutput(b.output);
+    const resultFormat = normalizeResultFormat(output);
 
     // 2) Génération orchestrée Premium via la queue partagée.
     const jobId = makeJobId();
@@ -373,7 +484,7 @@ router.post("/premium/rewrite", upload.single("file"), async (req, res) => {
           ctx,
           lite: false,
         });
-        return { title, lang, ctx, lite: false, sections };
+        return { title, lang, ctx, lite: false, output, sections };
       },
     });
 
@@ -390,14 +501,14 @@ router.post("/premium/rewrite", upload.single("file"), async (req, res) => {
       documentType: "businessplan_rewrite",
       label: "Business Plan corrige",
       title,
-      fileName: `${safeName || "business-plan-corrige"}.pdf`,
+      fileName: `${safeName || "business-plan-corrige"}.${resultFormat === "doc" ? "doc" : "pdf"}`,
       paymentOrderNumber: paymentCheck.orderNumber,
-      regenerationBody: { ...b, text: draftText },
+      regenerationBody: { ...b, output, text: draftText },
       regeneratePath: "/generate-business-plan/premium/rewrite?async=1",
       statusPath: `/generate-business-plan/premium/jobs/${jobId}`,
-      resultPath: `/generate-business-plan/premium/jobs/${jobId}/result`,
+      resultPath: `/generate-business-plan/premium/jobs/${jobId}/result${resultFormat === "doc" ? "?format=doc" : ""}`,
       statusTemplate: "/generate-business-plan/premium/jobs/{jobId}",
-      resultTemplate: "/generate-business-plan/premium/jobs/{jobId}/result",
+      resultTemplate: `/generate-business-plan/premium/jobs/{jobId}/result${resultFormat === "doc" ? "?format=doc" : ""}`,
     });
 
     if (wantAsync) {
@@ -418,6 +529,15 @@ router.post("/premium/rewrite", upload.single("file"), async (req, res) => {
     if (!result?.sections) return res.status(500).json({ error: "JOB_RESULT_MISSING" });
 
     res.setHeader("X-BP-Mode", "rewrite");
+    if (resultFormat === "doc") {
+      return writeBusinessPlanWordDoc({
+        res,
+        title: result.title,
+        ctx: result.ctx,
+        sections: result.sections,
+      });
+    }
+
     return writeBusinessPlanPdfPremium({
       res,
       title: result.title,
