@@ -16,6 +16,12 @@ const router = express.Router();
 const JOB_TTL_MS = Number(process.env.NGO_JOB_TTL_MS || 1000 * 60 * 60 * 24 * 30); // 30 days
 const JOB_NAMESPACE = "ngo";
 
+function normalizeBoolean(value) {
+  if (value === true || value === false) return value;
+  const text = String(value ?? "").trim().toLowerCase();
+  return ["1", "true", "yes", "oui", "on"].includes(text);
+}
+
 router.get("/premium", (_req, res) => {
   res.json({
     ok: true,
@@ -102,7 +108,7 @@ router.post("/premium", async (req, res) => {
     const wantAsync = String(req.query?.async || "") === "1";
 
     const lang = normalizeLang(req.body?.lang || "fr");
-    const lite = Boolean(req.body?.lite);
+    const lite = normalizeBoolean(req.body?.lite);
 
     const ctx = {
       projectTitle: safeStr(req.body?.ctx?.projectTitle, 160),
@@ -155,6 +161,7 @@ router.post("/premium", async (req, res) => {
         return {
           title,
           ctx,
+          lite,
           sections: result?.sections || [],
         };
       },

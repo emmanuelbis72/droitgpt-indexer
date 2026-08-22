@@ -114,7 +114,7 @@ function readPrice(documentType) {
   const defaultRaw =
     process.env[`PAYMENT_DEFAULT_PRICE_${currency}`] ||
     process.env.PAYMENT_DEFAULT_PRICE ||
-    (currency === "USD" ? "4" : "");
+    (currency === "USD" ? "3" : "");
   const defaultAmount = Number(String(defaultRaw).replace(/,/g, "."));
   if (Number.isFinite(defaultAmount) && defaultAmount > 0) {
     return { amount: defaultAmount, currency, envKey: "PAYMENT_DEFAULT_PRICE" };
