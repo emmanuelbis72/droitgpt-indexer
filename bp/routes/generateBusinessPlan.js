@@ -81,6 +81,12 @@ function truncateText(s, maxChars) {
   return t.slice(0, maxChars) + `\n\n[...TRONQUÉ: ${t.length - maxChars} caractères...]`;
 }
 
+function normalizeBoolean(value) {
+  if (value === true || value === false) return value;
+  const text = String(value ?? "").trim().toLowerCase();
+  return ["1", "true", "yes", "oui", "on"].includes(text);
+}
+
 async function extractDraftTextFromUpload(file) {
   if (!file || !file.buffer) return "";
   const original = String(file.originalname || "");
@@ -202,7 +208,7 @@ router.post("/premium", async (req, res) => {
         : `${ctx.companyName} — Plan d’affaires (Premium)`;
 
     const output = String(b.output || "pdf").toLowerCase();
-    const lite = Boolean(b.lite);
+    const lite = normalizeBoolean(b.lite);
 
     const jobId = makeJobId();
     const queued = await enqueueGenerationJob({
