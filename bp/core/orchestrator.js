@@ -474,6 +474,7 @@ function normalizeFinancials(obj, ctx) {
   const fin0 = isObj(obj) ? obj : {};
   const years = ["Y1", "Y2", "Y3", "Y4", "Y5"];
   const currency = String(fin0.currency || "USD").trim() || "USD";
+  const explicitInputs = hasExplicitFinancialInputs(ctx);
 
   const normalizeTable = (arr, defaultFormat = "money") => {
     const rows = Array.isArray(arr) ? arr : [];
@@ -487,7 +488,7 @@ function normalizeFinancials(obj, ctx) {
           if (y) out[y] = parseNumber(v);
         }
         for (const y of years) {
-          if (out[y] === undefined) out[y] = 0;
+          if (out[y] === undefined) out[y] = null;
         }
         return out;
       })
@@ -510,7 +511,7 @@ function normalizeFinancials(obj, ctx) {
         estimate: parseNumber(fin0.break_even.estimate),
         explanation: String(fin0.break_even.explanation || "").trim(),
       }
-    : { metric: "months", estimate: 0, explanation: "" };
+    : { metric: "months", estimate: null, explanation: "" };
 
   const use_of_funds = Array.isArray(fin0.use_of_funds)
     ? fin0.use_of_funds
@@ -550,13 +551,20 @@ function normalizeFinancials(obj, ctx) {
   };
 
   const rev = findRow(fin.pnl, ["revenue", "ventes", "chiffre"]);
-  const hasNonZero = rev ? years.some((y) => Number(rev[y] || 0) > 0) : false;
+  const hasPositiveRevenue = rev ? years.some((y) => isFiniteNumber(rev[y]) && Number(rev[y]) > 0) : false;
 
-  if (!hasNonZero) {
-    return buildFallbackFinancials({ ctx, currency, years });
+  if (!explicitInputs || !hasPositiveRevenue) {
+    return buildMissingFinancials({
+      ctx,
+      currency,
+      years,
+      reason: !explicitInputs
+        ? "Aucune hypothese financiere explicite n'a ete fournie par l'utilisateur."
+        : "La generation IA n'a pas produit de chiffre d'affaires positif verifiable.",
+    });
   }
 
-  return fin;
+  return applyFinancialQualityControl(fin);
 }
 
 function normalizeYearKey(key) {
@@ -583,13 +591,14 @@ function normalizeYearKey(key) {
 }
 
 function parseNumber(v) {
-  if (typeof v === "number") return Number.isFinite(v) ? v : 0;
+  if (typeof v === "number") return Number.isFinite(v) ? v : null;
   const s = String(v ?? "").trim();
-  if (!s) return 0;
+  if (!s || /^(-|—|n\/a|na|null|undefined|a renseigner|à renseigner)$/i.test(s)) return null;
 
   const cleaned = s.replace(/[^\d,.\-]/g, "").replace(/\s+/g, "");
+  if (!cleaned || cleaned === "-" || cleaned === "." || cleaned === ",") return null;
 
-  let num = 0;
+  let num = null;
   if (cleaned.includes(",") && cleaned.includes(".")) {
     num = Number(cleaned.replace(/,/g, ""));
   } else if (cleaned.includes(",") && !cleaned.includes(".")) {
@@ -598,8 +607,7 @@ function parseNumber(v) {
   } else {
     num = Number(cleaned);
   }
-  if (!Number.isFinite(num)) num = 0;
-  return num;
+  return Number.isFinite(num) ? num : null;
 }
 
 function toArr(v) {
@@ -612,7 +620,7 @@ function ensureRow(table, label, years, fmt) {
   const exists = Array.isArray(table) && table.some((r) => String(r?.label || "").toLowerCase() === String(label).toLowerCase());
   if (exists) return;
   const row = { label, __format: fmt };
-  for (const y of years) row[y] = 0;
+  for (const y of years) row[y] = null;
   table.push(row);
 }
 
@@ -626,64 +634,70 @@ function findRow(rows, needles) {
   return null;
 }
 
-function buildFallbackFinancials({ ctx, currency = "USD", years }) {
+function buildMissingFinancials({ ctx, currency = "USD", years, reason }) {
   const ys = Array.isArray(years) && years.length ? years : ["Y1", "Y2", "Y3", "Y4", "Y5"];
-
-  const baseRevenueY1 = 120000;
-  const growth = [1, 1.35, 1.7, 2.05, 2.45];
-  const revenue = ys.map((_, i) => Math.round(baseRevenueY1 * growth[i]));
-  const cogs = revenue.map((r) => Math.round(r * 0.45));
-  const opex = revenue.map((r) => Math.round(r * 0.30));
-  const capex = [35000, 12000, 8000, 8000, 8000];
-  const financing = [60000, 0, 0, 0, 0];
+  const missing = ys.map(() => null);
 
   const pnl = [
-    rowFrom("Revenue", revenue, ys, "money"),
-    rowFrom("COGS", cogs, ys, "money"),
-    rowFrom("OPEX", opex, ys, "money"),
+    rowFrom("Revenue", missing, ys, "money"),
+    rowFrom("COGS", missing, ys, "money"),
+    rowFrom("OPEX", missing, ys, "money"),
   ];
 
   const cashflow = [
-    rowFrom("Operating Cashflow", revenue.map((r, i) => r - cogs[i] - opex[i]), ys, "money"),
-    rowFrom("Investing Cashflow (CAPEX)", capex.map((c) => -c), ys, "money"),
-    rowFrom("Financing Cashflow", financing, ys, "money"),
+    rowFrom("Operating Cashflow", missing, ys, "money"),
+    rowFrom("Investing Cashflow (CAPEX)", missing, ys, "money"),
+    rowFrom("Financing Cashflow", missing, ys, "money"),
   ];
 
   const balance_sheet = [
-    rowFrom("Cash", revenue.map((r, i) => Math.max(0, r - cogs[i] - opex[i] - capex[i] + financing[i])), ys, "money"),
-    rowFrom("Inventory", revenue.map((r) => Math.round(r * 0.05)), ys, "money"),
-    rowFrom("Total Assets", revenue.map((r) => Math.round(r * 0.40)), ys, "money"),
-    rowFrom("Total Liabilities", revenue.map((r) => Math.round(r * 0.18)), ys, "money"),
-    rowFrom("Equity", revenue.map((r) => Math.round(r * 0.22)), ys, "money"),
+    rowFrom("Cash", missing, ys, "money"),
+    rowFrom("Inventory", missing, ys, "money"),
+    rowFrom("Total Assets", missing, ys, "money"),
+    rowFrom("Total Liabilities", missing, ys, "money"),
+    rowFrom("Equity", missing, ys, "money"),
   ];
 
   return {
     currency: String(currency || "USD"),
     years: ys,
+    missingData: true,
+    qualityStatus: "missing_inputs",
+    qualityNotes: [
+      reason || "Les hypotheses financieres manquent ou sont insuffisantes.",
+      "Aucun chiffre de secours n'a ete injecte par DroitGPT.",
+      "Completer les volumes, prix, couts, charges, investissements et financement demande avant validation bancaire.",
+    ],
     assumptions: [
-      { label: "Base revenus Y1", value: `${baseRevenueY1} ${currency}` },
-      { label: "COGS (% revenus)", value: "45%" },
-      { label: "OPEX (% revenus)", value: "30%" },
-      { label: "Croissance", value: "conservative (ramp-up + distribution)" },
-      { label: "CAPEX initial", value: `${capex[0]} ${currency}` },
-      { label: "Contexte", value: String(ctx?.country || "—") },
+      { label: "Chiffre d'affaires Y1", value: "a renseigner" },
+      { label: "Volumes vendus / clients", value: "a renseigner" },
+      { label: "Prix moyen", value: "a renseigner" },
+      { label: "Couts variables / COGS", value: "a renseigner" },
+      { label: "Charges fixes / OPEX", value: "a renseigner" },
+      { label: "Investissements / CAPEX", value: "a renseigner" },
+      { label: "Besoin de financement", value: String(ctx?.fundingAsk || "").trim() || "a renseigner" },
+      { label: "Contexte", value: String(ctx?.country || "-") },
     ],
     revenue_drivers: [
-      rowFrom("Volumes / ventes (index)", [100, 135, 170, 205, 245], ys, "number"),
-      rowFrom("Prix moyen (index)", [100, 102, 104, 106, 108], ys, "number"),
+      rowFrom("Volumes / ventes", missing, ys, "number"),
+      rowFrom("Prix moyen", missing, ys, "number"),
     ],
     pnl,
     cashflow,
     balance_sheet,
-    break_even: { metric: "months", estimate: 18, explanation: "Estimation conservative basée sur ramp-up et capacité de distribution." },
+    break_even: {
+      metric: "months",
+      estimate: null,
+      explanation: "A renseigner apres validation des revenus, couts variables et charges fixes.",
+    },
     use_of_funds: [
-      { label: "Équipements & installation", amount: 45000, notes: "Unité de production / hygiène / packaging" },
-      { label: "Fonds de roulement", amount: 15000, notes: "Stock initial, logistique, distribution" },
+      { label: "Equipements & installation", amount: null, notes: "A renseigner" },
+      { label: "Fonds de roulement", amount: null, notes: "A renseigner" },
     ],
     scenarios: [
-      { name: "Base", note: "Rythme de croissance modéré, exécution standard." },
-      { name: "Optimistic", note: "Accords B2B rapides + distribution élargie." },
-      { name: "Conservative", note: "Adoption plus lente + pression sur coûts." },
+      { name: "Base", note: "A construire apres validation des hypotheses." },
+      { name: "Optimistic", note: "A construire apres validation des hypotheses." },
+      { name: "Conservative", note: "A construire apres validation des hypotheses." },
     ],
   };
 }
@@ -691,9 +705,72 @@ function buildFallbackFinancials({ ctx, currency = "USD", years }) {
 function rowFrom(label, arr, years, fmt) {
   const r = { label, __format: fmt };
   years.forEach((y, i) => {
-    r[y] = Number(arr[i] || 0);
+    r[y] = isFiniteNumber(arr?.[i]) ? Number(arr[i]) : null;
   });
   return r;
+}
+
+function hasExplicitFinancialInputs(ctx = {}) {
+  const text = [
+    ctx?.finAssumptions,
+    ctx?.fundingAsk,
+    ctx?.draftText,
+    ctx?.businessModel,
+    ctx?.traction,
+  ]
+    .map((x) => String(x || ""))
+    .join("\n")
+    .toLowerCase();
+
+  if (!/\d/.test(text)) return false;
+  return /(usd|\$|fc|cdf|eur|€|dollar|franc|chiffre|revenu|vente|prix|cout|coût|charge|marge|capex|opex|budget|financement|investissement|tresorerie|trésorerie|cash)/i.test(text);
+}
+
+function applyFinancialQualityControl(fin) {
+  const years = Array.isArray(fin?.years) ? fin.years : ["Y1", "Y2", "Y3", "Y4", "Y5"];
+  const notes = [];
+  const cash = findRow(fin.balance_sheet, ["cash", "tresorerie", "trésorerie"]);
+  const assets = findRow(fin.balance_sheet, ["total assets", "total actif"]);
+  const liabilities = findRow(fin.balance_sheet, ["total liabilities", "total passif"]);
+  const equity = findRow(fin.balance_sheet, ["equity", "capitaux propres"]);
+
+  for (const y of years) {
+    const cashValue = optionalNumber(cash?.[y]);
+    const assetsValue = optionalNumber(assets?.[y]);
+    const liabilitiesValue = optionalNumber(liabilities?.[y]);
+    const equityValue = optionalNumber(equity?.[y]);
+
+    if (cashValue != null && assetsValue != null && cashValue > assetsValue) {
+      notes.push(`${y}: tresorerie superieure au total actif; les hypotheses doivent etre verifiees.`);
+    }
+
+    if (assetsValue != null && liabilitiesValue != null && equityValue != null) {
+      const balanceGap = Math.abs(assetsValue - (liabilitiesValue + equityValue));
+      const tolerance = Math.max(1, Math.abs(assetsValue) * 0.05);
+      if (balanceGap > tolerance) {
+        notes.push(`${y}: bilan non equilibre; actif ${assetsValue}, passif+capitaux propres ${liabilitiesValue + equityValue}.`);
+      }
+    }
+  }
+
+  return {
+    ...fin,
+    missingData: false,
+    qualityStatus: notes.length ? "needs_review" : "validated",
+    qualityNotes: notes.length
+      ? notes
+      : ["Controle financier automatique: aucune incoherence majeure detectee sur les tableaux fournis."],
+  };
+}
+
+function optionalNumber(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function isFiniteNumber(value) {
+  return optionalNumber(value) !== null;
 }
 
 /* -------------------------

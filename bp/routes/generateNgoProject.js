@@ -5,6 +5,7 @@ import { writeNgoProjectPdfPremium } from "../core/ngoPdfAssembler.js";
 import { normalizeLang, safeStr } from "../core/sanitize.js";
 import { makeJobId, getJob } from "../core/jobStore.js";
 import { enqueueGenerationJob } from "../core/generationQueue.js";
+import { ensureJobAccess } from "../core/jobAccess.js";
 import { consumePaymentForGeneration, verifyPaidPaymentForRequest } from "../core/flexpayPayments.js";
 import { rememberGeneratedDocument } from "../core/generatedDocumentTracker.js";
 
@@ -49,6 +50,7 @@ router.get("/premium/jobs/:id", async (req, res) => {
   const id = String(req.params.id || "");
   const j = await getJob(id, { namespace: JOB_NAMESPACE });
   if (!j) return res.status(404).json({ error: "JOB_NOT_FOUND" });
+  if (!ensureJobAccess(req, res, j)) return;
   return res.json({
     jobId: id,
     status: j.status,
@@ -63,6 +65,7 @@ router.get("/premium/jobs/:id/result", async (req, res) => {
   const id = String(req.params.id || "");
   const j = await getJob(id, { namespace: JOB_NAMESPACE });
   if (!j) return res.status(404).json({ error: "JOB_NOT_FOUND" });
+  if (!ensureJobAccess(req, res, j)) return;
   if (j.status !== "done") {
     // Provide explicit info when the job finished in error/rejected.
     if (j.status === "error" || j.status === "rejected") {
@@ -156,6 +159,8 @@ router.post("/premium", async (req, res) => {
       namespace: JOB_NAMESPACE,
       ttlMs: JOB_TTL_MS,
       meta: { documentType: "ngo_project" },
+      processor: "ngo_project",
+      payload: { title, lang, ctx, lite },
       task: async () => {
         const result = await generateNgoProjectPremium({ lang, ctx, lite });
         return {

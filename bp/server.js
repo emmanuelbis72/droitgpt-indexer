@@ -15,6 +15,7 @@ import businessPlanPackRoute from './routes/businessPlanPack.js';
 import { initGrantsDb } from './core/grantsDb.js';
 import { startGrantsScheduler } from './core/grantsScheduler.js';
 import { startGrantsPatrolScheduler } from './core/grantsPatrol.js';
+import { startPersistentGenerationWorker } from './core/generationQueue.js';
 
 dotenv.config();
 
@@ -202,6 +203,7 @@ app.use((err, req, res, _next) => {
 });
 
 await initGrantsDb();
+await startPersistentGenerationWorker();
 startGrantsScheduler();
 startGrantsPatrolScheduler();
 

@@ -5,8 +5,10 @@ import { writeGrantsManagementPdf } from "../core/grantsPdfAssembler.js";
 import { normalizeLang, safeStr } from "../core/sanitize.js";
 import { makeJobId, getJob } from "../core/jobStore.js";
 import { enqueueGenerationJob } from "../core/generationQueue.js";
+import { ensureJobAccess } from "../core/jobAccess.js";
 import { consumePaymentForGeneration, verifyPaidPaymentForRequest } from "../core/flexpayPayments.js";
 import { rememberGeneratedDocument } from "../core/generatedDocumentTracker.js";
+import { generateGrantApplicationAnswers, normalizeQuestions } from "../core/grantsApplicationAssistant.js";
 import grantsDiscoveryRoute from "./grantsDiscovery.js";
 
 const router = express.Router();
@@ -42,10 +44,41 @@ router.get("/", (_req, res) => {
   });
 });
 
+router.post("/application-assistant", async (req, res) => {
+  try {
+    const lang = normalizeLang(req.body?.lang || req.body?.language || "fr");
+    const companyProfile = req.body?.companyProfile || req.body?.profile || {};
+    const opportunity = req.body?.opportunity || {};
+    const questions = normalizeQuestions(req.body?.questions || req.body?.formQuestions || "");
+
+    if (!questions.length) {
+      return res.status(400).json({
+        error: "NO_QUESTIONS",
+        details: "Ajoute les questions du formulaire du bailleur ou de l'appel a projets.",
+      });
+    }
+
+    const result = await generateGrantApplicationAnswers({
+      lang,
+      companyProfile,
+      opportunity,
+      questions,
+    });
+
+    return res.json({ ok: true, result });
+  } catch (e) {
+    return res.status(500).json({
+      error: "GRANTS_APPLICATION_ASSISTANT_FAILED",
+      details: String(e?.message || e),
+    });
+  }
+});
+
 router.get("/jobs/:id", async (req, res) => {
   const id = String(req.params.id || "");
   const j = await getJob(id, { namespace: JOB_NAMESPACE });
   if (!j) return res.status(404).json({ error: "JOB_NOT_FOUND" });
+  if (!ensureJobAccess(req, res, j)) return;
   return res.json({
     jobId: id,
     status: j.status,
@@ -60,6 +93,7 @@ router.get("/jobs/:id/result", async (req, res) => {
   const id = String(req.params.id || "");
   const j = await getJob(id, { namespace: JOB_NAMESPACE });
   if (!j) return res.status(404).json({ error: "JOB_NOT_FOUND" });
+  if (!ensureJobAccess(req, res, j)) return;
   if (j.status !== "done") return res.status(409).json({ error: "JOB_NOT_READY", status: j.status });
 
   const result = j.result;
@@ -111,6 +145,8 @@ router.post("/", async (req, res) => {
       namespace: JOB_NAMESPACE,
       ttlMs: JOB_TTL_MS,
       meta: { documentType: "grants_management" },
+      processor: "grants_management",
+      payload: { title, lang, ctx },
       task: async () => {
         const workspace = await generateGrantsManagementWorkspace({ lang, ctx });
         return { title, lang, ctx, workspace };

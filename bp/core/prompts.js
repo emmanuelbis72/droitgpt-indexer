@@ -42,7 +42,13 @@ function draftBlock(lang, ctx) {
   const raw = String(ctx?.draftText || "").trim();
   if (!raw) return "";
   const notes = String(ctx?.rewriteNotes || "").trim();
-  const clipped = raw.length > 14000 ? raw.slice(0, 14000) + "\n\n[...TRUNCATED...]" : raw;
+  const maxChars = Math.max(8000, Number(process.env.BP_DRAFT_CONTEXT_MAX_CHARS || 45000));
+  const { text: clipped, omittedChars } = buildDraftDigest(raw, maxChars);
+  const coverage = omittedChars > 0
+    ? lang === "en"
+      ? `\n[DRAFT COVERAGE]\nThe source draft is ${raw.length} characters. This prompt includes representative beginning, middle and end extracts. ${omittedChars} characters are not included verbatim; say clearly if some details could not be exploited.\n`
+      : `\n[COUVERTURE DU BROUILLON]\nLe brouillon source contient ${raw.length} caractères. Ce prompt inclut des extraits représentatifs du début, du milieu et de la fin. ${omittedChars} caractères ne sont pas inclus mot pour mot; signale clairement les parties qui n'ont pas pu être exploitées.\n`
+    : "";
 
   if (lang === "en") {
     return `
@@ -52,6 +58,7 @@ Your job: rewrite, correct, restructure and upgrade it to investor/bank grade.
 - Keep the core facts, fix inconsistencies, remove fluff, improve clarity.
 - Do NOT invent precise statistics. Use ranges + assumptions.
 ${notes ? `\n[REVISION NOTES]\n${notes}\n` : ""}
+${coverage}
 
 DRAFT TEXT:
 """${clipped}"""
@@ -65,10 +72,33 @@ Ta mission : corriger, restructurer et élever le contenu au niveau banque/inves
 - Conserver les faits clés, corriger les incohérences, supprimer le superflu, améliorer la clarté.
 - Ne pas inventer de statistiques précises. Utilise des fourchettes + hypothèses.
 ${notes ? `\n[CONSIGNES DE CORRECTION]\n${notes}\n` : ""}
+${coverage}
 
 TEXTE DU BROUILLON :
 """${clipped}"""
 `.trim();
+}
+
+function buildDraftDigest(raw, maxChars) {
+  const text = String(raw || "");
+  if (text.length <= maxChars) return { text, omittedChars: 0 };
+
+  const firstLen = Math.floor(maxChars * 0.45);
+  const middleLen = Math.floor(maxChars * 0.20);
+  const lastLen = Math.max(1000, maxChars - firstLen - middleLen);
+  const midStart = Math.max(firstLen, Math.floor((text.length - middleLen) / 2));
+  const lastStart = Math.max(0, text.length - lastLen);
+
+  const parts = [
+    text.slice(0, firstLen),
+    "\n\n[...EXTRAIT CENTRAL DU BROUILLON...]\n\n",
+    text.slice(midStart, midStart + middleLen),
+    "\n\n[...FIN DU BROUILLON...]\n\n",
+    text.slice(lastStart),
+  ];
+
+  const digest = parts.join("").slice(0, maxChars + 200);
+  return { text: digest, omittedChars: Math.max(0, text.length - digest.length) };
 }
 
 export function sectionPrompt({ lang, sectionKey, ctx }) {
@@ -414,34 +444,38 @@ Rules:
 - Compact tables (max 8 rows per table)
 - Years exactly ["Y1","Y2","Y3","Y4","Y5"]
 - Numeric values only for Y1..Y5
+- Never invent financial figures. Use only figures explicitly provided by the user or directly calculable from them.
+- If a value is missing or not justified, use null. Do not use 0 as a placeholder.
+- Use 0 only when the user explicitly provided zero or when a transparent calculation gives zero.
+- The same assumptions must support the text, financial tables, charts and exports.
 
 Schema (STRICT): (same as existing backend expects)
 {
   "currency":"USD",
   "years":["Y1","Y2","Y3","Y4","Y5"],
   "assumptions":[ {"label":"...","value":"..."} ],
-  "revenue_drivers":[ {"label":"...","Y1":0,"Y2":0,"Y3":0,"Y4":0,"Y5":0} ],
+  "revenue_drivers":[ {"label":"...","Y1":null,"Y2":null,"Y3":null,"Y4":null,"Y5":null} ],
   "pnl":[
-    {"label":"Revenue","__format":"money","Y1":0,"Y2":0,"Y3":0,"Y4":0,"Y5":0},
-    {"label":"COGS","__format":"money","Y1":0,"Y2":0,"Y3":0,"Y4":0,"Y5":0},
-    {"label":"Gross Profit","__format":"money","Y1":0,"Y2":0,"Y3":0,"Y4":0,"Y5":0},
-    {"label":"OPEX","__format":"money","Y1":0,"Y2":0,"Y3":0,"Y4":0,"Y5":0},
-    {"label":"EBITDA","__format":"money","Y1":0,"Y2":0,"Y3":0,"Y4":0,"Y5":0},
-    {"label":"Net Profit","__format":"money","Y1":0,"Y2":0,"Y3":0,"Y4":0,"Y5":0}
+    {"label":"Revenue","__format":"money","Y1":null,"Y2":null,"Y3":null,"Y4":null,"Y5":null},
+    {"label":"COGS","__format":"money","Y1":null,"Y2":null,"Y3":null,"Y4":null,"Y5":null},
+    {"label":"Gross Profit","__format":"money","Y1":null,"Y2":null,"Y3":null,"Y4":null,"Y5":null},
+    {"label":"OPEX","__format":"money","Y1":null,"Y2":null,"Y3":null,"Y4":null,"Y5":null},
+    {"label":"EBITDA","__format":"money","Y1":null,"Y2":null,"Y3":null,"Y4":null,"Y5":null},
+    {"label":"Net Profit","__format":"money","Y1":null,"Y2":null,"Y3":null,"Y4":null,"Y5":null}
   ],
   "cashflow":[
-    {"label":"Operating Cashflow","__format":"money","Y1":0,"Y2":0,"Y3":0,"Y4":0,"Y5":0},
-    {"label":"Investing Cashflow (CAPEX)","__format":"money","Y1":0,"Y2":0,"Y3":0,"Y4":0,"Y5":0},
-    {"label":"Financing Cashflow","__format":"money","Y1":0,"Y2":0,"Y3":0,"Y4":0,"Y5":0}
+    {"label":"Operating Cashflow","__format":"money","Y1":null,"Y2":null,"Y3":null,"Y4":null,"Y5":null},
+    {"label":"Investing Cashflow (CAPEX)","__format":"money","Y1":null,"Y2":null,"Y3":null,"Y4":null,"Y5":null},
+    {"label":"Financing Cashflow","__format":"money","Y1":null,"Y2":null,"Y3":null,"Y4":null,"Y5":null}
   ],
   "balance_sheet":[
-    {"label":"Cash","__format":"money","Y1":0,"Y2":0,"Y3":0,"Y4":0,"Y5":0},
-    {"label":"Total Assets","__format":"money","Y1":0,"Y2":0,"Y3":0,"Y4":0,"Y5":0},
-    {"label":"Total Liabilities","__format":"money","Y1":0,"Y2":0,"Y3":0,"Y4":0,"Y5":0},
-    {"label":"Equity","__format":"money","Y1":0,"Y2":0,"Y3":0,"Y4":0,"Y5":0}
+    {"label":"Cash","__format":"money","Y1":null,"Y2":null,"Y3":null,"Y4":null,"Y5":null},
+    {"label":"Total Assets","__format":"money","Y1":null,"Y2":null,"Y3":null,"Y4":null,"Y5":null},
+    {"label":"Total Liabilities","__format":"money","Y1":null,"Y2":null,"Y3":null,"Y4":null,"Y5":null},
+    {"label":"Equity","__format":"money","Y1":null,"Y2":null,"Y3":null,"Y4":null,"Y5":null}
   ],
-  "break_even":{"metric":"months","estimate":0,"explanation":""},
-  "use_of_funds":[ {"label":"...","amount":0,"notes":""} ],
+  "break_even":{"metric":"months","estimate":null,"explanation":""},
+  "use_of_funds":[ {"label":"...","amount":null,"notes":""} ],
   "scenarios":[ {"name":"Base","note":""},{"name":"Optimistic","note":""},{"name":"Conservative","note":""} ]
 }`
         : `${ctxBlock}
@@ -450,34 +484,38 @@ Règles:
 - Tableaux compacts (max 8 lignes)
 - Années EXACTES ["Y1","Y2","Y3","Y4","Y5"]
 - Valeurs numériques uniquement
+- N'invente jamais les chiffres financiers. Utilise seulement les chiffres fournis par l'utilisateur ou calculables directement depuis ceux-ci.
+- Si une valeur manque ou n'est pas justifiée, mets null. Ne mets jamais 0 comme valeur de remplissage.
+- 0 est autorisé uniquement si l'utilisateur a fourni zéro ou si un calcul transparent donne zéro.
+- Les mêmes hypothèses doivent alimenter le texte, les tableaux, les graphiques et les exports.
 
 Schéma (STRICT): (compatible backend)
 {
   "currency":"USD",
   "years":["Y1","Y2","Y3","Y4","Y5"],
   "assumptions":[ {"label":"...","value":"..."} ],
-  "revenue_drivers":[ {"label":"...","Y1":0,"Y2":0,"Y3":0,"Y4":0,"Y5":0} ],
+  "revenue_drivers":[ {"label":"...","Y1":null,"Y2":null,"Y3":null,"Y4":null,"Y5":null} ],
   "pnl":[
-    {"label":"Chiffre d'affaires","__format":"money","Y1":0,"Y2":0,"Y3":0,"Y4":0,"Y5":0},
-    {"label":"COGS / Coût des ventes","__format":"money","Y1":0,"Y2":0,"Y3":0,"Y4":0,"Y5":0},
-    {"label":"Marge brute","__format":"money","Y1":0,"Y2":0,"Y3":0,"Y4":0,"Y5":0},
-    {"label":"OPEX / Charges opérationnelles","__format":"money","Y1":0,"Y2":0,"Y3":0,"Y4":0,"Y5":0},
-    {"label":"EBITDA","__format":"money","Y1":0,"Y2":0,"Y3":0,"Y4":0,"Y5":0},
-    {"label":"Résultat net","__format":"money","Y1":0,"Y2":0,"Y3":0,"Y4":0,"Y5":0}
+    {"label":"Chiffre d'affaires","__format":"money","Y1":null,"Y2":null,"Y3":null,"Y4":null,"Y5":null},
+    {"label":"COGS / Coût des ventes","__format":"money","Y1":null,"Y2":null,"Y3":null,"Y4":null,"Y5":null},
+    {"label":"Marge brute","__format":"money","Y1":null,"Y2":null,"Y3":null,"Y4":null,"Y5":null},
+    {"label":"OPEX / Charges opérationnelles","__format":"money","Y1":null,"Y2":null,"Y3":null,"Y4":null,"Y5":null},
+    {"label":"EBITDA","__format":"money","Y1":null,"Y2":null,"Y3":null,"Y4":null,"Y5":null},
+    {"label":"Résultat net","__format":"money","Y1":null,"Y2":null,"Y3":null,"Y4":null,"Y5":null}
   ],
   "cashflow":[
-    {"label":"Cashflow opérationnel","__format":"money","Y1":0,"Y2":0,"Y3":0,"Y4":0,"Y5":0},
-    {"label":"Cashflow d'investissement (CAPEX)","__format":"money","Y1":0,"Y2":0,"Y3":0,"Y4":0,"Y5":0},
-    {"label":"Cashflow de financement","__format":"money","Y1":0,"Y2":0,"Y3":0,"Y4":0,"Y5":0}
+    {"label":"Cashflow opérationnel","__format":"money","Y1":null,"Y2":null,"Y3":null,"Y4":null,"Y5":null},
+    {"label":"Cashflow d'investissement (CAPEX)","__format":"money","Y1":null,"Y2":null,"Y3":null,"Y4":null,"Y5":null},
+    {"label":"Cashflow de financement","__format":"money","Y1":null,"Y2":null,"Y3":null,"Y4":null,"Y5":null}
   ],
   "balance_sheet":[
-    {"label":"Trésorerie","__format":"money","Y1":0,"Y2":0,"Y3":0,"Y4":0,"Y5":0},
-    {"label":"Total Actif","__format":"money","Y1":0,"Y2":0,"Y3":0,"Y4":0,"Y5":0},
-    {"label":"Total Passif","__format":"money","Y1":0,"Y2":0,"Y3":0,"Y4":0,"Y5":0},
-    {"label":"Capitaux propres","__format":"money","Y1":0,"Y2":0,"Y3":0,"Y4":0,"Y5":0}
+    {"label":"Trésorerie","__format":"money","Y1":null,"Y2":null,"Y3":null,"Y4":null,"Y5":null},
+    {"label":"Total Actif","__format":"money","Y1":null,"Y2":null,"Y3":null,"Y4":null,"Y5":null},
+    {"label":"Total Passif","__format":"money","Y1":null,"Y2":null,"Y3":null,"Y4":null,"Y5":null},
+    {"label":"Capitaux propres","__format":"money","Y1":null,"Y2":null,"Y3":null,"Y4":null,"Y5":null}
   ],
-  "break_even":{"metric":"mois","estimate":0,"explanation":""},
-  "use_of_funds":[ {"label":"...","amount":0,"notes":""} ],
+  "break_even":{"metric":"mois","estimate":null,"explanation":""},
+  "use_of_funds":[ {"label":"...","amount":null,"notes":""} ],
   "scenarios":[ {"name":"Base","note":""},{"name":"Optimiste","note":""},{"name":"Prudent","note":""} ]
 }`,
 

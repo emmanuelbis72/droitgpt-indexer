@@ -259,10 +259,17 @@ function renderSection(doc, title, sectionObj, styles) {
     if (fin) {
       renderFinancialTables(doc, fin, styles);
       doc.moveDown(0.6);
-      renderFinancialCharts(doc, fin, styles);
+      if (shouldRenderFinancialCharts(fin)) {
+        renderFinancialCharts(doc, fin, styles);
+      } else {
+        applyFont(doc, styles.body).text(
+          "Graphiques financiers non affiches: les hypotheses chiffre d'affaires, couts et cashflow doivent d'abord etre renseignees ou validees.",
+          { align: "left" }
+        );
+      }
     } else {
       applyFont(doc, styles.body).text(
-        "⚠️ Financial JSON missing or invalid. Re-run generation.",
+        "Financial JSON missing or invalid. Re-run generation.",
         { align: "left" }
       );
     }
@@ -774,7 +781,7 @@ function normalizeFinancialsSchema(fin) {
     }
     // If years provided are weird (e.g., "Year 1"), we still enforce Y1..Y5
     for (const y of years) {
-      if (out[y] === undefined) out[y] = 0;
+      if (out[y] === undefined) out[y] = null;
     }
     return out;
   };
@@ -792,9 +799,12 @@ function normalizeFinancialsSchema(fin) {
     pnl: normalizeTable(fin.pnl, "money"),
     cashflow: normalizeTable(fin.cashflow, "money"),
     balance_sheet: normalizeTable(fin.balance_sheet, "money"),
-    break_even: fin.break_even || { metric: "months", estimate: 0, explanation: "" },
+    break_even: fin.break_even || { metric: "months", estimate: null, explanation: "" },
     use_of_funds: Array.isArray(fin.use_of_funds) ? fin.use_of_funds : [],
     scenarios: Array.isArray(fin.scenarios) ? fin.scenarios : [],
+    missingData: Boolean(fin.missingData),
+    qualityStatus: String(fin.qualityStatus || "").trim(),
+    qualityNotes: Array.isArray(fin.qualityNotes) ? fin.qualityNotes.map((x) => String(x || "").trim()).filter(Boolean) : [],
   };
 
   // Ensure minimal rows exist
@@ -802,10 +812,6 @@ function normalizeFinancialsSchema(fin) {
   ensureMinRow(out.pnl, "COGS", years);
   ensureMinRow(out.pnl, "OPEX", years);
 
-  // If revenue is all zeros -> treat as invalid to force re-generation
-  const rev = findRowByLabel(out.pnl, ["revenue", "ventes", "chiffre"]);
-  const hasNonZero = rev ? years.some((y) => Number(rev[y] || 0) > 0) : false;
-  if (!hasNonZero) return out; // keep but will show 0s; orchestrator should provide fallback
   return out;
 }
 
@@ -826,12 +832,14 @@ function normalizeYearKey(key) {
 }
 
 function parseNumber(v) {
-  if (typeof v === "number") return Number.isFinite(v) ? v : 0;
+  if (typeof v === "number") return Number.isFinite(v) ? v : null;
   const s = String(v ?? "").trim();
-  if (!s) return 0;
+  if (!s || /^(-|—|n\/a|na|null|undefined|a renseigner|à renseigner)$/i.test(s)) return null;
 
   const cleaned = s.replace(/[^\d,.\-]/g, "").replace(/\s+/g, "");
-  let num = 0;
+  if (!cleaned || cleaned === "-" || cleaned === "." || cleaned === ",") return null;
+
+  let num = null;
   if (cleaned.includes(",") && cleaned.includes(".")) {
     num = Number(cleaned.replace(/,/g, ""));
   } else if (cleaned.includes(",") && !cleaned.includes(".")) {
@@ -840,7 +848,7 @@ function parseNumber(v) {
   } else {
     num = Number(cleaned);
   }
-  return Number.isFinite(num) ? num : 0;
+  return Number.isFinite(num) ? num : null;
 }
 
 function ensureMinRow(rows, label, years) {
@@ -848,7 +856,7 @@ function ensureMinRow(rows, label, years) {
   const exists = rr.some((r) => String(r?.label || "").toLowerCase() === String(label).toLowerCase());
   if (exists) return;
   const row = { label, __format: "money" };
-  years.forEach((y) => (row[y] = 0));
+  years.forEach((y) => (row[y] = null));
   rr.push(row);
 }
 
@@ -862,6 +870,14 @@ function findRowByLabel(rows, needles) {
   return null;
 }
 
+function shouldRenderFinancialCharts(fin) {
+  if (!fin || fin.missingData || fin.qualityStatus === "missing_inputs") return false;
+  const years = Array.isArray(fin?.years) ? fin.years : ["Y1", "Y2", "Y3", "Y4", "Y5"];
+  const rev = findRowByLabel(fin?.pnl, ["revenue", "ventes", "chiffre"]);
+  const values = years.map((y) => optionalNumber(rev?.[y])).filter((v) => v != null);
+  return values.some((v) => v > 0);
+}
+
 function renderFinancialCharts(doc, fin, styles) {
   // Minimal integrated charts (revenues + EBITDA proxy + cashflow)
   const years = Array.isArray(fin?.years) ? fin.years : ["Y1", "Y2", "Y3", "Y4", "Y5"];
@@ -872,9 +888,13 @@ function renderFinancialCharts(doc, fin, styles) {
   const opex = findRowByLabel(fin?.pnl, ["opex", "expenses", "charges"]);
   const op = findRowByLabel(fin?.cashflow, ["operating"]);
 
-  const revenues = years.map((y) => Number(rev?.[y] || 0));
-  const ebitda = years.map((y, i) => revenues[i] - Number(cogs?.[y] || 0) - Number(opex?.[y] || 0));
-  const opcf = years.map((y) => Number(op?.[y] || 0));
+  const revenues = years.map((y) => optionalNumber(rev?.[y]) ?? 0);
+  const ebitda = years.map((y, i) => {
+    const c = optionalNumber(cogs?.[y]) ?? 0;
+    const o = optionalNumber(opex?.[y]) ?? 0;
+    return revenues[i] - c - o;
+  });
+  const opcf = years.map((y) => optionalNumber(op?.[y]) ?? 0);
 
   doc.moveDown(0.2);
   applyFont(doc, styles.h2).text("Graphiques financiers", { align: "left" });
@@ -959,6 +979,19 @@ function renderFinancialTables(doc, fin, styles) {
 
   applyFont(doc, styles.h2).text(`Finances (${currency})`, { align: "left" });
   doc.moveDown(0.25);
+  const qualityNotes = Array.isArray(fin?.qualityNotes) ? fin.qualityNotes.filter(Boolean) : [];
+  if (fin?.qualityStatus || qualityNotes.length) {
+    applyFont(doc, styles.body).text(
+      [
+        fin?.qualityStatus ? `Statut de validation: ${String(fin.qualityStatus)}` : "",
+        ...qualityNotes.map((note) => `- ${String(note)}`),
+      ]
+        .filter(Boolean)
+        .join("\n"),
+      { align: "left" }
+    );
+    doc.moveDown(0.3);
+  }
 
   renderKeyValueTable(
     doc,
@@ -984,11 +1017,9 @@ function renderFinancialTables(doc, fin, styles) {
   applyFont(doc, styles.h2).text("Point mort / Break-even");
   doc.moveDown(0.2);
   const beMetric = String(fin?.break_even?.metric || "mois");
-  const beEst = Number.isFinite(Number(fin?.break_even?.estimate))
-    ? Number(fin?.break_even?.estimate)
-    : "—";
+  const beEst = optionalNumber(fin?.break_even?.estimate);
   const beExp = String(fin?.break_even?.explanation || "").trim();
-  applyFont(doc, styles.body).text(`Estimation : ${beEst} ${beMetric}\n${beExp}`, {
+  applyFont(doc, styles.body).text(`Estimation : ${beEst == null ? "a renseigner" : beEst} ${beMetric}\n${beExp}`, {
     align: "justify",
   });
 
@@ -1057,7 +1088,7 @@ function enrichPnlWithDerived({ years, pnl }) {
   if (!grossProfitRow && revenue && cogs) {
     grossProfitRow = { label: "Marge brute", __format: "money" };
     for (const y of years) {
-      grossProfitRow[y] = toNum(revenue[y]) - toNum(cogs[y]);
+      grossProfitRow[y] = subtractIfKnown(revenue[y], cogs[y]);
     }
     const insertAt = idxCogs >= 0 ? idxCogs + 1 : idxRevenue + 1;
     rows.splice(Math.max(0, insertAt), 0, grossProfitRow);
@@ -1071,8 +1102,8 @@ function enrichPnlWithDerived({ years, pnl }) {
     grossProfitRow.__format = "money";
     for (const y of years) {
       const v = grossProfitRow[y];
-      if (v === 0 || v === null || v === undefined || v === "") {
-        grossProfitRow[y] = toNum(revenue[y]) - toNum(cogs[y]);
+      if (v === null || v === undefined || v === "") {
+        grossProfitRow[y] = subtractIfKnown(revenue[y], cogs[y]);
       }
     }
   }
@@ -1084,7 +1115,7 @@ function enrichPnlWithDerived({ years, pnl }) {
   if (!ebitdaRow && grossProfitRow && opex) {
     ebitdaRow = { label: "EBITDA", __format: "money" };
     for (const y of years) {
-      ebitdaRow[y] = toNum(grossProfitRow[y]) - toNum(opex[y]);
+      ebitdaRow[y] = subtractIfKnown(grossProfitRow[y], opex[y]);
     }
     const idxOpexNow = findRowIndex(rows, [
       "opex",
@@ -1104,8 +1135,8 @@ function enrichPnlWithDerived({ years, pnl }) {
     ebitdaRow.__format = "money";
     for (const y of years) {
       const v = ebitdaRow[y];
-      if (v === 0 || v === null || v === undefined || v === "") {
-        ebitdaRow[y] = toNum(grossProfitRow[y]) - toNum(opex[y]);
+      if (v === null || v === undefined || v === "") {
+        ebitdaRow[y] = subtractIfKnown(grossProfitRow[y], opex[y]);
       }
     }
   }
@@ -1118,9 +1149,9 @@ function enrichPnlWithDerived({ years, pnl }) {
   ) {
     const gm = { label: "Marge brute %", __format: "percent" };
     for (const y of years) {
-      const rev = toNum(revenue[y]);
-      const gp = toNum(grossProfitRow[y]);
-      gm[y] = rev > 0 ? (gp / rev) * 100 : 0;
+      const rev = optionalNumber(revenue[y]);
+      const gp = optionalNumber(grossProfitRow[y]);
+      gm[y] = rev != null && gp != null && rev > 0 ? (gp / rev) * 100 : null;
     }
     const idxGPNow = findRowIndex(rows, ["gross profit", "marge brute"]);
     rows.splice(Math.max(0, idxGPNow + 1), 0, gm);
@@ -1134,9 +1165,9 @@ function enrichPnlWithDerived({ years, pnl }) {
   ) {
     const em = { label: "EBITDA margin %", __format: "percent" };
     for (const y of years) {
-      const rev = toNum(revenue[y]);
-      const eb = toNum(ebitdaRow[y]);
-      em[y] = rev > 0 ? (eb / rev) * 100 : 0;
+      const rev = optionalNumber(revenue[y]);
+      const eb = optionalNumber(ebitdaRow[y]);
+      em[y] = rev != null && eb != null && rev > 0 ? (eb / rev) * 100 : null;
     }
     const idxENow = findRowIndex(rows, ["ebitda"]);
     rows.splice(Math.max(0, idxENow + 1), 0, em);
@@ -1160,9 +1191,11 @@ function findRowIndex(rows, patterns) {
   return -1;
 }
 
-function toNum(v) {
-  const n = Number(v || 0);
-  return Number.isFinite(n) ? n : 0;
+function subtractIfKnown(a, b) {
+  const left = optionalNumber(a);
+  const right = optionalNumber(b);
+  if (left == null || right == null) return null;
+  return left - right;
 }
 
 /* =========================
@@ -1319,15 +1352,19 @@ function renderUseOfFundsTable(doc, title, rows, styles, currency = "USD") {
   applyFont(doc, styles.small);
 
   let total = 0;
+  let hasNumericAmount = false;
 
   for (const r of rows || []) {
     ensureSpace(doc, 40);
 
     const label = String(r?.label || "").trim();
-    const amt = Number(r?.amount || 0);
+    const amt = optionalNumber(r?.amount);
     const notes = String(r?.notes || "").trim();
 
-    if (Number.isFinite(amt)) total += amt;
+    if (amt != null) {
+      total += amt;
+      hasNumericAmount = true;
+    }
 
     const y0 = doc.y;
     doc.save();
@@ -1346,7 +1383,7 @@ function renderUseOfFundsTable(doc, title, rows, styles, currency = "USD") {
 
   doc.moveDown(0.2);
   applyFont(doc, { font: "Helvetica-Bold", size: 10 });
-  doc.text(`Total: ${formatMoney(total)}`, x, doc.y, { width: w, align: "right" });
+  doc.text(`Total: ${hasNumericAmount ? formatMoney(total) : "a renseigner"}`, x, doc.y, { width: w, align: "right" });
 }
 
 /* =========================
@@ -1448,22 +1485,28 @@ function normalizeBullets(s) {
 }
 
 function formatMoney(v) {
-  const n = Number(v || 0);
-  if (!Number.isFinite(n)) return "—";
+  const n = optionalNumber(v);
+  if (n == null) return "a renseigner";
   return Math.round(n).toLocaleString("en-US");
 }
 
 function formatNumber(v) {
-  const n = Number(v || 0);
-  if (!Number.isFinite(n)) return "—";
+  const n = optionalNumber(v);
+  if (n == null) return "a renseigner";
   return Math.round(n).toLocaleString("en-US");
 }
 
 function formatPercent(v) {
-  const n = Number(v || 0);
-  if (!Number.isFinite(n)) return "—";
+  const n = optionalNumber(v);
+  if (n == null) return "a renseigner";
   const val = Math.round(n * 10) / 10; // 1 decimal in PDF for readability
   return `${val.toLocaleString("en-US")}%`;
+}
+
+function optionalNumber(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
 }
 
 function ensureSpace(doc, neededPx = 28) {

@@ -211,7 +211,7 @@ function extractWritingUnits(planText, lang) {
   };
 
   for (const line of lines) {
-    const t = line.replace(/^[-•\d.\s]+/, "");
+    const t = cleanPlanLine(line);
     const up = t.toUpperCase();
 
     const match = isEN
@@ -234,47 +234,36 @@ function extractWritingUnits(planText, lang) {
     if (match) push(t);
   }
 
-  if (units.length < 12) {
-    return isEN
-      ? [
-          "GENERAL INTRODUCTION",
-          "CHAPTER I: Literature Review and Theoretical Framework",
-          "Section 1: Key concepts and definitions",
-          "Section 2: Theoretical approaches and research model",
-          "CHAPTER II: Research Methodology",
-          "Section 1: Design, population, sampling",
-          "Section 2: Data collection and analysis plan",
-          "CHAPTER III: Results / Findings",
-          "Section 1: Descriptive results",
-          "Section 2: Thematic/analytical results",
-          "CHAPTER IV: Discussion and Recommendations",
-          "Section 1: Interpretation and comparison with literature",
-          "Section 2: Practical implications and recommendations",
-          "GENERAL CONCLUSION",
-          "BIBLIOGRAPHY (draft)",
-          "ANNEXES (draft)",
-        ]
-      : [
-          "INTRODUCTION GÉNÉRALE",
-          "CHAPITRE I : Revue de littérature et cadre théorique",
-          "Section 1 : Concepts clés et définitions",
-          "Section 2 : Approches théoriques et modèle d’analyse",
-          "CHAPITRE II : Méthodologie de recherche",
-          "Section 1 : Design, population, échantillonnage",
-          "Section 2 : Collecte des données et plan d’analyse",
-          "CHAPITRE III : Résultats / constats",
-          "Section 1 : Résultats descriptifs",
-          "Section 2 : Résultats analytiques / thématiques",
-          "CHAPITRE IV : Discussion et recommandations",
-          "Section 1 : Interprétation et confrontation à la littérature",
-          "Section 2 : Implications et recommandations",
-          "CONCLUSION GÉNÉRALE",
-          "BIBLIOGRAPHIE (brouillon)",
-          "ANNEXES (brouillon)",
-        ];
-  }
-
   return units.slice(0, 24);
+}
+
+function cleanPlanLine(line) {
+  return String(line || "")
+    .trim()
+    .replace(/^#{1,6}\s+/, "")
+    .replace(/^[-•]\s*/, "")
+    .replace(/^\d+[\s.)-]+/, "")
+    .replace(/^\*{1,3}/, "")
+    .replace(/\*{1,3}$/, "")
+    .replace(/\*\*/g, "")
+    .replace(/__+/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function assertValidWritingUnits(sectionTitles, plan, lang) {
+  const minUnits = Math.max(6, Number(process.env.ACAD_MIN_PLAN_UNITS || 8));
+  if (Array.isArray(sectionTitles) && sectionTitles.length >= minUnits) return;
+
+  const detail =
+    lang === "en"
+      ? `The dissertation plan could not be read reliably. Expected at least ${minUnits} detectable units (INTRODUCTION, CHAPTER, SECTION, CONCLUSION...).`
+      : `Le plan du memoire n'a pas pu etre lu de maniere fiable. Minimum attendu: ${minUnits} unites detectables (INTRODUCTION, CHAPITRE, SECTION, CONCLUSION...).`;
+
+  const error = new Error(`PLAN_STRUCTURE_INVALID: ${detail}`);
+  error.code = "PLAN_STRUCTURE_INVALID";
+  error.planPreview = String(plan || "").slice(0, 1200);
+  throw error;
 }
 
 export async function reviseLicenceMemoireFromDraft({
@@ -383,6 +372,7 @@ export async function generateLicenceMemoire({ lang, ctx }) {
   }
 
   const sectionTitles = extractWritingUnits(plan, lang);
+  assertValidWritingUnits(sectionTitles, plan, lang);
 
   // Used by prompts to keep sections realistically sized while reaching target pages.
   // Fast profile: ~260–290 words/page in typical university formatting.

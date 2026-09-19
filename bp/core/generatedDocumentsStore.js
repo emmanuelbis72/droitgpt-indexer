@@ -259,6 +259,64 @@ function publicRecord(record = {}) {
   return safe;
 }
 
+function supportRecord(record = {}) {
+  if (!record) return null;
+  return {
+    ...publicRecord(record),
+    ownerKey: clean(record.ownerKey, 300),
+  };
+}
+
+function lower(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function containsEmail(record = {}, email = "") {
+  const needle = lower(email);
+  if (!needle) return true;
+  if (lower(record.ownerEmail) === needle) return true;
+
+  // Support recovery for old records where the email may only be present
+  // inside the regeneration payload.
+  try {
+    return lower(JSON.stringify(record.regeneration?.body || {})).includes(needle);
+  } catch {
+    return false;
+  }
+}
+
+function recordMatchesSupportFilters(record = {}, filters = {}) {
+  const email = clean(filters.email, 260);
+  const id = clean(filters.id, 220);
+  const jobId = clean(filters.jobId, 160);
+  const paymentOrderNumber = clean(filters.paymentOrderNumber || filters.orderNumber, 160);
+  const documentType = clean(filters.documentType, 80).toLowerCase();
+  const status = clean(filters.status, 40).toLowerCase();
+  const q = lower(filters.q);
+
+  if (email && !containsEmail(record, email)) return false;
+  if (id && record.id !== id && record.jobId !== id) return false;
+  if (jobId && record.jobId !== jobId) return false;
+  if (paymentOrderNumber && record.paymentOrderNumber !== paymentOrderNumber) return false;
+  if (documentType && lower(record.documentType) !== documentType) return false;
+  if (status && lower(record.status) !== status) return false;
+  if (q) {
+    const haystack = lower(
+      [
+        record.title,
+        record.label,
+        record.fileName,
+        record.documentType,
+        record.ownerEmail,
+        record.jobId,
+        record.paymentOrderNumber,
+      ].join(" ")
+    );
+    if (!haystack.includes(q)) return false;
+  }
+  return true;
+}
+
 function recordPointId(ownerKey, id) {
   return deterministicUuid(`generated-document:${ownerKey}:${id}`);
 }
@@ -460,6 +518,29 @@ export async function listGeneratedDocuments(owner, options = {}) {
     .sort(sortDocuments)
     .slice(0, limit)
     .map(publicRecord);
+}
+
+export async function supportSearchGeneratedDocuments(filters = {}) {
+  const limit = Math.max(1, Math.min(500, Number(filters.limit || 100)));
+  const scrollLimit = Math.max(limit, Math.min(20000, Number(filters.scrollLimit || process.env.QDRANT_GENERATED_DOCUMENTS_SCROLL_LIMIT || 10000)));
+
+  const remotePoints = await safeQdrant(() => qdrantScrollAll(scrollLimit));
+  const records = remotePoints
+    ? remotePoints.map((point) => point?.payload?.record).filter(Boolean)
+    : (await readDb()).documents;
+
+  return records
+    .filter((record) => recordMatchesSupportFilters(record, filters))
+    .sort(sortDocuments)
+    .slice(0, limit)
+    .map(supportRecord);
+}
+
+export async function supportGetGeneratedDocument(idOrJobId) {
+  const key = clean(idOrJobId, 220);
+  if (!key) return null;
+  const docs = await supportSearchGeneratedDocuments({ id: key, limit: 1 });
+  return docs[0] || null;
 }
 
 export async function saveGeneratedDocument(input = {}, owner) {

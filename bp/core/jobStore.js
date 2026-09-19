@@ -1,18 +1,23 @@
 // bp/core/jobStore.js
-// Redis first, Qdrant second, in-memory last.
+// Redis first, Qdrant second, file fallback, in-memory cache.
 // This keeps paid generation jobs recoverable after browser disconnects and Render restarts.
 
 import crypto from "node:crypto";
+import fs from "node:fs/promises";
+import path from "node:path";
 import zlib from "node:zlib";
 import { normalizeQdrantBaseUrl, qdrantUrlErrorHint } from "./qdrantUrl.js";
 
 const DEFAULT_NAMESPACE = "excel";
 const QDRANT_COLLECTION = process.env.QDRANT_GENERATION_JOBS_COLLECTION || "droitgpt_generation_jobs";
 const QDRANT_VECTOR_SIZE = 4;
+const FILE_DATA_DIR = process.env.GENERATION_JOBS_DATA_DIR || path.join(process.cwd(), "data");
+const FILE_DB_PATH = process.env.GENERATION_JOBS_DB_PATH || path.join(FILE_DATA_DIR, "generation-jobs.json");
 
 let redis = null;
 let qdrantInitPromise = null;
 let qdrantDisabled = false;
+let fileWriteQueue = Promise.resolve();
 
 const MEM = new Map();
 
@@ -83,7 +88,8 @@ export async function putJob(job, { ttlMs, namespace = DEFAULT_NAMESPACE } = {})
     return;
   }
 
-  await qdrantSaveJobSafe(job, { namespace: ns });
+  const savedRemote = await qdrantSaveJobSafe(job, { namespace: ns });
+  if (!savedRemote) await filePutJob(job, { ttlMs, namespace: ns });
 }
 
 export async function getJob(id, { namespace = DEFAULT_NAMESPACE } = {}) {
@@ -107,7 +113,11 @@ export async function getJob(id, { namespace = DEFAULT_NAMESPACE } = {}) {
 
   const remote = await qdrantGetJobSafe(id, { namespace: ns });
   if (remote) cacheMemory(remote, { namespace: ns });
-  return remote;
+  if (remote) return remote;
+
+  const local = await fileGetJob(id, { namespace: ns });
+  if (local) cacheMemory(local, { namespace: ns });
+  return local;
 }
 
 export async function patchJob(id, patch, { ttlMs, namespace = DEFAULT_NAMESPACE } = {}) {
@@ -130,6 +140,87 @@ export async function deleteJob(id, { namespace = DEFAULT_NAMESPACE } = {}) {
   }
 
   await qdrantDeleteJobSafe(id, { namespace: ns });
+  await fileDeleteJob(id, { namespace: ns });
+}
+
+async function readFileDb() {
+  try {
+    await fs.mkdir(FILE_DATA_DIR, { recursive: true });
+    const raw = await fs.readFile(FILE_DB_PATH, "utf8").catch((error) => {
+      if (error?.code === "ENOENT") return "";
+      throw error;
+    });
+    if (!raw) return { version: 1, jobs: {}, meta: { createdAt: new Date().toISOString() } };
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") throw new Error("Invalid generation jobs file");
+    if (!parsed.jobs || typeof parsed.jobs !== "object") parsed.jobs = {};
+    return parsed;
+  } catch (error) {
+    console.warn("[JOBS] File job store read failed:", String(error?.message || error));
+    return { version: 1, jobs: {}, meta: { createdAt: new Date().toISOString() } };
+  }
+}
+
+function pruneFileDb(db) {
+  const t = nowMs();
+  for (const [key, value] of Object.entries(db.jobs || {})) {
+    if (value?.expiresAt && Number(value.expiresAt) <= t) delete db.jobs[key];
+  }
+  return db;
+}
+
+async function updateFileDb(mutator) {
+  fileWriteQueue = fileWriteQueue.catch(() => {}).then(async () => {
+    const db = pruneFileDb(await readFileDb());
+    await mutator(db);
+    db.meta = { ...(db.meta || {}), updatedAt: new Date().toISOString() };
+    await fs.mkdir(FILE_DATA_DIR, { recursive: true });
+    await fs.writeFile(FILE_DB_PATH, JSON.stringify(db, null, 2), "utf8");
+    return db;
+  });
+  return fileWriteQueue;
+}
+
+async function filePutJob(job, { ttlMs, namespace = DEFAULT_NAMESPACE } = {}) {
+  try {
+    const key = buildKey(namespace, job.id);
+    await updateFileDb((db) => {
+      db.jobs[key] = {
+        job,
+        expiresAt: ttlMs ? nowMs() + Number(ttlMs) : null,
+      };
+    });
+  } catch (error) {
+    console.warn("[JOBS] File job store write failed:", String(error?.message || error));
+  }
+}
+
+async function fileGetJob(id, { namespace = DEFAULT_NAMESPACE } = {}) {
+  try {
+    const db = pruneFileDb(await readFileDb());
+    const key = buildKey(namespace, id);
+    const record = db.jobs?.[key] || null;
+    if (!record) return null;
+    if (record.expiresAt && Number(record.expiresAt) <= nowMs()) {
+      await fileDeleteJob(id, { namespace });
+      return null;
+    }
+    return record.job || null;
+  } catch (error) {
+    console.warn("[JOBS] File job store get failed:", String(error?.message || error));
+    return null;
+  }
+}
+
+async function fileDeleteJob(id, { namespace = DEFAULT_NAMESPACE } = {}) {
+  try {
+    const key = buildKey(namespace, id);
+    await updateFileDb((db) => {
+      delete db.jobs[key];
+    });
+  } catch (error) {
+    console.warn("[JOBS] File job store delete failed:", String(error?.message || error));
+  }
 }
 
 function isQdrantConfigured() {

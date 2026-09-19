@@ -63,6 +63,26 @@ services:
         sync: false
       - key: REDIS_URL
         sync: false
+      - key: GENERATION_QUEUE_NAME
+        value: "droitgpt-generation"
+      - key: GENERATION_QUEUE_WORKER_ENABLED
+        value: "true"
+      - key: GENERATION_CONCURRENCY
+        value: "2"
+      - key: GENERATION_QUEUE_MAX_PENDING
+        value: "100"
+      - key: GENERATION_USER_LOCK_TTL_MS
+        value: "21600000"
+      - key: GENERATION_JOB_LOCK_DURATION_MS
+        value: "300000"
+      - key: GENERATION_STALLED_INTERVAL_MS
+        value: "60000"
+      - key: GENERATION_MAX_STALLED_COUNT
+        value: "1"
+      - key: GENERATION_QUEUE_RETENTION_SECONDS
+        value: "604800"
+      - key: GENERATION_QUEUE_RETENTION_COUNT
+        value: "3000"
       - key: FLEXPAY_ENABLED
         value: "true"
       - key: FLEXPAY_PAYMENT_REQUIRED
@@ -100,6 +120,8 @@ services:
       - key: QDRANT_API_KEY
         sync: false
       - key: JWT_ACCESS_SECRET
+        sync: false
+      - key: DOCUMENTS_SUPPORT_SECRET
         sync: false
       - key: QDRANT_GENERATED_DOCUMENTS_COLLECTION
         value: "droitgpt_generated_documents"

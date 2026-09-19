@@ -6,6 +6,7 @@ import { generateLicenceMemoire, reviseLicenceMemoireFromDraft } from "../core/a
 import { writeLicenceMemoirePdf } from "../core/academicPdfAssembler.js";
 import { makeJobId, getJob } from "../core/jobStore.js";
 import { enqueueGenerationJob } from "../core/generationQueue.js";
+import { ensureJobAccess } from "../core/jobAccess.js";
 import { consumePaymentForGeneration, verifyPaidPaymentForRequest } from "../core/flexpayPayments.js";
 import { rememberGeneratedDocument } from "../core/generatedDocumentTracker.js";
 
@@ -124,6 +125,7 @@ async function getMemoireJob(req, res) {
   const id = String(req.params.id || "");
   const j = await getJob(id, { namespace: JOB_NAMESPACE });
   if (!j) return res.status(404).json({ error: "JOB_NOT_FOUND" });
+  if (!ensureJobAccess(req, res, j)) return;
   return res.json({
     jobId: id,
     status: j.status,
@@ -138,6 +140,7 @@ async function getMemoireJobResult(req, res) {
   const id = String(req.params.id || "");
   const j = await getJob(id, { namespace: JOB_NAMESPACE });
   if (!j) return res.status(404).json({ error: "JOB_NOT_FOUND" });
+  if (!ensureJobAccess(req, res, j)) return;
   if (j.status !== "done") {
     return res.status(409).json({ error: "JOB_NOT_READY", status: j.status, details: j.error || null });
   }
@@ -165,6 +168,8 @@ async function generateMemoire(req, res) {
       namespace: JOB_NAMESPACE,
       ttlMs: JOB_TTL_MS,
       meta: { documentType: "licence_memoire" },
+      processor: "memoire",
+      payload: { title, lang, ctx },
       task: async () => {
         const { plan, sections, sourcesUsed } = await generateLicenceMemoire({ lang, ctx });
         const nextCtx = {
