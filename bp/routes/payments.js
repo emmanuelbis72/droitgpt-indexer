@@ -6,6 +6,7 @@ import {
   handleFlexPayCallback,
   initiateMobileMoneyPayment,
   paymentErrorResponse,
+  recoverPaymentByPhone,
 } from "../core/flexpayPayments.js";
 
 const router = express.Router();
@@ -44,6 +45,9 @@ router.post("/mobile-money", async (req, res) => {
       phone: req.body?.phone,
       customerName: req.body?.customerName,
       customerEmail: req.body?.customerEmail,
+      userEmail: req.headers?.["x-user-email"],
+      userId: req.headers?.["x-user-id"],
+      userKey: req.headers?.["x-generation-user"] || req.headers?.["x-droitgpt-user"],
     });
 
     return res.status(202).json({
@@ -53,6 +57,30 @@ router.post("/mobile-money", async (req, res) => {
     });
   } catch (error) {
     console.error("[PAYMENTS] mobile money init failed", String(error?.message || error));
+    const out = paymentErrorResponse(error);
+    return res.status(out.statusCode).json(out.body);
+  }
+});
+
+router.post("/recover", async (req, res) => {
+  try {
+    const payment = await recoverPaymentByPhone({
+      documentType: req.body?.documentType,
+      phone: req.body?.phone,
+      userEmail: req.headers?.["x-user-email"],
+      userId: req.headers?.["x-user-id"],
+      userKey: req.headers?.["x-generation-user"] || req.headers?.["x-droitgpt-user"],
+    });
+    if (!payment) {
+      return res.status(404).json({
+        ok: false,
+        error: "PAYMENT_RECOVERY_NOT_FOUND",
+        details: "Aucun paiement confirmé et récupérable n'a été trouvé avec ce numéro.",
+      });
+    }
+    return res.json({ ok: true, payment });
+  } catch (error) {
+    console.error("[PAYMENTS] recovery failed", String(error?.message || error));
     const out = paymentErrorResponse(error);
     return res.status(out.statusCode).json(out.body);
   }

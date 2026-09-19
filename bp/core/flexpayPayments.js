@@ -43,6 +43,7 @@ const DOCUMENTS = {
 
 let qdrantInitPromise = null;
 let qdrantDisabled = false;
+const PAYMENT_MEM = new Map();
 
 function envBool(name, fallback = false) {
   const value = process.env[name];
@@ -295,6 +296,24 @@ function publicPayment(record) {
   };
 }
 
+function paymentRecoverySort(a, b) {
+  return String(b?.updatedAt || b?.paidAt || b?.createdAt || "").localeCompare(
+    String(a?.updatedAt || a?.paidAt || a?.createdAt || "")
+  );
+}
+
+function paymentOwnerMatches(record = {}, input = {}) {
+  const savedUserKey = clean(record.userKey, 260);
+  const requestUserKey = clean(input.userKey, 260);
+  if (savedUserKey.startsWith("user:")) return savedUserKey === requestUserKey;
+
+  const savedEmail = clean(record.userEmail || record.customerEmail, 260).toLowerCase();
+  const requestEmail = clean(input.userEmail || input.customerEmail, 260).toLowerCase();
+  if (savedEmail && requestEmail) return savedEmail === requestEmail;
+
+  return true;
+}
+
 async function flexFetchJson(url, options = {}) {
   const timeoutMs = Math.max(5000, Number(process.env.FLEXPAY_TIMEOUT_MS || 20000));
   const controller = new AbortController();
@@ -432,6 +451,30 @@ async function qdrantGetPayment(orderNumber) {
   return json?.result?.[0]?.payload?.record || null;
 }
 
+async function qdrantScrollPayments(limit = 1000) {
+  if (!(await ensureQdrantPaymentsCollection())) return [];
+  const out = [];
+  let offset = null;
+  while (out.length < limit) {
+    const response = await qdrantFetch(`/collections/${encodeURIComponent(QDRANT_PAYMENT_COLLECTION)}/points/scroll`, {
+      method: "POST",
+      body: JSON.stringify({
+        limit: Math.min(256, limit - out.length),
+        with_payload: true,
+        with_vector: false,
+        ...(offset ? { offset } : {}),
+      }),
+    });
+    if (!response.ok) await throwQdrantError(response, "Qdrant payment scroll failed");
+    const json = await response.json();
+    const points = Array.isArray(json?.result?.points) ? json.result.points : [];
+    out.push(...points);
+    offset = json?.result?.next_page_offset || null;
+    if (!offset || !points.length) break;
+  }
+  return out.map((point) => point?.payload?.record).filter(Boolean);
+}
+
 async function qdrantSavePayment(record) {
   if (!record?.orderNumber || !(await ensureQdrantPaymentsCollection())) return false;
   const response = await qdrantFetch(`/collections/${encodeURIComponent(QDRANT_PAYMENT_COLLECTION)}/points?wait=true`, {
@@ -469,6 +512,7 @@ async function getStoredPayment(orderNumber) {
 
 async function savePayment(record) {
   const next = { ...record, updatedAt: nowIso() };
+  if (next.orderNumber) PAYMENT_MEM.set(next.orderNumber, next);
   if (isQdrantConfigured()) {
     try {
       const saved = await qdrantSavePayment(next);
@@ -546,6 +590,11 @@ export async function initiateMobileMoneyPayment(input = {}) {
     reference,
     documentType,
     phone,
+    customerName: clean(input.customerName, 160),
+    customerEmail: clean(input.customerEmail, 260).toLowerCase(),
+    userEmail: clean(input.userEmail, 260).toLowerCase(),
+    userId: clean(input.userId, 160),
+    userKey: clean(input.userKey, 260),
     amount: price.amount,
     currency: price.currency,
     provider: "flexpay",
@@ -557,6 +606,59 @@ export async function initiateMobileMoneyPayment(input = {}) {
   });
 
   return publicPayment(record);
+}
+
+async function findStoredPaymentRecords({ phone, documentType, limit = 1500 } = {}) {
+  const normalizedType = normalizeDocumentType(documentType);
+  const rows = [...PAYMENT_MEM.values()];
+  if (isQdrantConfigured()) {
+    try {
+      rows.push(...(await qdrantScrollPayments(Math.max(100, Math.min(5000, Number(limit) || 1500)))));
+    } catch (error) {
+      console.warn("[PAYMENTS] payment recovery qdrant scan failed:", String(error?.message || error));
+    }
+  }
+
+  const seen = new Set();
+  return rows
+    .filter((record) => {
+      if (!record?.orderNumber || seen.has(record.orderNumber)) return false;
+      seen.add(record.orderNumber);
+      if (phone && record.phone !== phone) return false;
+      if (normalizedType && normalizeDocumentType(record.documentType) !== normalizedType) return false;
+      return true;
+    })
+    .sort(paymentRecoverySort);
+}
+
+export async function recoverPaymentByPhone(input = {}) {
+  assertFlexPayReady();
+
+  const phone = normalizePhone(input.phone);
+  const documentType = normalizeDocumentType(input.documentType);
+  if (!documentType) {
+    throw Object.assign(new Error("INVALID_DOCUMENT_TYPE"), { statusCode: 400 });
+  }
+
+  const candidates = await findStoredPaymentRecords({
+    phone,
+    documentType,
+    limit: input.limit || process.env.FLEXPAY_RECOVERY_SCAN_LIMIT || 1500,
+  });
+
+  for (const candidate of candidates.slice(0, 25)) {
+    await getPaymentStatus(candidate.orderNumber).catch(() => null);
+    const fullPayment = (await getStoredPayment(candidate.orderNumber)) || candidate;
+    const paymentType = normalizeDocumentType(fullPayment.documentType);
+    if (!paymentOwnerMatches(fullPayment, input)) continue;
+    if (paymentType !== documentType || fullPayment.phone !== phone || fullPayment.status !== "paid") continue;
+    const relatedJobExists = fullPayment.consumedAt ? await consumedJobExists(fullPayment) : false;
+    if (!fullPayment.consumedAt || !relatedJobExists) {
+      return publicPayment(fullPayment);
+    }
+  }
+
+  return null;
 }
 
 export async function refreshPaymentStatus(orderNumber) {
