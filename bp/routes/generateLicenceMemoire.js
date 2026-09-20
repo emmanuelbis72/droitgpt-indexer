@@ -76,7 +76,13 @@ async function extractOptionalDraftText(req) {
   let draftText = "";
   if (req.file) draftText = await extractDraftText(req.file);
   else draftText = String(req.body?.draftText || req.body?.text || "").trim();
-  return truncateText(draftText, Number(process.env.MEMOIRE_DRAFT_MAX_CHARS || 60000));
+  const truncated = truncateText(draftText, Number(process.env.MEMOIRE_DRAFT_MAX_CHARS || 60000));
+  if (req.file && !truncated) {
+    const err = new Error("BROUILLON_VIDE: Le fichier importe ne contient pas de texte extractible. Utilise un DOCX/TXT ou un PDF non scanne.");
+    err.statusCode = 400;
+    throw err;
+  }
+  return truncated;
 }
 
 function normalizeOutput(value) {
@@ -293,7 +299,7 @@ async function generateMemoire(req, res) {
     return writeMemoireJobResult(req, res, doneJob?.result);
   } catch (e) {
     console.error("/generate-memoire error:", e);
-    return res.status(500).json({ error: "Erreur serveur", details: String(e?.message || e) });
+    return res.status(e?.statusCode || 500).json({ error: "Erreur serveur", details: String(e?.message || e) });
   }
 }
 

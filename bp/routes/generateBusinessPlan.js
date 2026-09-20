@@ -290,6 +290,12 @@ router.post("/premium", upload.single("file"), async (req, res) => {
       draftText = String(b.draftText || b.text || "").trim();
     }
     draftText = truncateText(draftText, Number(process.env.BP_DRAFT_MAX_CHARS || 45000)).trim();
+    if (req.file && !draftText) {
+      return res.status(400).json({
+        error: "BROUILLON_VIDE",
+        details: "Le fichier importe ne contient pas de texte extractible. Utilise un DOCX/TXT ou un PDF non scanne.",
+      });
+    }
 
     const ctx = {
       companyName: safeStr(b.companyName || "Projet", 120),
