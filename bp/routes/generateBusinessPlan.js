@@ -265,7 +265,7 @@ router.get("/premium", (_req, res) => {
  *   test: true (retour instantané)
  * }
  */
-router.post("/premium", async (req, res) => {
+router.post("/premium", upload.single("file"), async (req, res) => {
   try {
     const b = req.body || {};
 
@@ -282,6 +282,14 @@ router.post("/premium", async (req, res) => {
     }
 
     const lang = normalizeLang(b.lang || process.env.BP_LANG_DEFAULT || "fr");
+
+    let draftText = "";
+    if (req.file) {
+      draftText = await extractDraftTextFromUpload(req.file);
+    } else {
+      draftText = String(b.draftText || b.text || "").trim();
+    }
+    draftText = truncateText(draftText, Number(process.env.BP_DRAFT_MAX_CHARS || 45000)).trim();
 
     const ctx = {
       companyName: safeStr(b.companyName || "Projet", 120),
@@ -302,6 +310,10 @@ router.post("/premium", async (req, res) => {
 
       finAssumptions: safeStr(b.finAssumptions, 3500),
       fundingAsk: safeStr(b.fundingAsk, 2500),
+
+      draftText,
+      draftFileName: safeStr(req.file?.originalname || b.draftFileName || "", 160),
+      rewriteNotes: safeStr(b.notes || b.rewriteNotes || "", 2500),
     };
 
     const title =
@@ -343,7 +355,7 @@ router.post("/premium", async (req, res) => {
       title,
       fileName: `${safeFilenameBase(ctx.companyName || "business-plan")}.${resultFormat === "doc" ? "doc" : "pdf"}`,
       paymentOrderNumber: paymentCheck.orderNumber,
-      regenerationBody: { ...b, output, lite },
+      regenerationBody: { ...b, output, lite, draftText: draftText || undefined },
       regeneratePath: "/generate-business-plan/premium?async=1",
       statusPath: `/generate-business-plan/premium/jobs/${jobId}`,
       resultPath: `/generate-business-plan/premium/jobs/${jobId}/result${resultFormat === "doc" ? "?format=doc" : ""}`,

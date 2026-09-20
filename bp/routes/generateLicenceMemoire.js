@@ -4,6 +4,7 @@ import mammoth from "mammoth";
 
 import { generateLicenceMemoire, reviseLicenceMemoireFromDraft } from "../core/academicOrchestrator.js";
 import { writeLicenceMemoirePdf } from "../core/academicPdfAssembler.js";
+import { writeLicenceMemoireWord } from "../core/academicWordAssembler.js";
 import { makeJobId, getJob } from "../core/jobStore.js";
 import { enqueueGenerationJob } from "../core/generationQueue.js";
 import { ensureJobAccess } from "../core/jobAccess.js";
@@ -34,28 +35,81 @@ async function extractDraftText(file) {
   }
 
   if (name.endsWith(".pdf") || mime === "application/pdf") {
-    const extractUrl = process.env.ANALYSE_PDF_EXTRACT_URL;
-    if (!extractUrl) {
-      throw new Error(
-        "Import PDF non active. Configure ANALYSE_PDF_EXTRACT_URL (service d'extraction) ou utilise un DOCX."
-      );
+    try {
+      const mod = await import("pdf-parse");
+      const pdfParse = mod.default || mod;
+      const data = await pdfParse(file.buffer);
+      return String(data?.text || "").trim();
+    } catch (localError) {
+      const extractUrl = process.env.ANALYSE_PDF_EXTRACT_URL;
+      if (!extractUrl) {
+        throw new Error(
+          `Extraction PDF echouee: ${String(localError?.message || localError)}. Utilise un DOCX/TXT si le PDF est scanne.`
+        );
+      }
+
+      const fd = new FormData();
+      fd.append("file", new Blob([file.buffer], { type: "application/pdf" }), file.originalname || "draft.pdf");
+
+      const resp = await fetch(extractUrl, { method: "POST", body: fd });
+      if (!resp.ok) {
+        const t = await resp.text().catch(() => "");
+        throw new Error(`Extraction PDF echouee: ${resp.status} ${t.slice(0, 200)}`);
+      }
+
+      const j = await resp.json();
+      const txt = j?.text || j?.content || "";
+      return String(txt || "").trim();
     }
-
-    const fd = new FormData();
-    fd.append("file", new Blob([file.buffer], { type: "application/pdf" }), file.originalname || "draft.pdf");
-
-    const resp = await fetch(extractUrl, { method: "POST", body: fd });
-    if (!resp.ok) {
-      const t = await resp.text().catch(() => "");
-      throw new Error(`Extraction PDF echouee: ${resp.status} ${t.slice(0, 200)}`);
-    }
-
-    const j = await resp.json();
-    const txt = j?.text || j?.content || "";
-    return String(txt || "").trim();
   }
 
   throw new Error("Format de brouillon non supporte. Utilise .docx ou .txt (PDF seulement si ANALYSE_PDF_EXTRACT_URL est configure). ");
+}
+
+function truncateText(value, maxChars) {
+  const text = String(value || "").replace(/\u0000/g, "").trim();
+  if (text.length <= maxChars) return text;
+  return `${text.slice(0, maxChars)}\n\n[...TRONQUE: ${text.length - maxChars} caracteres non inclus mot pour mot...]`;
+}
+
+async function extractOptionalDraftText(req) {
+  let draftText = "";
+  if (req.file) draftText = await extractDraftText(req.file);
+  else draftText = String(req.body?.draftText || req.body?.text || "").trim();
+  return truncateText(draftText, Number(process.env.MEMOIRE_DRAFT_MAX_CHARS || 60000));
+}
+
+function normalizeOutput(value) {
+  const text = String(value || "pdf").trim().toLowerCase();
+  if (["doc", "word", "docx"].includes(text)) return "doc";
+  if (text === "both") return "both";
+  return "pdf";
+}
+
+function normalizeResultFormat(value) {
+  const text = String(value || "pdf").trim().toLowerCase();
+  if (["doc", "word", "docx"].includes(text)) return "doc";
+  return "pdf";
+}
+
+function safeFileName(value) {
+  return String(value || "memoire")
+    .replace(/[^\w\s-]/g, "")
+    .trim()
+    .replace(/\s+/g, "_")
+    .slice(0, 80) || "memoire";
+}
+
+function isLawMemoireRequest(body = {}) {
+  const haystack = [
+    body.mode,
+    body.discipline,
+    body.field,
+    body.faculty,
+    body.department,
+    body.topic,
+  ].map((value) => String(value || "").toLowerCase()).join(" ");
+  return /droit|jurid|juris|law|legal/.test(haystack);
 }
 
 function memoireHealth(_req, res) {
@@ -64,9 +118,10 @@ function memoireHealth(_req, res) {
 
 function buildMemoireRequest(body = {}) {
   const lang = String(body.language || "fr").toLowerCase() === "en" ? "en" : "fr";
+  const output = normalizeOutput(body.output);
 
   const ctx = {
-    mode: body.mode === "droit_congolais" ? "droit_congolais" : "standard",
+    mode: body.mode === "droit_congolais" || isLawMemoireRequest(body) ? "droit_congolais" : "standard",
     citationStyle: body.citationStyle === "apa" ? "apa" : "footnotes",
     topic: String(body.topic || "").trim(),
     // ✅ Multi-disciplines: when not in congo law mode, use this to steer prompts (ex: Sociologie)
@@ -85,10 +140,12 @@ function buildMemoireRequest(body = {}) {
     lengthPagesTarget: Math.min(90, Math.max(50, Number(body.lengthPagesTarget || 55))),
     studentName: String(body.studentName || "").trim(),
     supervisorName: String(body.supervisorName || "").trim(),
+    draftText: String(body.draftText || "").trim(),
+    draftFileName: String(body.draftFileName || "").trim(),
   };
 
   const title = lang === "en" ? `${ctx.topic || "Bachelor Dissertation"}` : `${ctx.topic || "Memoire de licence"}`;
-  return { lang, ctx, title };
+  return { lang, ctx, title, output };
 }
 
 function setMemoireSourcesHeader(res, result) {
@@ -107,11 +164,21 @@ function setMemoireSourcesHeader(res, result) {
   }
 }
 
-function writeMemoireJobPdf(res, result) {
+function writeMemoireJobResult(req, res, result) {
   if (!result?.sections || !result?.ctx || !result?.title) {
     return res.status(500).json({ error: "JOB_RESULT_MISSING" });
   }
   setMemoireSourcesHeader(res, result);
+  const format = normalizeResultFormat(req.query?.format || req.query?.output || result.output || "pdf");
+  if (format === "doc") {
+    return writeLicenceMemoireWord({
+      res,
+      title: result.title,
+      ctx: result.ctx,
+      plan: result.plan,
+      sections: result.sections,
+    });
+  }
   return writeLicenceMemoirePdf({
     res,
     title: result.title,
@@ -144,7 +211,7 @@ async function getMemoireJobResult(req, res) {
   if (j.status !== "done") {
     return res.status(409).json({ error: "JOB_NOT_READY", status: j.status, details: j.error || null });
   }
-  return writeMemoireJobPdf(res, j.result);
+  return writeMemoireJobResult(req, res, j.result);
 }
 
 async function generateMemoire(req, res) {
@@ -153,7 +220,13 @@ async function generateMemoire(req, res) {
 
   try {
     const wantAsync = String(req.query?.async || "") === "1";
-    const { lang, ctx, title } = buildMemoireRequest(req.body || {});
+    const draftText = await extractOptionalDraftText(req);
+    const { lang, ctx, title, output } = buildMemoireRequest({
+      ...(req.body || {}),
+      draftText,
+      draftFileName: req.file?.originalname || "",
+    });
+    const resultFormat = normalizeResultFormat(output);
 
     const paymentCheck = await verifyPaidPaymentForRequest(req, "memoire");
     if (!paymentCheck.ok) {
@@ -169,14 +242,14 @@ async function generateMemoire(req, res) {
       ttlMs: JOB_TTL_MS,
       meta: { documentType: "licence_memoire" },
       processor: "memoire",
-      payload: { title, lang, ctx },
+      payload: { title, lang, ctx, output },
       task: async () => {
         const { plan, sections, sourcesUsed } = await generateLicenceMemoire({ lang, ctx });
         const nextCtx = {
           ...ctx,
           sourcesUsed: Array.isArray(sourcesUsed) ? sourcesUsed : [],
         };
-        return { title, lang, ctx: nextCtx, plan, sections, sourcesUsed: nextCtx.sourcesUsed };
+        return { title, lang, ctx: nextCtx, output, plan, sections, sourcesUsed: nextCtx.sourcesUsed };
       },
     });
 
@@ -193,14 +266,14 @@ async function generateMemoire(req, res) {
       documentType: "memoire",
       label: "Memoire",
       title,
-      fileName: "memoire-licence.pdf",
+      fileName: `${safeFileName(title)}.${resultFormat === "doc" ? "doc" : "pdf"}`,
       paymentOrderNumber: paymentCheck.orderNumber,
-      regenerationBody: req.body || {},
+      regenerationBody: { ...(req.body || {}), output, draftText: draftText || undefined },
       regeneratePath: "/generate-academic/licence-memoire?async=1",
       statusPath: `/generate-academic/licence-memoire/jobs/${jobId}`,
-      resultPath: `/generate-academic/licence-memoire/jobs/${jobId}/result`,
+      resultPath: `/generate-academic/licence-memoire/jobs/${jobId}/result${resultFormat === "doc" ? "?format=doc" : ""}`,
       statusTemplate: "/generate-academic/licence-memoire/jobs/{jobId}",
-      resultTemplate: "/generate-academic/licence-memoire/jobs/{jobId}/result",
+      resultTemplate: `/generate-academic/licence-memoire/jobs/{jobId}/result${resultFormat === "doc" ? "?format=doc" : ""}`,
     });
 
     if (wantAsync) {
@@ -217,7 +290,7 @@ async function generateMemoire(req, res) {
     }
 
     const doneJob = await queued.completion;
-    return writeMemoireJobPdf(res, doneJob?.result);
+    return writeMemoireJobResult(req, res, doneJob?.result);
   } catch (e) {
     console.error("/generate-memoire error:", e);
     return res.status(500).json({ error: "Erreur serveur", details: String(e?.message || e) });
@@ -268,7 +341,7 @@ async function reviseMemoire(req, res) {
 router.get(["/", "/licence-memoire"], memoireHealth);
 router.get(["/jobs/:id", "/licence-memoire/jobs/:id"], getMemoireJob);
 router.get(["/jobs/:id/result", "/licence-memoire/jobs/:id/result"], getMemoireJobResult);
-router.post(["/", "/licence-memoire"], generateMemoire);
+router.post(["/", "/licence-memoire"], upload.single("file"), generateMemoire);
 router.options(["/revise", "/licence-memoire/revise"], (_req, res) => res.sendStatus(204));
 router.post(["/revise", "/licence-memoire/revise"], upload.single("file"), reviseMemoire);
 

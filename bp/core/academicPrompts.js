@@ -41,6 +41,58 @@ function lengthTarget(ctx = {}) {
   return 55; // default: >=50 and faster than 70
 }
 
+function buildDraftDigest(raw, maxChars) {
+  const text = String(raw || "");
+  if (!text.trim()) return { text: "", omittedChars: 0 };
+  if (text.length <= maxChars) return { text, omittedChars: 0 };
+
+  const firstLen = Math.floor(maxChars * 0.45);
+  const middleLen = Math.floor(maxChars * 0.2);
+  const lastLen = Math.max(1200, maxChars - firstLen - middleLen);
+  const midStart = Math.max(firstLen, Math.floor((text.length - middleLen) / 2));
+  const lastStart = Math.max(0, text.length - lastLen);
+
+  const digest = [
+    text.slice(0, firstLen),
+    "\n\n[...EXTRAIT CENTRAL DU BROUILLON...]\n\n",
+    text.slice(midStart, midStart + middleLen),
+    "\n\n[...FIN DU BROUILLON...]\n\n",
+    text.slice(lastStart),
+  ].join("").slice(0, maxChars + 240);
+
+  return { text: digest, omittedChars: Math.max(0, text.length - digest.length) };
+}
+
+function draftContextBlock(lang = "fr", ctx = {}) {
+  const raw = String(ctx.draftText || "").trim();
+  if (!raw) return "";
+  const isEN = String(lang).toLowerCase() === "en";
+  const maxChars = Math.max(10000, Number(process.env.MEMOIRE_DRAFT_CONTEXT_MAX_CHARS || 60000));
+  const { text, omittedChars } = buildDraftDigest(raw, maxChars);
+  const sourceName = String(ctx.draftFileName || "").trim();
+  const coverage = omittedChars > 0
+    ? isEN
+      ? `\nThe uploaded draft has ${raw.length} characters. The prompt includes representative beginning, middle and end extracts; ${omittedChars} characters are not included verbatim. Clearly state if some parts could not be exploited.\n`
+      : `\nLe brouillon uploadé contient ${raw.length} caractères. Le prompt inclut des extraits représentatifs du début, du milieu et de la fin ; ${omittedChars} caractères ne sont pas inclus mot pour mot. Signale clairement si certaines parties n'ont pas pu être exploitées.\n`
+    : "";
+
+  return isEN
+    ? `
+
+UPLOADED DRAFT ${sourceName ? `(${sourceName})` : ""}:
+Use this draft as a primary factual source. Improve, restructure and complete it, but do not invent references, statistics, laws or authors.
+${coverage}
+"""${text}"""
+`
+    : `
+
+BROUILLON UPLOADÉ ${sourceName ? `(${sourceName})` : ""} :
+Utilise ce brouillon comme source factuelle principale. Améliore, restructure et complète, mais n'invente pas de références, chiffres, lois ou auteurs.
+${coverage}
+"""${text}"""
+`;
+}
+
 export function academicSystemPrompt(lang = "fr", ctx = {}) {
   const isEN = String(lang).toLowerCase() === "en";
   const discipline = normalizeDiscipline(ctx) || (isEN ? "the requested discipline" : "la discipline demandée");
@@ -114,6 +166,7 @@ export function buildMemoirePlanPrompt({ lang = "fr", ctx = {} }) {
   const baseRules = isEN
     ? `Create a detailed dissertation plan for: "${topic}".
 Discipline: ${discipline}.
+${draftContextBlock(lang, ctx)}
 
 Format rules:
 - No Markdown headings.
@@ -125,6 +178,7 @@ The plan must be suitable for ~${pages} pages.
 Return plain text (no JSON).`
     : `Élabore un plan détaillé de mémoire pour : "${topic}".
 Discipline : ${discipline}.
+${draftContextBlock(lang, ctx)}
 
 Règles de forme :
 - Pas de titres en Markdown.
@@ -207,6 +261,7 @@ export function buildMemoireSectionPrompt({ lang = "fr", ctx = {}, sectionTitle,
   const planHint = ctx.plan
     ? `\n\nPlan (reference):\n${ctx.plan}\n`
     : "";
+  const draftBlock = draftContextBlock(lang, ctx);
 
   const marker = String(endMarker || "").trim();
 
@@ -236,7 +291,7 @@ Context:
 - Problem statement: ${ps}
 - Objectives: ${obj}
 - Methodology: ${meth}
-${planHint}${sourcesBlock}
+${planHint}${draftBlock}${sourcesBlock}
 
 Length:
 - ${wordsHint}
@@ -265,7 +320,7 @@ Contexte :
 - Problématique : ${ps}
 - Objectifs : ${obj}
 - Méthodologie : ${meth}
-${planHint}${sourcesBlock}
+${planHint}${draftBlock}${sourcesBlock}
 
 Longueur :
 - ${wordsHint}
