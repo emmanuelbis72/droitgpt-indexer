@@ -1,6 +1,10 @@
 // bp/core/ngoPdfAssembler.js
 import PDFDocument from "pdfkit";
 import { PassThrough } from "stream";
+import {
+  extractNumericFactsFromSections,
+  renderNumericIllustrationsPdf,
+} from "./numericIllustrations.js";
 
 export async function buildNgoProjectPdfBufferPremium({ title, ctx, sections }) {
   return new Promise((resolve, reject) => {
@@ -970,6 +974,23 @@ function renderNgoProjectPdf(doc, { title, ctx, sections }) {
     toc.push({ title: secTitle, pageIndex: startPageIndex, page: startPageIndex + 1 });
 
     renderSection(doc, secTitle, s, styles);
+  }
+
+  const numericFacts = extractNumericFactsFromSections(safeSections, { limit: 10 });
+  if (numericFacts.length) {
+    doc.addPage();
+    const startPageIndex = getCurrentPageIndex(doc);
+    toc.push({
+      title: "Synthèse chiffrée et illustrations",
+      pageIndex: startPageIndex,
+      page: startPageIndex + 1,
+    });
+    renderNumericIllustrationsPdf(doc, numericFacts, {
+      title: "Synthèse chiffrée et illustrations",
+      font: "Helvetica",
+      boldFont: "Helvetica-Bold",
+      accent: "#0f766e",
+    });
   }
 
   const cleanup = removeBlankPages(doc, __pageHasBody, [0, tocPageIndex]);

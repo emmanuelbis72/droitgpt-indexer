@@ -11,6 +11,10 @@ import { ensureJobAccess } from "../core/jobAccess.js";
 import { consumePaymentForGeneration, verifyPaidPaymentForRequest } from "../core/flexpayPayments.js";
 import { rememberGeneratedDocument } from "../core/generatedDocumentTracker.js";
 import {
+  buildNumericIllustrationHtml,
+  extractNumericFactsFromSections,
+} from "../core/numericIllustrations.js";
+import {
   normalizeLang,
   normalizeDocType,
   normalizeAudience,
@@ -131,6 +135,7 @@ function sectionText(section) {
 }
 
 function buildBusinessPlanWordHtml({ title, ctx, sections }) {
+  const numericFacts = extractNumericFactsFromSections(sections, { limit: 10 });
   const rows = [
     ["Entreprise", ctx?.companyName],
     ["Pays", ctx?.country],
@@ -171,12 +176,20 @@ function buildBusinessPlanWordHtml({ title, ctx, sections }) {
     th { width: 150px; background: #ecfdf5; color: #064e3b; }
     p { margin: 10px 0; }
     .note { color: #64748b; font-size: 12px; margin-top: 22px; }
+    .numeric-chart { margin: 14px 0 24px; }
+    .numeric-bar-row { display: table; width: 100%; margin: 7px 0; }
+    .numeric-bar-label, .numeric-bar-track, .numeric-bar-value { display: table-cell; vertical-align: middle; }
+    .numeric-bar-label { width: 24%; font-size: 11px; color: #334155; }
+    .numeric-bar-track { width: 56%; height: 12px; background: #e5e7eb; border-radius: 8px; overflow: hidden; }
+    .numeric-bar-fill { height: 12px; background: #059669; border-radius: 8px; }
+    .numeric-bar-value { width: 20%; padding-left: 8px; font-size: 11px; font-weight: bold; color: #064e3b; }
   </style>
 </head>
 <body>
   <h1>${escapeHtml(title || "Business Plan")}</h1>
   <table>${metaRows}</table>
   ${body}
+  ${buildNumericIllustrationHtml(numericFacts, { title: "Synthèse chiffrée et illustrations" })}
   <p class="note">Document genere automatiquement par DroitGPT a partir des informations fournies. Verifier les chiffres avant tout depot officiel.</p>
 </body>
 </html>`;

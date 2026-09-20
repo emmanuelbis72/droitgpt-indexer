@@ -1,5 +1,9 @@
 // bp/core/grantsPdfAssembler.js
 import PDFDocument from "pdfkit";
+import {
+  extractNumericFactsFromSections,
+  renderNumericIllustrationsPdf,
+} from "./numericIllustrations.js";
 
 export function writeGrantsManagementPdf({ res, title, ctx, workspace }) {
   res.setHeader("Content-Type", "application/pdf");
@@ -59,6 +63,19 @@ function renderPdf(doc, { title, ctx, workspace }) {
   renderActions(doc, workspace?.ai_next_actions);
   renderBullets(doc, "Demarrage rapide", workspace?.quick_start?.first_3_steps);
   renderSection(doc, "Brief en une page", workspace?.quick_start?.one_screen_brief || "");
+  renderNumericIllustrationsPdf(
+    doc,
+    extractNumericFactsFromSections(
+      [{ title: "Candidature", content: JSON.stringify({ summary: s, workspace }) }],
+      { limit: 10 }
+    ),
+    {
+      title: "Synthese chiffree et illustrations",
+      font: "Helvetica",
+      boldFont: "Helvetica-Bold",
+      accent: "#0f766e",
+    }
+  );
 
   renderFooter(doc);
 }

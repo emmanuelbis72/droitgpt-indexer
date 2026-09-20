@@ -1,5 +1,9 @@
 // academicPdfAssembler.js
 import PDFDocument from "pdfkit";
+import {
+  extractNumericFactsFromSections,
+  renderNumericIllustrationsPdf,
+} from "./numericIllustrations.js";
 
 /**
  * =========================================================
@@ -175,6 +179,17 @@ export function writeLicenceMemoirePdf({ res, title, ctx, plan, sections }) {
       doc.font("Times-Roman").fontSize(9);
       renderTextWithBold(doc, notesText, { align: "left" });
     }
+  }
+
+  const numericFacts = extractNumericFactsFromSections(filtered, { limit: 10 });
+  if (numericFacts.length) {
+    doc.addPage();
+    renderNumericIllustrationsPdf(doc, numericFacts, {
+      title: "SYNTHÈSE CHIFFRÉE ET ILLUSTRATIONS",
+      font: "Times-Roman",
+      boldFont: "Times-Bold",
+      accent: "#0f766e",
+    });
   }
 
   // SourcesUsed optional

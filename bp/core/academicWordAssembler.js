@@ -1,5 +1,9 @@
 // bp/core/academicWordAssembler.js
 // Word-compatible HTML export for licence memoires.
+import {
+  buildNumericIllustrationHtml,
+  extractNumericFactsFromSections,
+} from "./numericIllustrations.js";
 
 function safeText(value) {
   return String(value || "");
@@ -75,6 +79,8 @@ function sourcesHtml(ctx = {}) {
 }
 
 function buildMemoireWordHtml({ title, ctx, plan, sections }) {
+  const numericFacts = extractNumericFactsFromSections(sections, { limit: 10 });
+
   return `<!doctype html>
 <html>
 <head>
@@ -90,6 +96,13 @@ function buildMemoireWordHtml({ title, ctx, plan, sections }) {
     p { margin: 10px 0; text-align: justify; }
     .cover { text-align: center; margin-bottom: 28px; }
     .note { color: #64748b; font-size: 12px; margin-top: 24px; }
+    .numeric-chart { margin: 14px 0 24px; }
+    .numeric-bar-row { display: table; width: 100%; margin: 7px 0; }
+    .numeric-bar-label, .numeric-bar-track, .numeric-bar-value { display: table-cell; vertical-align: middle; }
+    .numeric-bar-label { width: 24%; font-size: 11px; color: #334155; }
+    .numeric-bar-track { width: 56%; height: 12px; background: #e5e7eb; border-radius: 8px; overflow: hidden; }
+    .numeric-bar-fill { height: 12px; background: #0f766e; border-radius: 8px; }
+    .numeric-bar-value { width: 20%; padding-left: 8px; font-size: 11px; font-weight: bold; color: #0f172a; }
   </style>
 </head>
 <body>
@@ -103,6 +116,7 @@ function buildMemoireWordHtml({ title, ctx, plan, sections }) {
     <p>${htmlText(plan || "—")}</p>
   </section>
   ${sectionsHtml(sections)}
+  ${buildNumericIllustrationHtml(numericFacts, { title: "SYNTHÈSE CHIFFRÉE ET ILLUSTRATIONS" })}
   ${sourcesHtml(ctx)}
   <p class="note">Document généré automatiquement par DroitGPT à partir des informations fournies. Vérifier les références, citations et données avant dépôt officiel.</p>
 </body>
