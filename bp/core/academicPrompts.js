@@ -70,6 +70,13 @@ function draftContextBlock(lang = "fr", ctx = {}) {
   const maxChars = Math.max(10000, Number(process.env.MEMOIRE_DRAFT_CONTEXT_MAX_CHARS || 60000));
   const { text, omittedChars } = buildDraftDigest(raw, maxChars);
   const sourceName = String(ctx.draftFileName || "").trim();
+  const meta = ctx.draftMeta && typeof ctx.draftMeta === "object" ? ctx.draftMeta : {};
+  const methods = Array.isArray(meta.extractionMethods) ? meta.extractionMethods.filter(Boolean).join(", ") : "";
+  const warnings = Array.isArray(meta.warnings) && meta.warnings.length ? meta.warnings.join(" | ") : "";
+  const roughKind = meta.kind || (methods.includes("ocr") ? "ocr" : methods.includes("pasted") ? "rough_text" : "");
+  const metaLine = [methods ? `Extraction: ${methods}` : "", roughKind ? `Type: ${roughKind}` : "", warnings ? `Warnings: ${warnings}` : ""]
+    .filter(Boolean)
+    .join(" | ");
   const coverage = omittedChars > 0
     ? isEN
       ? `\nThe uploaded draft has ${raw.length} characters. The prompt includes representative beginning, middle and end extracts; ${omittedChars} characters are not included verbatim. Clearly state if some parts could not be exploited.\n`
@@ -80,14 +87,16 @@ function draftContextBlock(lang = "fr", ctx = {}) {
     ? `
 
 UPLOADED DRAFT ${sourceName ? `(${sourceName})` : ""}:
-Use this draft as a primary factual source. Improve, restructure and complete it, but do not invent references, statistics, laws or authors.
+${metaLine ? `${metaLine}\n` : ""}Use this draft as a primary factual source, even if it comes from OCR, handwritten notes, or unstructured rough text. Reorganize it into a coherent academic structure. Improve and complete it, but do not invent references, statistics, laws or authors.
+If essential information is missing, insert clear placeholders like [TO COMPLETE: ...] and add a short "Additional information needed from the student" note in the relevant place.
 ${coverage}
 """${text}"""
 `
     : `
 
 BROUILLON UPLOADÉ ${sourceName ? `(${sourceName})` : ""} :
-Utilise ce brouillon comme source factuelle principale. Améliore, restructure et complète, mais n'invente pas de références, chiffres, lois ou auteurs.
+${metaLine ? `${metaLine}\n` : ""}Utilise ce brouillon comme source factuelle principale, même s'il provient d'un OCR, d'un manuscrit ou d'un texte en vrac non structuré. Réorganise-le dans une structure académique cohérente. Améliore, restructure et complète, mais n'invente pas de références, chiffres, lois ou auteurs.
+Si des informations indispensables manquent, insère des placeholders clairs comme [À COMPLÉTER : ...] et ajoute une courte note "Éléments complémentaires à fournir par l'étudiant" à l'endroit pertinent.
 ${coverage}
 """${text}"""
 `;
@@ -175,6 +184,8 @@ Format rules:
 The plan must be suitable for ~${pages} pages.
 - Keep it efficient: no redundant/filler sections.
 - Prefer fewer but stronger subsections with clear objectives.
+- If the draft is unstructured/OCR, infer a logical academic order instead of preserving the disorder.
+- If important details are missing, include explicit [TO COMPLETE: ...] placeholders.
 Return plain text (no JSON).`
     : `Élabore un plan détaillé de mémoire pour : "${topic}".
 Discipline : ${discipline}.
@@ -187,6 +198,8 @@ Règles de forme :
 Le plan doit permettre ~${pages} pages.
 - Structure efficace : pas de sections redondantes / blabla.
 - Préfère moins de sous-sections, mais solides, avec objectifs clairs.
+- Si le brouillon est en vrac/OCR, reconstruis un ordre académique logique au lieu de garder le désordre.
+- Si des informations importantes manquent, prévois des placeholders explicites [À COMPLÉTER : ...].
 Retourne du texte (pas de JSON).`;
 
   // Law plan template (classic)
@@ -306,6 +319,11 @@ Formatting rules:
 ${analysisGuidance}
 ${footnotesBlock}
 
+Draft handling:
+- If the uploaded draft is rough/OCR/unstructured, reorganize the ideas into a coherent academic argument.
+- Preserve factual elements from the draft but do not preserve disorder, repetitions or OCR noise.
+- If required information is absent, write a clear [TO COMPLETE: ...] placeholder instead of inventing.
+
 Strict ending rule:
 - End the section with the exact marker: ${marker}
 - Write NOTHING after the marker.
@@ -333,6 +351,11 @@ Règles de forme :
 ${analysisGuidance}
 ${footnotesBlock}
 
+Traitement du brouillon :
+- Si le brouillon uploadé est en vrac/OCR/non structuré, réorganise les idées dans un raisonnement académique cohérent.
+- Conserve les éléments factuels du brouillon mais ne conserve pas le désordre, les répétitions ou les erreurs OCR.
+- Si une information nécessaire manque, écris un placeholder clair [À COMPLÉTER : ...] au lieu d'inventer.
+
 Règle de fin stricte :
 - Termine la section par le marqueur exact : ${marker}
 - N'écris RIEN après le marqueur.
@@ -358,6 +381,8 @@ Context:
 TASK:
 - Correct grammar, spelling, style, and clarity.
 - Improve structure (better transitions, clear headings in **bold**), and deepen analysis.
+- If the draft is rough/OCR/unstructured, reorganize it into a coherent dissertation section; remove OCR noise and repetitions.
+- If the student must provide missing facts, add clear [TO COMPLETE: ...] placeholders.
 - Do NOT invent references, laws, cases, statistics. If you need a citation, write "(source not provided)".
 - Keep content faithful to the draft; you may reorganize for clarity.
 
@@ -379,6 +404,8 @@ Contexte :
 TÂCHE :
 - Corriger orthographe, grammaire, ponctuation, style.
 - Améliorer la structure (transitions, cohérence, titres en **gras**), enrichir par des explications et une analyse plus profonde.
+- Si le brouillon est en vrac/OCR/non structuré, le réorganiser en section cohérente de mémoire ; supprimer le bruit OCR et les répétitions.
+- Si l'étudiant doit fournir une information manquante, ajouter un placeholder clair [À COMPLÉTER : ...].
 - Ne pas inventer de références, lois, jurisprudences, chiffres. Si une source est nécessaire : écrire "(source non fournie)".
 - Rester fidèle au contenu du brouillon ; tu peux réorganiser pour clarifier.
 

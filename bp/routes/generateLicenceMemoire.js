@@ -1,10 +1,10 @@
 import express from "express";
 import multer from "multer";
-import mammoth from "mammoth";
 
 import { generateLicenceMemoire, reviseLicenceMemoireFromDraft } from "../core/academicOrchestrator.js";
 import { writeLicenceMemoirePdf } from "../core/academicPdfAssembler.js";
 import { writeLicenceMemoireWord } from "../core/academicWordAssembler.js";
+import { extractMemoireDraftFile, extractOptionalMemoireDraft } from "../core/memoireDraftExtractor.js";
 import { makeJobId, getJob } from "../core/jobStore.js";
 import { enqueueGenerationJob } from "../core/generationQueue.js";
 import { ensureJobAccess } from "../core/jobAccess.js";
@@ -19,71 +19,6 @@ const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 25 * 1024 * 1024 },
 });
-
-async function extractDraftText(file) {
-  if (!file) throw new Error("Aucun fichier brouillon recu.");
-  const name = String(file.originalname || "").toLowerCase();
-  const mime = String(file.mimetype || "").toLowerCase();
-
-  if (name.endsWith(".docx") || mime.includes("wordprocessingml")) {
-    const r = await mammoth.extractRawText({ buffer: file.buffer });
-    return String(r.value || "").trim();
-  }
-
-  if (name.endsWith(".txt") || mime.startsWith("text/")) {
-    return String(file.buffer.toString("utf-8") || "").trim();
-  }
-
-  if (name.endsWith(".pdf") || mime === "application/pdf") {
-    try {
-      const mod = await import("pdf-parse");
-      const pdfParse = mod.default || mod;
-      const data = await pdfParse(file.buffer);
-      return String(data?.text || "").trim();
-    } catch (localError) {
-      const extractUrl = process.env.ANALYSE_PDF_EXTRACT_URL;
-      if (!extractUrl) {
-        throw new Error(
-          `Extraction PDF echouee: ${String(localError?.message || localError)}. Utilise un DOCX/TXT si le PDF est scanne.`
-        );
-      }
-
-      const fd = new FormData();
-      fd.append("file", new Blob([file.buffer], { type: "application/pdf" }), file.originalname || "draft.pdf");
-
-      const resp = await fetch(extractUrl, { method: "POST", body: fd });
-      if (!resp.ok) {
-        const t = await resp.text().catch(() => "");
-        throw new Error(`Extraction PDF echouee: ${resp.status} ${t.slice(0, 200)}`);
-      }
-
-      const j = await resp.json();
-      const txt = j?.text || j?.content || "";
-      return String(txt || "").trim();
-    }
-  }
-
-  throw new Error("Format de brouillon non supporte. Utilise .docx ou .txt (PDF seulement si ANALYSE_PDF_EXTRACT_URL est configure). ");
-}
-
-function truncateText(value, maxChars) {
-  const text = String(value || "").replace(/\u0000/g, "").trim();
-  if (text.length <= maxChars) return text;
-  return `${text.slice(0, maxChars)}\n\n[...TRONQUE: ${text.length - maxChars} caracteres non inclus mot pour mot...]`;
-}
-
-async function extractOptionalDraftText(req) {
-  let draftText = "";
-  if (req.file) draftText = await extractDraftText(req.file);
-  else draftText = String(req.body?.draftText || req.body?.text || "").trim();
-  const truncated = truncateText(draftText, Number(process.env.MEMOIRE_DRAFT_MAX_CHARS || 60000));
-  if (req.file && !truncated) {
-    const err = new Error("BROUILLON_VIDE: Le fichier importe ne contient pas de texte extractible. Utilise un DOCX/TXT ou un PDF non scanne.");
-    err.statusCode = 400;
-    throw err;
-  }
-  return truncated;
-}
 
 function normalizeOutput(value) {
   const text = String(value || "pdf").trim().toLowerCase();
@@ -148,6 +83,7 @@ function buildMemoireRequest(body = {}) {
     supervisorName: String(body.supervisorName || "").trim(),
     draftText: String(body.draftText || "").trim(),
     draftFileName: String(body.draftFileName || "").trim(),
+    draftMeta: body.draftMeta && typeof body.draftMeta === "object" ? body.draftMeta : null,
   };
 
   const title = lang === "en" ? `${ctx.topic || "Bachelor Dissertation"}` : `${ctx.topic || "Memoire de licence"}`;
@@ -226,11 +162,13 @@ async function generateMemoire(req, res) {
 
   try {
     const wantAsync = String(req.query?.async || "") === "1";
-    const draftText = await extractOptionalDraftText(req);
+    const draft = await extractOptionalMemoireDraft(req);
+    const draftText = draft.text;
     const { lang, ctx, title, output } = buildMemoireRequest({
       ...(req.body || {}),
       draftText,
       draftFileName: req.file?.originalname || "",
+      draftMeta: draft.meta,
     });
     const resultFormat = normalizeResultFormat(output);
 
@@ -274,7 +212,7 @@ async function generateMemoire(req, res) {
       title,
       fileName: `${safeFileName(title)}.${resultFormat === "doc" ? "doc" : "pdf"}`,
       paymentOrderNumber: paymentCheck.orderNumber,
-      regenerationBody: { ...(req.body || {}), output, draftText: draftText || undefined },
+      regenerationBody: { ...(req.body || {}), output, draftText: draftText || undefined, draftMeta: draft.meta },
       regeneratePath: "/generate-academic/licence-memoire?async=1",
       statusPath: `/generate-academic/licence-memoire/jobs/${jobId}`,
       resultPath: `/generate-academic/licence-memoire/jobs/${jobId}/result${resultFormat === "doc" ? "?format=doc" : ""}`,
@@ -313,7 +251,12 @@ async function reviseMemoire(req, res) {
     const title = String(b.title || b.topic || "Memoire (version corrigee)");
     const ctx = b.ctx ? (typeof b.ctx === "string" ? JSON.parse(b.ctx) : b.ctx) : {};
 
-    const draftText = await extractDraftText(req.file);
+    let draftText = "";
+    if (req.file) {
+      draftText = (await extractMemoireDraftFile(req.file)).text;
+    } else {
+      draftText = String(req.body?.draftText || req.body?.text || "").trim();
+    }
 
     const paymentCheck = await verifyPaidPaymentForRequest(req, "memoire");
     if (!paymentCheck.ok) {
